@@ -37,12 +37,6 @@
     },
     {
       "type": "panel",
-      "id": "text",
-      "name": "Text",
-      "version": ""
-    },
-    {
-      "type": "panel",
       "id": "timeseries",
       "name": "Time series",
       "version": ""
@@ -84,27 +78,6 @@
       "panels": [],
       "title": "MISC",
       "type": "row"
-    },
-    {
-      "gridPos": {
-        "h": 5,
-        "w": 12,
-        "x": 0,
-        "y": 1
-      },
-      "id": 355,
-      "options": {
-        "code": {
-          "language": "plaintext",
-          "showLineNumbers": false,
-          "showMiniMap": false
-        },
-        "content": "<div style=\"background-color: #222; padding: 15px; border-radius: 10px; color: #00FF00; font-size: 24px; font-weight: bold; box-shadow: 0px 4px 8px rgba(0, 0, 0, 0.3);\">\n  <strong>Commit Hash:</strong> <span style=\"font-size: 22px; color: #FFDD44;\">$commit</span><br/>\n  <strong>Date:</strong> <span style=\"font-size: 22px; color: #FFDD44;\">$commit_date</span>\n</div>\n",
-        "mode": "html"
-      },
-      "pluginVersion": "11.3.0-75812",
-      "title": "Latest Client Version",
-      "type": "text"
     },
     {
       "datasource": {
@@ -153,7 +126,7 @@
       "gridPos": {
         "h": 5,
         "w": 12,
-        "x": 12,
+        "x": 6,
         "y": 1
       },
       "id": 348,
@@ -194,12 +167,96 @@
       "type": "stat"
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "id": 360,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "allValues"
+          ],
+          "fields": "/.*/",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "valueSize": 15
+        },
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.3.0-75812",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "hl_software_version_info",
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Latest Client Version",
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "keepLabels": [
+              "date",
+              "commit"
+            ],
+            "mode": "rows",
+            "valueLabel": "__name__"
+          }
+        }
+      ],
+      "type": "stat"
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 6
+        "y": 9
       },
       "id": 357,
       "panels": [],
@@ -257,7 +314,7 @@
         "h": 8,
         "w": 16,
         "x": 0,
-        "y": 7
+        "y": 10
       },
       "id": 345,
       "options": {
@@ -286,7 +343,6 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "exemplar": false,
           "expr": "validator_jailed_status",
           "format": "table",
           "instant": true,
@@ -345,7 +401,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 7
+        "y": 10
       },
       "id": 349,
       "options": {
@@ -412,7 +468,7 @@
             "insertNulls": false,
             "lineInterpolation": "linear",
             "lineWidth": 1,
-            "pointSize": 5,
+            "pointSize": 1,
             "scaleDistribution": {
               "type": "linear"
             },
@@ -448,7 +504,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 15
+        "y": 18
       },
       "id": 346,
       "options": {
@@ -511,7 +567,7 @@
             "insertNulls": false,
             "lineInterpolation": "linear",
             "lineWidth": 1,
-            "pointSize": 5,
+            "pointSize": 1,
             "scaleDistribution": {
               "type": "linear"
             },
@@ -547,7 +603,7 @@
         "h": 10,
         "w": 12,
         "x": 12,
-        "y": 15
+        "y": 18
       },
       "id": 351,
       "options": {
@@ -587,7 +643,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 25
+        "y": 28
       },
       "id": 340,
       "panels": [],
@@ -623,7 +679,7 @@
             "insertNulls": false,
             "lineInterpolation": "linear",
             "lineWidth": 1,
-            "pointSize": 5,
+            "pointSize": 1,
             "scaleDistribution": {
               "type": "linear"
             },
@@ -659,7 +715,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 26
+        "y": 29
       },
       "id": 323,
       "options": {
@@ -721,7 +777,7 @@
             "insertNulls": false,
             "lineInterpolation": "linear",
             "lineWidth": 1,
-            "pointSize": 5,
+            "pointSize": 1,
             "scaleDistribution": {
               "type": "linear"
             },
@@ -757,7 +813,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 26
+        "y": 29
       },
       "id": 333,
       "options": {
@@ -887,7 +943,7 @@
             "insertNulls": false,
             "lineInterpolation": "linear",
             "lineWidth": 1,
-            "pointSize": 5,
+            "pointSize": 1,
             "scaleDistribution": {
               "type": "linear"
             },
@@ -906,7 +962,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": null
               },
               {
                 "color": "red",
@@ -921,7 +978,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 34
+        "y": 37
       },
       "id": 331,
       "options": {
@@ -962,56 +1019,16 @@
   "schemaVersion": 39,
   "tags": [],
   "templating": {
-    "list": [
-      {
-        "current": {},
-        "datasource": {
-          "type": "prometheus",
-          "uid": "${DS_PROMETHEUS}"
-        },
-        "definition": "label_values(hl_software_version_info,commit)",
-        "hide": 2,
-        "name": "commit",
-        "options": [],
-        "query": {
-          "qryType": 1,
-          "query": "label_values(hl_software_version_info,commit)",
-          "refId": "PrometheusVariableQueryEditor-VariableQuery"
-        },
-        "refresh": 1,
-        "regex": "",
-        "type": "query"
-      },
-      {
-        "current": {},
-        "datasource": {
-          "type": "prometheus",
-          "uid": "${DS_PROMETHEUS}"
-        },
-        "definition": "label_values(hl_software_version_info,date)",
-        "hide": 2,
-        "label": "Commit date",
-        "name": "commit_date",
-        "options": [],
-        "query": {
-          "qryType": 1,
-          "query": "label_values(hl_software_version_info,date)",
-          "refId": "PrometheusVariableQueryEditor-VariableQuery"
-        },
-        "refresh": 1,
-        "regex": "",
-        "type": "query"
-      }
-    ]
+    "list": []
   },
   "time": {
-    "from": "now-6h",
+    "from": "now-15m",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "utc",
-  "title": "Hyperliquid Node Operator",
-  "uid": "fdy1pi7sbc1z4e",
-  "version": 14,
+  "title": "Hyperliquid Node Operator Monitor",
+  "uid": "edy1zlt4lb4e8a",
+  "version": 7,
   "weekStart": ""
 }
