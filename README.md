@@ -1,7 +1,9 @@
 # Hyperliquid Exporter
 
 A Python script that collects and exports metrics for node operators to Prometheus. This exporter monitors various aspects of a Hyperliquid node, including block height, proposer counts, block metrics, jailed validator statuses, software version information, and more.
+A sample dashboard using these metrics can be found here: https://hyperliquid-testnet-monitor.validao.xyz/public-dashboards/ff0fbe53299b4f95bb6e9651826b26e0
 
+You can import the sample grafana.json file to create your own Grafana dashboard using these metrics.
 ## Features
 
 - **Proposer Counts**: Tracks the number of proposals made by each proposer.
