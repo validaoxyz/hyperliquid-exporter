@@ -67,6 +67,7 @@ Group=$USER
 
 [Install]
 WantedBy=multi-user.target" | sudo tee /etc/systemd/system/hyperliquid-exporter.service
+```
 
 Reload the systemd manager configuration and start the service:
 ```bash
