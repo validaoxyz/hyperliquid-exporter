@@ -15,7 +15,7 @@
       "type": "grafana",
       "id": "grafana",
       "name": "Grafana",
-      "version": "11.3.0-75812"
+      "version": "11.3.0-75826"
     },
     {
       "type": "datasource",
@@ -33,6 +33,12 @@
       "type": "panel",
       "id": "table",
       "name": "Table",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "text",
+      "name": "Text",
       "version": ""
     },
     {
@@ -76,8 +82,29 @@
       },
       "id": 356,
       "panels": [],
-      "title": "MISC",
+      "title": "CLIENT INFO",
       "type": "row"
+    },
+    {
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "id": 355,
+      "options": {
+        "code": {
+          "language": "plaintext",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        },
+        "content": "<div style=\"background-color: #222; padding: 15px; border-radius: 10px; color: #00FF00; font-size: 24px; font-weight: bold; box-shadow: 0px 4px 8px rgba(0, 0, 0, 0.3);\">\n  <strong>Commit Hash:</strong> <span style=\"font-size: 22px; color: #FFDD44;\">$commit</span><br/>\n  <strong>Date:</strong> <span style=\"font-size: 22px; color: #FFDD44;\">$commit_date</span>\n</div>\n",
+        "mode": "html"
+      },
+      "pluginVersion": "11.3.0-75826",
+      "title": "Current binary version",
+      "type": "text"
     },
     {
       "datasource": {
@@ -126,7 +153,7 @@
       "gridPos": {
         "h": 5,
         "w": 12,
-        "x": 6,
+        "x": 12,
         "y": 1
       },
       "id": 348,
@@ -147,15 +174,14 @@
         "textMode": "value",
         "wideLayout": true
       },
-      "pluginVersion": "11.3.0-75812",
+      "pluginVersion": "11.3.0-75826",
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "editorMode": "code",
-          "expr": "hl_block_height",
+          "expr": "hl_software_up_to_date",
           "format": "time_series",
           "instant": true,
           "interval": "",
@@ -163,91 +189,7 @@
           "refId": "A"
         }
       ],
-      "title": "Current Block Height",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 3,
-        "w": 24,
-        "x": 0,
-        "y": 6
-      },
-      "id": 360,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "allValues"
-          ],
-          "fields": "/.*/",
-          "values": false
-        },
-        "showPercentChange": false,
-        "text": {
-          "valueSize": 15
-        },
-        "textMode": "value",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.3.0-75812",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "editorMode": "code",
-          "expr": "hl_software_version_info",
-          "legendFormat": "__auto",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Latest Client Version",
-      "transformations": [
-        {
-          "id": "labelsToFields",
-          "options": {
-            "keepLabels": [
-              "date",
-              "commit"
-            ],
-            "mode": "rows",
-            "valueLabel": "__name__"
-          }
-        }
-      ],
+      "title": "Current binary up-to-date status",
       "type": "stat"
     },
     {
@@ -256,7 +198,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 9
+        "y": 6
       },
       "id": 357,
       "panels": [],
@@ -312,9 +254,9 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 16,
+        "w": 17,
         "x": 0,
-        "y": 10
+        "y": 7
       },
       "id": 345,
       "options": {
@@ -335,7 +277,7 @@
           }
         ]
       },
-      "pluginVersion": "11.3.0-75812",
+      "pluginVersion": "11.3.0-75826",
       "targets": [
         {
           "datasource": {
@@ -343,7 +285,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "validator_jailed_status",
+          "exemplar": false,
+          "expr": "hl_validator_jailed_status",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -398,10 +341,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 10
+        "h": 4,
+        "w": 7,
+        "x": 17,
+        "y": 7
       },
       "id": 349,
       "options": {
@@ -421,14 +364,14 @@
         "textMode": "value",
         "wideLayout": true
       },
-      "pluginVersion": "11.3.0-75812",
+      "pluginVersion": "11.3.0-75826",
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(validator_jailed_status)",
+          "expr": "sum(hl_validator_jailed_status)",
           "format": "time_series",
           "instant": true,
           "interval": "",
@@ -438,6 +381,180 @@
       ],
       "title": "Jailed Validators Count",
       "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 7,
+        "x": 17,
+        "y": 11
+      },
+      "id": 358,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.3.0-75826",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "hl_validator_count",
+          "format": "time_series",
+          "instant": false,
+          "interval": "",
+          "legendFormat": "Validator Count",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Validator Count",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "1 = jailed\n0 = not jailed",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 30,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
+      "id": 359,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.3.0-75826",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "hl_validator_jailed_status",
+          "format": "time_series",
+          "interval": "",
+          "legendFormat": "{{name}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Validator Jailings Timeseries",
+      "type": "timeseries"
     },
     {
       "datasource": {
@@ -501,10 +618,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 10,
+        "h": 11,
         "w": 12,
         "x": 0,
-        "y": 18
+        "y": 22
       },
       "id": 346,
       "options": {
@@ -519,7 +636,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "11.3.0-75812",
+      "pluginVersion": "11.3.0-75826",
       "targets": [
         {
           "datasource": {
@@ -527,7 +644,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "rate(proposer_count_total[15m])",
+          "expr": "rate(hl_proposer_count_total[15m])",
           "format": "time_series",
           "interval": "",
           "legendFormat": "{{proposer}}",
@@ -600,10 +717,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 10,
+        "h": 11,
         "w": 12,
         "x": 12,
-        "y": 18
+        "y": 22
       },
       "id": 351,
       "options": {
@@ -618,7 +735,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "11.3.0-75812",
+      "pluginVersion": "11.3.0-75826",
       "targets": [
         {
           "datasource": {
@@ -626,7 +743,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (proposer) (increase(proposer_count_total[4h]))\n/\nscalar(sum(increase(proposer_count_total[4h])))\n* 100\n",
+          "expr": "sum by (proposer) (increase(hl_proposer_count_total[4h]))\n/\nscalar(sum(increase(hl_proposer_count_total[4h])))\n* 100\n",
           "format": "time_series",
           "interval": "",
           "legendFormat": "{{proposer}}",
@@ -643,7 +760,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 28
+        "y": 33
       },
       "id": 340,
       "panels": [],
@@ -715,7 +832,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 29
+        "y": 34
       },
       "id": 323,
       "options": {
@@ -730,7 +847,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "11.3.0-75812",
+      "pluginVersion": "11.3.0-75826",
       "targets": [
         {
           "datasource": {
@@ -813,7 +930,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 29
+        "y": 34
       },
       "id": 333,
       "options": {
@@ -828,7 +945,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "11.3.0-75812",
+      "pluginVersion": "11.3.0-75826",
       "targets": [
         {
           "datasource": {
@@ -978,7 +1095,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 37
+        "y": 42
       },
       "id": 331,
       "options": {
@@ -993,7 +1110,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "11.3.0-75812",
+      "pluginVersion": "11.3.0-75826",
       "targets": [
         {
           "datasource": {
@@ -1019,16 +1136,72 @@
   "schemaVersion": 39,
   "tags": [],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "current": {},
+        "hide": 2,
+        "includeAll": false,
+        "label": "datasource",
+        "name": "DS_PROMETHEUS",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "type": "datasource"
+      },
+      {
+        "current": {},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "definition": "label_values(hl_software_version_info,commit)",
+        "description": "",
+        "hide": 2,
+        "includeAll": false,
+        "name": "commit",
+        "options": [],
+        "query": {
+          "qryType": 1,
+          "query": "label_values(hl_software_version_info,commit)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "type": "query"
+      },
+      {
+        "current": {},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "definition": "label_values(hl_software_version_info,date)",
+        "description": "",
+        "hide": 2,
+        "includeAll": false,
+        "label": "Commit date",
+        "name": "commit_date",
+        "options": [],
+        "query": {
+          "qryType": 1,
+          "query": "label_values(hl_software_version_info,date)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "type": "query"
+      }
+    ]
   },
   "time": {
-    "from": "now-15m",
+    "from": "now-6h",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "utc",
   "title": "Hyperliquid Node Operator Monitor",
-  "uid": "edy1zlt4lb4e8a",
-  "version": 7,
+  "uid": "e149ac6b-f518-406d-a112-bd57460b02e5",
+  "version": 14,
   "weekStart": ""
 }

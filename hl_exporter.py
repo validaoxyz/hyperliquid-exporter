@@ -26,7 +26,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # Prometheus metrics
 # For proposal counts: Use a single Counter with a label for the proposer address
-hl_proposer_counter = Counter('proposer_count', 'Count of proposals by proposer', ['proposer'])
+hl_proposer_counter = Counter('hl_proposer_count', 'Count of proposals by proposer', ['proposer'])
 
 # For block metrics
 hl_block_height_gauge = Gauge('hl_block_height', 'Block height from latest block time file')
