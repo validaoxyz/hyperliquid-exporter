@@ -1,0 +1,5 @@
+# Ignore .env file
+.env
+
+# Ignore hl-python-venv directory
+hl-python-venv/
