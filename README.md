@@ -19,32 +19,34 @@ You can import the sample grafana.json file to create your own Grafana dashboard
 - `python-dotenv`
 - `requests`
 
-Install the required packages using:
-
-```bash
-pip install -r requirements.txt
-```
-
 ## Setup
 
 1. **Clone the Repository** 
 ```bash
-git clone https://github.com/yourusername/hyperliquid-validator-metrics-exporter.git
-cd hyperliquid-validator-metrics-exporter
+git clone https://github.com/validaoxyz/hyperliquid-exporter.git
+cd hyperliquid-exporter
 ```
 
-2. **Configure Environment Variables**
+2. **Configure Python Environment**
+```bash
+sudo apt install python3 python3-pip python3.12-venv -y
+python3 -m venv hl-python-venv
+source hl-python-venv/bin/activate
+pip3 install -r requirements.txt
+```
+
+3. **Configure Environment Variables**
 Create a `.env` file in the project directory and configure variables:
 ```bash
 cp .env.sample .env && nano .env
 ```
 
-3. **Run the Script**
+4. **Run the Script**
 ```bash
-python hl_exporter.py
+python3 hl_exporter.py
 ```
 
-4. Optionally, set up a systemd service to manage the process
+5. Optionally, set up a systemd service to manage the process
 ```bash
 echo "[Unit]
 Description=HyperLiquid Prometheus Exporter
@@ -55,7 +57,7 @@ After=network.target
 WorkingDirectory=$HOME/hyperliquid-exporter
 
 # Command to execute the script
-ExecStart=/usr/bin/python3 $HOME/hyperliquid-exporter/hl_exporter.py
+ExecStart=$HOME/hyperliquid-exporter/hl-python/venv/bin/python3 $HOME/hyperliquid-exporter/hl_exporter.py
 
 # Restart the service if it crashes
 Restart=always
