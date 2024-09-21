@@ -26,20 +26,20 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # Prometheus metrics
 # For proposal counts: Use a single Counter with a label for the proposer address
-proposer_counter = Counter('proposer_count', 'Count of proposals by proposer', ['proposer'])
+hl_proposer_counter = Counter('proposer_count', 'Count of proposals by proposer', ['proposer'])
 
 # For block metrics
-block_height_gauge = Gauge('hl_block_height', 'Block height from latest block time file')
-apply_duration_gauge = Gauge('hl_apply_duration', 'Apply duration from latest block time file')
+hl_block_height_gauge = Gauge('hl_block_height', 'Block height from latest block time file')
+hl_apply_duration_gauge = Gauge('hl_apply_duration', 'Apply duration from latest block time file')
 
 # For jailed validators (updated to include 'name' label)
-validator_jailed_status = Gauge('validator_jailed_status', 'Jailed status of validators', ['validator', 'name'])
+hl_validator_jailed_status = Gauge('hl_validator_jailed_status', 'Jailed status of validators', ['validator', 'name'])
 
 # For total number of validators
-validator_count_gauge = Gauge('hl_validator_count', 'Total number of validators')
+hl_validator_count_gauge = Gauge('hl_validator_count', 'Total number of validators')
 
 # For software version
-software_version_info = Info('hl_software_version', 'Software version information')
+hl_software_version_info = Info('hl_software_version', 'Software version information')
 
 # Metric to indicate if software is up to date
 hl_software_up_to_date = Gauge('hl_software_up_to_date', 'Indicates if the current software is up to date (1) or not (0)')
@@ -77,7 +77,7 @@ def parse_log_line(line):
 
         if proposer:
             # Increment the proposer counter with the proposer label
-            proposer_counter.labels(proposer=proposer).inc()
+            hl_proposer_counter.labels(proposer=proposer).inc()
             logging.info(f"Proposer {proposer} counter incremented.")
     except json.JSONDecodeError:
         logging.error(f"Error decoding JSON: {line}")
@@ -146,11 +146,11 @@ def parse_block_time_line(line):
 
         # Convert block height to integer if available
         if block_height is not None:
-            block_height_gauge.set(int(block_height))  # Set block height as integer
+            hl_block_height_gauge.set(int(block_height))  # Set block height as integer
 
         # Set apply_duration if available (this should be a float)
         if apply_duration is not None:
-            apply_duration_gauge.set(float(apply_duration))
+            hl_apply_duration_gauge.set(float(apply_duration))
 
         # Print block_time and apply_duration as strings
         logging.info(f"Updated metrics: height={block_height}, block_time={block_time}, apply_duration={apply_duration}")
@@ -229,7 +229,7 @@ def update_validator_mapping():
                 new_mapping[shortened_address] = {'full_address': full_address, 'name': name}
             validator_mapping = new_mapping
             # Update the validator count metric
-            validator_count_gauge.set(len(validator_summaries))
+            hl_validator_count_gauge.set(len(validator_summaries))
             logging.info(f"Validator mapping updated. Total validators: {len(validator_summaries)}")
         except Exception as e:
             logging.error(f"Error fetching validator summaries: {e}")
@@ -260,7 +260,7 @@ def parse_consensus_log_line(line):
             full_address = mapping_entry.get('full_address', validator_short)
             name = mapping_entry.get('name', 'Unknown')
             is_jailed = 1 if validator_short in jailed_validators else 0
-            validator_jailed_status.labels(validator=full_address, name=name).set(is_jailed)
+            hl_validator_jailed_status.labels(validator=full_address, name=name).set(is_jailed)
             status_str = "jailed" if is_jailed else "not jailed"
             logging.info(f"Validator {full_address} ({name}) is {status_str}.")
     except Exception as e:
@@ -344,7 +344,7 @@ def software_version_monitor():
                 current_commit_hash = commit_hash  # Update the global variable
 
                 # Update the Prometheus Info metric with labels
-                software_version_info.info({'commit': commit_hash, 'date': date})
+                hl_software_version_info.info({'commit': commit_hash, 'date': date})
                 logging.info(f"Updated software version: commit={commit_hash}, date={date}")
             else:
                 logging.error(f"Unexpected version output format: {version_output}")
@@ -458,3 +458,4 @@ if __name__ == "__main__":
     # Keep the main thread alive
     while True:
         time.sleep(1)
+
