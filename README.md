@@ -36,6 +36,7 @@ pip3 install -r requirements.txt
 ```
 
 3. **Configure Environment Variables**
+
 Create a `.env` file in the project directory and configure variables:
 ```bash
 cp .env.sample .env && nano .env
@@ -57,7 +58,7 @@ After=network.target
 WorkingDirectory=$HOME/hyperliquid-exporter
 
 # Command to execute the script
-ExecStart=$HOME/hyperliquid-exporter/hl-python/venv/bin/python3 $HOME/hyperliquid-exporter/hl_exporter.py
+ExecStart=$HOME/hyperliquid-exporter/hl-python-venv/bin/python3 $HOME/hyperliquid-exporter/hl_exporter.py
 
 # Restart the service if it crashes
 Restart=always
