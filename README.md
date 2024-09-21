@@ -23,16 +23,16 @@ You can import the sample grafana.json file to create your own Grafana dashboard
 
 1. **Clone the Repository** 
 ```bash
-git clone https://github.com/validaoxyz/hyperliquid-exporter.git
-cd hyperliquid-exporter
+git clone https://github.com/validaoxyz/hyperliquid-exporter.git $HOME/hyperliquid-exporter
+cd $HOME/hyperliquid-exporter
 ```
 
 2. **Configure Python Environment**
 ```bash
 sudo apt install python3 python3-pip python3.12-venv -y
-python3 -m venv hl-python-venv
-source hl-python-venv/bin/activate
-pip3 install -r requirements.txt
+python3 -m venv $HOME/hyperliquid-exporter/hl-python-venv
+source $HOME/hyperliquid-exporter/hl-python-venv/bin/activate
+pip3 install -r $HOME/hyperliquid-exporter/requirements.txt
 ```
 
 3. **Configure Environment Variables**
