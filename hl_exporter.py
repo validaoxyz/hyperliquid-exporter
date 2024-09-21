@@ -17,7 +17,7 @@ if not NODE_HOME:
     NODE_HOME = os.path.expanduser('~')
 NODE_BINARY = os.getenv('NODE_BINARY')
 if not NODE_BINARY:
-    NODE_HOME = os.path.expanduser('~/hl-visor')
+    NODE_BINARY = os.path.expanduser('~/hl-visor')
 IS_VALIDATOR = os.getenv('IS_VALIDATOR', 'false').lower() == 'true'
 VALIDATOR_ADDRESS = os.getenv('VALIDATOR_ADDRESS', '')
 
