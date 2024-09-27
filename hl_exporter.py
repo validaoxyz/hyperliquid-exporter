@@ -35,6 +35,12 @@ hl_apply_duration_gauge = Gauge('hl_apply_duration', 'Apply duration from latest
 # For jailed validators (updated to include 'name' label)
 hl_validator_jailed_status = Gauge('hl_validator_jailed_status', 'Jailed status of validators', ['validator', 'name'])
 
+# For tracking stakes
+hl_validator_stake_gauge = Gauge('hl_validator_stake', 'Stake of validators', ['validator', 'name'])
+hl_total_stake_gauge = Gauge('hl_total_stake', 'Total stake across all validators')
+hl_jailed_stake_gauge = Gauge('hl_jailed_stake', 'Total stake of jailed validators')
+hl_not_jailed_stake_gauge = Gauge('hl_not_jailed_stake', 'Total stake of not jailed validators')
+
 # For total number of validators
 hl_validator_count_gauge = Gauge('hl_validator_count', 'Total number of validators')
 
@@ -221,20 +227,50 @@ def update_validator_mapping():
             response.raise_for_status()
             validator_summaries = response.json()
             new_mapping = {}
+
+            # Initialize total stake trackers
+            total_stake = 0
+            jailed_stake = 0
+            not_jailed_stake = 0
+
             for summary in validator_summaries:
                 full_address = summary['validator']
                 name = summary.get('name', 'Unknown')
                 # Create a shortened address similar to the one in the logs
                 shortened_address = f"{full_address[:6]}..{full_address[-4:]}"
                 new_mapping[shortened_address] = {'full_address': full_address, 'name': name}
+
+                # Get the stake and jailed status
+                stake = summary.get('stake', 0)
+                is_jailed = summary.get('isJailed', False)
+
+                # Update the individual validator stake gauge
+                hl_validator_stake_gauge.labels(validator=full_address, name=name).set(stake)
+
+                # Update the jailed status gauge
+                hl_validator_jailed_status.labels(validator=full_address, name=name).set(int(is_jailed))
+
+                # Accumulate stakes
+                total_stake += stake
+                if is_jailed:
+                    jailed_stake += stake
+                else:
+                    not_jailed_stake += stake
+
+            # Update the total stake gauges
+            hl_total_stake_gauge.set(total_stake)
+            hl_jailed_stake_gauge.set(jailed_stake)
+            hl_not_jailed_stake_gauge.set(not_jailed_stake)
+
             validator_mapping = new_mapping
             # Update the validator count metric
             hl_validator_count_gauge.set(len(validator_summaries))
             logging.info(f"Validator mapping updated. Total validators: {len(validator_summaries)}")
+            logging.info(f"Total stake: {total_stake}, Jailed stake: {jailed_stake}, Not jailed stake: {not_jailed_stake}")
         except Exception as e:
             logging.error(f"Error fetching validator summaries: {e}")
         # Wait for 10 minutes before next update
-        time.sleep(600)
+        time.sleep(15)
 
 
 def parse_consensus_log_line(line):
