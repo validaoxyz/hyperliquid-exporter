@@ -14,7 +14,7 @@ You can import the sample grafana.json file provided in this repository to creat
 - Prometheus server for scraping the metrics
 - (Optional) Grafana for visualizing metrics
 
-For the above last two requirements: We provide an easy-to-use prom+grafana stack with a pre-loaded dashboard here: [hyperliquid-monitor](https://github.com/validaoxyz/hyperliquid-monitor)
+For the above last two requirements: We provide an easy-to-use prom+grafana stack with a pre-loaded dashboard here: [validaoxyz/hyperliquid-monitor](https://github.com/validaoxyz/hyperliquid-monitor)
 
 ## Installation
 
