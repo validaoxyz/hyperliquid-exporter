@@ -44,7 +44,7 @@ The compiled binary will be placed in the `bin/` directory.
 
 #### Install to System Directory
 
-To install hl_exporter to `/usr/local/bin` (may require sudo):
+To install `hl_exporter` to `/usr/local/bin` (may require sudo):
 
 ```bash
 sudo make install
