@@ -2,25 +2,19 @@
 
 # Hyperliquid Exporter
 
-A Go-based exporter that collects and exposes metrics for Hyperliquid node operators to Prometheus. This exporter monitors various aspects of a Hyperliquid node, including block height, proposer counts, block metrics, jailed validator statuses, software version information, and more.
+A Go-based exporter that collects and exposes metrics for Hyperliquid node operators to Prometheus. This exporter monitors various aspects of a Hyperliquid node, including block height, proposer counts, block metrics, jailed validator statuses, software version information, stake distribution, and more.
 
-A sample dashboard using these metrics can be found here: Validao Hyperliquid Testnet Monitor
+A sample dashboard using these metrics can be found here: [ValiDAO Hyperliquid Testnet Monitor](https://hyperliquid-testnet-monitor.validao.xyz/public-dashboards/ff0fbe53299b4f95bb6e9651826b26e0)
 
 You can import the sample grafana.json file provided in this repository to create your own Grafana dashboard using these metrics.
-
-## Features
-
-- Proposer Counts: Tracks the number of proposals made by each proposer.
-- Block Metrics: Monitors block height and apply duration from the latest block time file.
-- Jailed Validator Status: Reports the jailed status of validators with full addresses and names.
-- Software Version Monitoring: Checks the current software version and whether it's up to date with the latest binary.
-- Validator Count: Exposes the total number of validators on the network.
 
 ## Requirements
 
 - Go 1.19 or higher
 - Prometheus server for scraping the metrics
 - (Optional) Grafana for visualizing metrics
+
+For the above last two requirements: We provide an easy-to-use prom+grafana stack with a pre-loaded dashboard here: [hyperliquid-monitor](https://github.com/validaoxyz/hyperliquid-monitor)
 
 ## Installation
 
@@ -34,8 +28,8 @@ You can import the sample grafana.json file provided in this repository to creat
 Clone the repository:
 
 ```bash
-git clone https://github.com/validaoxyz/hyperliquid-exporter.git
-cd hyperliquid-exporter
+git clone https://github.com/validaoxyz/hyperliquid-exporter.git $HOME/hyperliquid-exporter
+cd $HOME/hyperliquid-exporter
 ```
 
 Build the exporter:
@@ -48,27 +42,12 @@ The compiled binary will be placed in the `bin/` directory.
 
 ### Installing
 
-#### Option 1: Install to System Directory
+#### Install to System Directory
 
-To install hl_exporter to /usr/local/bin (may require sudo):
+To install hl_exporter to `/usr/local/bin` (may require sudo):
 
 ```bash
 sudo make install
-```
-
-#### Option 2: Install to User Directory
-
-To install to a directory where you have write permissions (e.g., $HOME/.local/bin):
-
-```bash
-make install INSTALL_PREFIX=$HOME/.local
-```
-
-Ensure that your local bin directory is in your PATH:
-
-```bash
-# Add to your ~/.bashrc or ~/.zshrc
-export PATH=$PATH:$HOME/.local/bin
 ```
 
 ## Configuration
@@ -98,7 +77,7 @@ VALIDATOR_ADDRESS=your_validator_address
 
 ## Running the Exporter
 
-Ensure your .env file is properly configured.
+Ensure your `.env` file is properly configured.
 
 Run the exporter:
 
@@ -112,6 +91,11 @@ Or run it directly from the bin directory:
 ```
 
 The exporter will start a Prometheus HTTP server on port `8086` and begin exposing metrics.
+
+To test it:
+```bash
+curl http://localhost:8086/metrics
+```
 
 ### Systemd Service (Optional)
 
@@ -151,7 +135,6 @@ sudo systemctl enable --now hyperliquid-exporter.service
 ```
 
 ## Metrics Exposed
-
 ```
 # HELP proposer_count_total Number of proposals made by each proposer.
 # TYPE proposer_count_total counter
@@ -183,7 +166,7 @@ hl_not_jailed_stake <value>
 
 # HELP hl_software_version_info Hyperliquid software version information.
 # TYPE hl_software_version_info gauge
-hl_software_version_info{commit="commit_hash", date="build_date"} 1.0
+hl_software_version_info{commit="commit_hash", date="build_date"} <value>
 
 # HELP hl_software_up_to_date Indicates whether the software is up to date.
 # TYPE hl_software_up_to_date gauge
