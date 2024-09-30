@@ -21,8 +21,8 @@ func main() {
     // Start Prometheus HTTP server
     go func() {
         http.Handle("/metrics", promhttp.Handler())
-        log.Println("Starting Prometheus HTTP server on port 8087")
-        log.Fatal(http.ListenAndServe(":8087", nil))
+        log.Println("Starting Prometheus HTTP server on port 8086")
+        log.Fatal(http.ListenAndServe(":8086", nil))
     }()
 
     // Start monitors
