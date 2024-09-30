@@ -15,7 +15,13 @@ build:
 
 install: build
 	@echo "Installing $(BINARY_NAME) to $(INSTALL_BIN_DIR)"
-	install -Dm0755 $(BUILD_DIR)/$(BINARY_NAME) $(INSTALL_BIN_DIR)/$(BINARY_NAME)
+	@if [ -w "$(INSTALL_BIN_DIR)" ]; then \
+		install -Dm0755 $(BUILD_DIR)/$(BINARY_NAME) $(INSTALL_BIN_DIR)/$(BINARY_NAME); \
+	else \
+		echo "Elevated permissions are required to install to $(INSTALL_BIN_DIR)"; \
+		echo "You may be prompted for your password."; \
+		sudo install -Dm0755 $(BUILD_DIR)/$(BINARY_NAME) $(INSTALL_BIN_DIR)/$(BINARY_NAME); \
+	fi
 
 clean:
 	@echo "Cleaning up..."

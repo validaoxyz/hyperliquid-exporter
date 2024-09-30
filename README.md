@@ -44,10 +44,10 @@ The compiled binary will be placed in the `bin/` directory.
 
 #### Install to System Directory
 
-To install `hl_exporter` to `/usr/local/bin` (may require sudo):
+To install `hl_exporter` to `/usr/local/bin`:
 
 ```bash
-sudo make install
+make install
 ```
 
 ## Configuration
@@ -113,7 +113,7 @@ After=network.target
 WorkingDirectory=$HOME/hyperliquid-exporter
 
 # Command to execute the script
-ExecStart=$HOME/hyperliquid-exporter/hl-python-venv/bin/python3 $HOME/hyperliquid-exporter/hl_exporter.py
+ExecStart=/usr/local/bin/hl_exporter
 
 # Restart the service if it crashes
 Restart=always
