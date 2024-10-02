@@ -101,11 +101,14 @@ func parseBlockTimeLine(line string) {
 	}
 
 	// Parse block_time to Unix timestamp
-	parsedTime, err := time.Parse(time.RFC3339Nano, blockTime)
+	parsedTime, err := time.Parse("2006-01-02T15:04:05.999", blockTime)
 	if err != nil {
 		log.Printf("Error parsing block time: %v", err)
 		return
 	}
+
+	// Convert to UTC
+	parsedTime = parsedTime.UTC()
 
 	// Update metrics
 	metrics.HLBlockHeightGauge.Set(height)
@@ -113,5 +116,5 @@ func parseBlockTimeLine(line string) {
 	metrics.HLLatestBlockTimeGauge.Set(float64(parsedTime.Unix()))
 	metrics.HLApplyDurationHistogram.Observe(applyDuration)
 
-	log.Printf("Updated metrics: height=%.0f, apply_duration=%.6f, block_time=%s", height, applyDuration, blockTime)
+	log.Printf("Updated metrics: height=%.0f, apply_duration=%.6f, block_time=%s UTC", height, applyDuration, parsedTime.Format(time.RFC3339))
 }
