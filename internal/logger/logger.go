@@ -23,11 +23,13 @@ const (
 )
 
 func init() {
-	debugLogger = log.New(os.Stdout, "DEBUG: ", log.Ldate|log.Ltime|log.Lmicroseconds)
-	infoLogger = log.New(os.Stdout, "INFO: ", log.Ldate|log.Ltime|log.Lmicroseconds)
-	warningLogger = log.New(os.Stdout, "WARNING: ", log.Ldate|log.Ltime|log.Lmicroseconds)
-	errorLogger = log.New(os.Stderr, "ERROR: ", log.Ldate|log.Ltime|log.Lmicroseconds)
-	currentLevel = DEBUG // Set default log level to DEBUG
+	flags := log.Ldate | log.Ltime | log.Lmicroseconds
+
+	debugLogger = log.New(os.Stdout, "", flags)
+	infoLogger = log.New(os.Stdout, "", flags)
+	warningLogger = log.New(os.Stdout, "", flags)
+	errorLogger = log.New(os.Stderr, "", flags)
+	currentLevel = DEBUG // Default log level
 }
 
 func SetLogLevel(level string) error {
