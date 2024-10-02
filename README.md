@@ -135,56 +135,25 @@ sudo systemctl enable --now hyperliquid-exporter.service
 ```
 
 ## Metrics Exposed
+The following metrics are exposed by the exporter:
 ```
-# HELP proposer_count_total Number of proposals made by each proposer.
-# TYPE proposer_count_total counter
-proposer_count_total{proposer="full_validator_address"} <value>
-
-# HELP hl_block_height Block height from latest block time file.
-# TYPE hl_block_height gauge
-hl_block_height <value>
-
-# HELP hl_apply_duration Apply duration from latest block time file.
-# TYPE hl_apply_duration gauge
-hl_apply_duration <value>
-
-# HELP validator_jailed_status Jailed status of validators
-# TYPE validator_jailed_status gauge
-validator_jailed_status{name="moniker",validator="full_validator_address"} <value>
-
-# HELP hl_validator_stake Stake of validators
-# TYPE hl_validator_stake gauge
-hl_validator_stake{name="",validator="full_validator_address"} <value>
-
-# HELP hl_total_stake Total stake across all validators
-# TYPE hl_total_stake gauge
-hl_total_stake <value>
-
-# HELP hl_not_jailed_stake Total stake of not jailed validators
-# TYPE hl_not_jailed_stake gauge
-hl_not_jailed_stake <value>
-
-# HELP hl_software_version_info Hyperliquid software version information.
-# TYPE hl_software_version_info gauge
-hl_software_version_info{commit="commit_hash", date="build_date"} <value>
-
-# HELP hl_software_up_to_date Indicates whether the software is up to date.
-# TYPE hl_software_up_to_date gauge
-hl_software_up_to_date <0|1>
+hl_proposer_count_total
+hl_proposer_count_created
+hl_block_height
+hl_apply_duration
+hl_validator_jailed_status
+hl_validator_stake
+hl_total_stake
+hl_jailed_stake
+hl_not_jailed_stake
+hl_validator_count
+hl_software_version_info
+hl_software_up_to_date
+hl_latest_block_time
+hl_apply_duration_seconds 
 ```
+To see an example of how to query these metrics in Grafana, see the example dashboard provided [in this repository](./grafana/README.md). To understand what these metrics mean, see the [metrics documentation](./internal/metrics/README.md).
 
-
-
-## Dashboard Visualization
-
-You can use Grafana to visualize the metrics exported by this exporter. A sample `grafana.json` dashboard configuration is provided under `grafana/`.
-
-To import the dashboard:
-
-- Open your Grafana instance.
-- Click on the Plus (+) icon on the left sidebar and select Import.
-- Upload the `grafana.json` file or paste its JSON content.
-- Select the Prometheus data source you are using to scrape the exporter.
 
 ## Customization
 
@@ -194,7 +163,7 @@ The exporter fetches validator summaries from the Hyperliquid testnet API. If ne
 
 ### Logging Level
 
-Adjust the logging level in the code if you need more or less verbosity. You can modify the log package settings in main.go or individual monitor files.
+Adjust the logging level in the code if you need more or less verbosity. You can modify the log package settings in `logger/logger.go`.
 
 ## Cleaning Up
 
@@ -226,10 +195,3 @@ We welcome contributions to enhance this exporter by adding more metrics, improv
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Acknowledgments
-
-- Prometheus Go client library
-
-- godotenv
-
