@@ -98,6 +98,12 @@ var (
 			Help: "Indicates if the current software is up to date (1) or not (0)",
 		},
 	)
+
+	// Latest block time
+	HLLatestBlockTimeGauge = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "hl_latest_block_time",
+		Help: "The timestamp of the latest block",
+	})
 )
 
 // RegisterMetrics registers all Prometheus metrics
@@ -113,4 +119,5 @@ func RegisterMetrics() {
 	prometheus.MustRegister(HLValidatorCountGauge)
 	prometheus.MustRegister(HLSoftwareVersionInfo)
 	prometheus.MustRegister(HLSoftwareUpToDate)
+	prometheus.MustRegister(HLLatestBlockTimeGauge)
 }

@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
@@ -83,53 +82,35 @@ func parseBlockTimeLine(line string) {
 		return
 	}
 
-	// Variables to hold the parsed values
-	var height float64
-	var applyDuration float64
-
-	// Extract and parse 'height'
-	if heightValue, ok := data["height"]; ok {
-		switch v := heightValue.(type) {
-		case float64:
-			height = v
-		case string:
-			height, err = strconv.ParseFloat(v, 64)
-			if err != nil {
-				log.Printf("Error parsing height value '%v' to float64: %v", v, err)
-				return
-			}
-		default:
-			log.Printf("Unexpected type for 'height': %T", v)
-			return
-		}
-	} else {
-		log.Printf("'height' key not found in data")
+	height, ok := data["height"].(float64)
+	if !ok {
+		log.Printf("Height not found or not a number")
 		return
 	}
 
-	// Extract and parse 'apply_duration'
-	if applyDurationValue, ok := data["apply_duration"]; ok {
-		switch v := applyDurationValue.(type) {
-		case float64:
-			applyDuration = v
-		case string:
-			applyDuration, err = strconv.ParseFloat(v, 64)
-			if err != nil {
-				log.Printf("Error parsing apply_duration value '%v' to float64: %v", v, err)
-				return
-			}
-		default:
-			log.Printf("Unexpected type for 'apply_duration': %T", v)
-			return
-		}
-	} else {
-		log.Printf("'apply_duration' key not found in data")
+	blockTime, ok := data["block_time"].(string)
+	if !ok {
+		log.Printf("Block time not found or not a string")
+		return
+	}
+
+	applyDuration, ok := data["apply_duration"].(float64)
+	if !ok {
+		log.Printf("Apply duration not found or not a number")
+		return
+	}
+
+	// Parse block_time to Unix timestamp
+	parsedTime, err := time.Parse(time.RFC3339Nano, blockTime)
+	if err != nil {
+		log.Printf("Error parsing block time: %v", err)
 		return
 	}
 
 	// Update metrics
 	metrics.HLBlockHeightGauge.Set(height)
 	metrics.HLApplyDurationGauge.Set(applyDuration)
+	metrics.HLLatestBlockTimeGauge.Set(float64(parsedTime.Unix()))
 
-	log.Printf("Updated metrics: height=%.0f, apply_duration=%.6f", height, applyDuration)
+	log.Printf("Updated metrics: height=%.0f, apply_duration=%.6f, block_time=%s", height, applyDuration, blockTime)
 }
