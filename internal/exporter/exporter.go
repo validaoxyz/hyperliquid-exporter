@@ -3,7 +3,6 @@ package exporter
 import (
 	"net/http"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
@@ -32,13 +31,10 @@ func Start(cfg config.Config) {
 	logger.Info("Setting up Prometheus metrics endpoint...")
 	http.Handle("/metrics", promhttp.Handler())
 
-	prometheus.MustRegister(metrics.HLBlockHeightGauge)
-	prometheus.MustRegister(metrics.HLLatestBlockTimeGauge)
-	prometheus.MustRegister(metrics.HLApplyDurationHistogram)
-	prometheus.MustRegister(metrics.HLProposerCounter)
+	metrics.RegisterMetrics()
 
-	logger.Info("Exporter is now running. Listening on :8086")
-	err := http.ListenAndServe(":8086", nil)
+	logger.Info("Exporter is now running. Listening on :8087")
+	err := http.ListenAndServe(":8087", nil)
 	if err != nil {
 		logger.Error("Error starting HTTP server: %v", err)
 	}
