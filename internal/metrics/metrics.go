@@ -104,6 +104,12 @@ var (
 		Name: "hl_latest_block_time",
 		Help: "The timestamp of the latest block",
 	})
+
+	HLApplyDurationHistogram = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "hl_apply_duration_seconds",
+		Help:    "Histogram of apply durations in seconds",
+		Buckets: prometheus.ExponentialBuckets(0.0001, 2, 15), // Starts at 0.1ms, doubles 15 times
+	})
 )
 
 // RegisterMetrics registers all Prometheus metrics
@@ -120,4 +126,5 @@ func RegisterMetrics() {
 	prometheus.MustRegister(HLSoftwareVersionInfo)
 	prometheus.MustRegister(HLSoftwareUpToDate)
 	prometheus.MustRegister(HLLatestBlockTimeGauge)
+	prometheus.MustRegister(HLApplyDurationHistogram)
 }

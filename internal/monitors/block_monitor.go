@@ -111,6 +111,7 @@ func parseBlockTimeLine(line string) {
 	metrics.HLBlockHeightGauge.Set(height)
 	metrics.HLApplyDurationGauge.Set(applyDuration)
 	metrics.HLLatestBlockTimeGauge.Set(float64(parsedTime.Unix()))
+	metrics.HLApplyDurationHistogram.Observe(applyDuration)
 
 	log.Printf("Updated metrics: height=%.0f, apply_duration=%.6f, block_time=%s", height, applyDuration, blockTime)
 }
