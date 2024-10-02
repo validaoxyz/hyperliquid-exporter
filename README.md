@@ -82,12 +82,12 @@ Ensure your `.env` file is properly configured.
 Run the exporter:
 
 ```
-hl_exporter
+hl_exporter start [options]
 ```
 Or run it directly from the bin directory:
 
 ```
-./bin/hl_exporter
+./bin/hl_exporter start [options]
 ```
 
 The exporter will start a Prometheus HTTP server on port `8086` and begin exposing metrics.
@@ -113,7 +113,7 @@ After=network.target
 WorkingDirectory=$HOME/hyperliquid-exporter
 
 # Command to execute the script
-ExecStart=/usr/local/bin/hl_exporter
+ExecStart=/usr/local/bin/hl_exporter start
 
 # Restart the service if it crashes
 Restart=always
@@ -152,7 +152,7 @@ hl_software_up_to_date
 hl_latest_block_time
 hl_apply_duration_seconds 
 ```
-To see an example of how to query these metrics in Grafana, see the example dashboard provided [in this repository](./grafana/README.md). To understand what these metrics mean, see the [metrics documentation](./internal/metrics/README.md).
+To see an example of how to query these metrics in Grafana, see the example dashboard provided [in this repository](./grafana/). To understand what these metrics mean, see the [metrics documentation](./internal/metrics/).
 
 
 ## Customization
