@@ -2,12 +2,12 @@ package monitors
 
 import (
 	"bytes"
-	"log"
 	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
+	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
@@ -29,7 +29,7 @@ func updateVersionInfo(cfg config.Config) {
 	cmd.Stdout = &out
 	err := cmd.Run()
 	if err != nil {
-		log.Printf("Error running version command: %v", err)
+		logger.Error("Error running version command: %v", err)
 		return
 	}
 
@@ -45,8 +45,8 @@ func updateVersionInfo(cfg config.Config) {
 		}
 
 		metrics.HLSoftwareVersionInfo.WithLabelValues(currentCommitHash, date).Set(1)
-		log.Printf("Updated software version: commit=%s, date=%s", currentCommitHash, date)
+		logger.Info("Updated software version: commit=%s, date=%s", currentCommitHash, date)
 	} else {
-		log.Printf("Unexpected version output format: %s", versionOutput)
+		logger.Error("Unexpected version output format: %s", versionOutput)
 	}
 }

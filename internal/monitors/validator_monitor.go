@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"time"
 
+	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
@@ -36,7 +36,7 @@ func updateValidatorMetrics() {
 
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(payload))
 	if err != nil {
-		log.Printf("Error creating request: %v", err)
+		logger.Error("Error creating request: %v", err)
 		return
 	}
 
@@ -44,21 +44,21 @@ func updateValidatorMetrics() {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("Error making request: %v", err)
+		logger.Error("Error making request: %v", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		log.Printf("Error reading response body: %v", err)
+		logger.Error("Error reading response body: %v", err)
 		return
 	}
 
 	var summaries []ValidatorSummary
 	err = json.Unmarshal(body, &summaries)
 	if err != nil {
-		log.Printf("Error parsing validator summaries: %v", err)
+		logger.Error("Error parsing validator summaries: %v", err)
 		return
 	}
 
@@ -85,6 +85,6 @@ func updateValidatorMetrics() {
 	metrics.HLNotJailedStakeGauge.Set(notJailedStake)
 	metrics.HLValidatorCountGauge.Set(float64(len(summaries)))
 
-	log.Printf("Updated validator metrics: Total validators: %d", len(summaries))
-	log.Printf("Total stake: %f, Jailed stake: %f, Not jailed stake: %f", totalStake, jailedStake, notJailedStake)
+	logger.Info("Updated validator metrics: Total validators: %d", len(summaries))
+	logger.Info("Total stake: %f, Jailed stake: %f, Not jailed stake: %f", totalStake, jailedStake, notJailedStake)
 }
