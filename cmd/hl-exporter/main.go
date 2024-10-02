@@ -1,71 +1,51 @@
 package main
 
 import (
+	"flag"
 	"fmt"
-	"log"
-	"net/http"
+	"os"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
+	"github.com/validaoxyz/hyperliquid-exporter/internal/exporter"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
-	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
-	"github.com/validaoxyz/hyperliquid-exporter/internal/monitors"
 )
 
 func main() {
+	if len(os.Args) < 2 {
+		fmt.Println("Usage: hl_exporter <command> [options]")
+		fmt.Println("Commands:")
+		fmt.Println("  start    Start the Hyperliquid exporter")
+		fmt.Println("\nOptions:")
+		fmt.Println("  --config     Path to configuration file (default: \"config.yaml\")")
+		fmt.Println("  --log-level  Set the logging level (default: \"debug\")")
+		fmt.Println("               Available levels: debug, info, warning, error")
+		os.Exit(1)
+	}
+
+	startCmd := flag.NewFlagSet("start", flag.ExitOnError)
+	configFile := startCmd.String("config", "config.yaml", "Path to configuration file")
+	logLevel := startCmd.String("log-level", "debug", "Log level (debug, info, warning, error)")
+
+	switch os.Args[1] {
+	case "start":
+		startCmd.Parse(os.Args[2:])
+	default:
+		fmt.Printf("%q is not a valid command.\n", os.Args[1])
+		os.Exit(1)
+	}
+
+	// Set log level
+	if err := logger.SetLogLevel(*logLevel); err != nil {
+		fmt.Printf("Error setting log level: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Load configuration
 	cfg := config.LoadConfig()
 
-	// Register Prometheus metrics
-	metrics.RegisterMetrics()
+	// Start the exporter
+	exporter.Start(cfg)
 
-	// Start Prometheus HTTP server
-	go func() {
-		http.Handle("/metrics", promhttp.Handler())
-		http.HandleFunc("/debug", debugHandler)
-		logger.Info("Starting Prometheus HTTP server on port 8086")
-		log.Fatal(http.ListenAndServe(":8086", nil))
-	}()
-
-	// Start monitors
-	monitors.StartProposalMonitor(cfg)
-	monitors.StartBlockMonitor(cfg)
-	monitors.StartValidatorMonitor()
-	monitors.StartVersionMonitor(cfg)
-	monitors.StartUpdateChecker()
-
-	// Keep the application running
+	// Keep the program running
 	select {}
-}
-
-func debugHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain")
-
-	// Print local counts
-	fmt.Fprintf(w, "Local Proposer Counts:\n")
-	for proposer, count := range monitors.GetProposerCounts() {
-		fmt.Fprintf(w, "%s: %d\n", proposer, count)
-	}
-
-	fmt.Fprintf(w, "\nPrometheus Metrics:\n")
-
-	// Collect and write Prometheus metrics
-	registry := prometheus.NewRegistry()
-	registry.MustRegister(metrics.HLProposerCounter)
-	registry.MustRegister(metrics.HLBlockHeightGauge)
-	registry.MustRegister(metrics.HLApplyDurationGauge)
-
-	metricFamilies, err := registry.Gather()
-	if err != nil {
-		fmt.Fprintf(w, "Error gathering metrics: %v\n", err)
-		return
-	}
-
-	for _, mf := range metricFamilies {
-		fmt.Fprintf(w, "%s\n", mf.GetName())
-		for _, m := range mf.GetMetric() {
-			fmt.Fprintf(w, "  %v\n", m)
-		}
-	}
 }

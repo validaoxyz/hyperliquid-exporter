@@ -1,8 +1,10 @@
 package logger
 
 import (
+	"fmt"
 	"log"
 	"os"
+	"strings"
 )
 
 var (
@@ -10,6 +12,14 @@ var (
 	infoLogger    *log.Logger
 	warningLogger *log.Logger
 	errorLogger   *log.Logger
+	currentLevel  int
+)
+
+const (
+	DEBUG = iota
+	INFO
+	WARNING
+	ERROR
 )
 
 func init() {
@@ -17,20 +27,45 @@ func init() {
 	infoLogger = log.New(os.Stdout, "INFO: ", log.Ldate|log.Ltime|log.Lmicroseconds)
 	warningLogger = log.New(os.Stdout, "WARNING: ", log.Ldate|log.Ltime|log.Lmicroseconds)
 	errorLogger = log.New(os.Stderr, "ERROR: ", log.Ldate|log.Ltime|log.Lmicroseconds)
+	currentLevel = DEBUG // Set default log level to DEBUG
+}
+
+func SetLogLevel(level string) error {
+	switch strings.ToLower(level) {
+	case "debug":
+		currentLevel = DEBUG
+	case "info":
+		currentLevel = INFO
+	case "warning":
+		currentLevel = WARNING
+	case "error":
+		currentLevel = ERROR
+	default:
+		return fmt.Errorf("invalid log level: %s", level)
+	}
+	return nil
 }
 
 func Debug(format string, v ...interface{}) {
-	debugLogger.Printf(format, v...)
+	if currentLevel <= DEBUG {
+		debugLogger.Printf(format, v...)
+	}
 }
 
 func Info(format string, v ...interface{}) {
-	infoLogger.Printf(format, v...)
+	if currentLevel <= INFO {
+		infoLogger.Printf(format, v...)
+	}
 }
 
 func Warning(format string, v ...interface{}) {
-	warningLogger.Printf(format, v...)
+	if currentLevel <= WARNING {
+		warningLogger.Printf(format, v...)
+	}
 }
 
 func Error(format string, v ...interface{}) {
-	errorLogger.Printf(format, v...)
+	if currentLevel <= ERROR {
+		errorLogger.Printf(format, v...)
+	}
 }
