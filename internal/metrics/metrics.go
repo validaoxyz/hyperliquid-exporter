@@ -106,9 +106,12 @@ var (
 	})
 
 	HLApplyDurationHistogram = prometheus.NewHistogram(prometheus.HistogramOpts{
-		Name:    "hl_apply_duration_seconds",
-		Help:    "Histogram of apply durations in seconds",
-		Buckets: prometheus.ExponentialBuckets(0.0001, 2, 15), // Starts at 0.1ms, doubles 15 times
+		Name: "hl_apply_duration_seconds",
+		Help: "Histogram of apply durations in seconds",
+		Buckets: append(
+			prometheus.ExponentialBuckets(0.0001, 1.5, 20),
+			0.1, 0.15, 0.2, 0.3, 0.5, 1, 2, 5, 10,
+		),
 	})
 )
 
