@@ -84,13 +84,13 @@ func parseBlockTimeLine(line string) {
 
 	height, ok := data["height"].(float64)
 	if !ok {
-		logger.Error("Height not found or not a number")
+		logger.Warning("Height not found or not a number")
 		return
 	}
 
 	blockTime, ok := data["block_time"].(string)
 	if !ok {
-		logger.Error("Block time not found or not a string")
+		logger.Warning("Block time not found or not a string")
 		return
 	}
 
@@ -101,20 +101,24 @@ func parseBlockTimeLine(line string) {
 	}
 
 	// Parse block_time to Unix timestamp
-	parsedTime, err := time.Parse("2006-01-02T15:04:05.999", blockTime)
+	layout := "2006-01-02T15:04:05.999"
+	parsedTime, err := time.Parse(layout, blockTime)
 	if err != nil {
 		logger.Error("Error parsing block time: %v", err)
 		return
 	}
 
-	// Convert to UTC
+	// Assume the time is in UTC if no timezone is specified
 	parsedTime = parsedTime.UTC()
+
+	unixTimestamp := float64(parsedTime.Unix())
 
 	// Update metrics
 	metrics.HLBlockHeightGauge.Set(height)
 	metrics.HLApplyDurationGauge.Set(applyDuration)
-	metrics.HLLatestBlockTimeGauge.Set(float64(parsedTime.Unix()))
+	metrics.HLLatestBlockTimeGauge.Set(unixTimestamp)
 	metrics.HLApplyDurationHistogram.Observe(applyDuration)
 
-	logger.Debug("Updated metrics: height=%.0f, apply_duration=%.6f, block_time=%s UTC", height, applyDuration, parsedTime.Format(time.RFC3339))
+	logger.Debug("Updated metrics: height=%.0f, apply_duration=%.6f, block_time=%s UTC, unix_time=%f",
+		height, applyDuration, parsedTime.Format(time.RFC3339), unixTimestamp)
 }
