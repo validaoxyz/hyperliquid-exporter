@@ -23,7 +23,6 @@ func main() {
 	}
 
 	startCmd := flag.NewFlagSet("start", flag.ExitOnError)
-	configFile := startCmd.String("config", "config.yaml", "Path to configuration file")
 	logLevel := startCmd.String("log-level", "debug", "Log level (debug, info, warning, error)")
 
 	switch os.Args[1] {
