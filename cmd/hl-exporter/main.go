@@ -8,6 +8,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
+	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/monitors"
 )
@@ -23,7 +24,7 @@ func main() {
 	go func() {
 		http.Handle("/metrics", promhttp.Handler())
 		http.HandleFunc("/debug", debugHandler)
-		log.Println("Starting Prometheus HTTP server on port 8086")
+		logger.Info("Starting Prometheus HTTP server on port 8086")
 		log.Fatal(http.ListenAndServe(":8086", nil))
 	}()
 
