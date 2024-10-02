@@ -4,13 +4,13 @@ import (
 	"bufio"
 	"encoding/json"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
+	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/utils"
 )
@@ -24,13 +24,13 @@ func StartProposalMonitor(cfg config.Config) {
 		for {
 			newLatestFile, err := utils.GetLatestFile(logsDir)
 			if err != nil {
-				log.Printf("Error finding latest log file: %v", err)
+				logger.Error("Error finding latest log file: %v", err)
 				time.Sleep(10 * time.Second)
 				continue
 			}
 
 			if newLatestFile != latestFile {
-				log.Printf("Switching to new proposal log file: %s", newLatestFile)
+				logger.Info("Switching to new proposal log file: %s", newLatestFile)
 				latestFile = newLatestFile
 				fileOffset = 0
 			}
@@ -44,14 +44,14 @@ func StartProposalMonitor(cfg config.Config) {
 func processProposalFile(filePath string, offset int64) int64 {
 	file, err := os.Open(filePath)
 	if err != nil {
-		log.Printf("Error opening proposal file %s: %v", filePath, err)
+		logger.Error("Error opening proposal file %s: %v", filePath, err)
 		return offset
 	}
 	defer file.Close()
 
 	_, err = file.Seek(offset, 0)
 	if err != nil {
-		log.Printf("Error seeking in file %s: %v", filePath, err)
+		logger.Error("Error seeking in file %s: %v", filePath, err)
 		return offset
 	}
 
@@ -63,7 +63,7 @@ func processProposalFile(filePath string, offset int64) int64 {
 			break
 		}
 		if err != nil {
-			log.Printf("Error reading line from proposal file %s: %v", filePath, err)
+			logger.Error("Error reading line from proposal file %s: %v", filePath, err)
 			break
 		}
 		parseProposalLine(line)
@@ -71,7 +71,7 @@ func processProposalFile(filePath string, offset int64) int64 {
 		offset += int64(len(line))
 	}
 
-	log.Printf("Processed %d new lines from proposal file %s", lineCount, filePath)
+	logger.Info("Processed %d new lines from proposal file %s", lineCount, filePath)
 	return offset
 }
 
@@ -84,19 +84,19 @@ func parseProposalLine(line string) {
 	var data map[string]interface{}
 	err := json.Unmarshal([]byte(line), &data)
 	if err != nil {
-		log.Printf("Error parsing proposal line: %v", err)
+		logger.Error("Error parsing proposal line: %v", err)
 		return
 	}
 
 	abciBlock, ok := data["abci_block"].(map[string]interface{})
 	if !ok {
-		log.Printf("ABCI block not found in proposal line")
+		logger.Error("ABCI block not found in proposal line")
 		return
 	}
 
 	proposer, ok := abciBlock["proposer"].(string)
 	if !ok {
-		log.Printf("Proposer not found in ABCI block")
+		logger.Error("Proposer not found in ABCI block")
 		return
 	}
 
@@ -108,7 +108,7 @@ func parseProposalLine(line string) {
 	count := proposerCounts[proposer]
 	proposerMutex.Unlock()
 
-	log.Printf("Proposer %s counter incremented. Local count: %d", proposer, count)
+	logger.Debug("Proposer %s counter incremented. Local count: %d", proposer, count)
 }
 
 func GetProposerCounts() map[string]int {
