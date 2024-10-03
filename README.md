@@ -6,13 +6,7 @@ A sample dashboard using these metrics can be found here: [ValiDAO Hyperliquid T
 
 You can import the sample grafana.json file provided in this repository to create your own Grafana dashboard using these metrics.
 
-## Requirements
-
-- Go 1.19 or higher
-- Prometheus server for scraping the metrics
-- (Optional) Grafana for visualizing metrics
-
-For the above last two requirements: We provide an easy-to-use prom+grafana stack with a pre-loaded dashboard here: [validaoxyz/hyperliquid-monitor](https://github.com/validaoxyz/hyperliquid-monitor)
+If you don't have a grafana+prom monitoring stack, you can find an easy-to-use one with a pre-loaded dashboard utilizing these metrics here: [validaoxyz/hyperliquid-monitor](https://github.com/validaoxyz/hyperliquid-monitor)
 
 ## Installation
 
