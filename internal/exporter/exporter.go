@@ -33,8 +33,8 @@ func Start(cfg config.Config) {
 
 	metrics.RegisterMetrics()
 
-	logger.Info("Exporter is now running. Listening on :8087")
-	err := http.ListenAndServe(":8087", nil)
+	logger.Info("Exporter is now running. Listening on :8086")
+	err := http.ListenAndServe(":8086", nil)
 	if err != nil {
 		logger.Error("Error starting HTTP server: %v", err)
 	}
