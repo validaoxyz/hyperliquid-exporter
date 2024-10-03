@@ -18,8 +18,6 @@ Here's some information about each metric exposed by the Hyperliquid Exporter, a
 #Block height increase rate (blocks per second) over the last hour
 
 rate(hl_block_height[1h])
-#Predict block height in 1 hour
-hl_block_height + (rate(hl_block_height[6h]) 3600)
 ```
 
 ### hl_latest_block_time
@@ -30,14 +28,8 @@ hl_block_height + (rate(hl_block_height[6h]) 3600)
 
 #### Sample queries:
 ```promql
-# Time since the last block (in seconds)
-time() - hl_latest_block_time
-
-# Average block time over the last hour
-rate(hl_latest_block_time[1h])
-
-# Alert if no new block in 5 minutes
-time() - hl_latest_block_time > 300
+# latest block time (use unit datetime)
+hl_latest_block_time * 1000
 ```
 
 ### hl_apply_duration_seconds
@@ -45,12 +37,12 @@ time() - hl_latest_block_time > 300
 - Type: Histogram
 - Description: Distribution of block apply durations in seconds.
 
-Buckets:
-Exponential buckets starting at 0.1ms (0.0001s), increasing by a factor of 1.5, for 20 buckets.
+- Type: Histogram
+- Description: Distribution of block apply durations in seconds.
 
-Additional buckets at: 0.1s, 0.15s, 0.2s, 0.3s, 0.5s, 1s, 2s, 5s, and 10s.
+Buckets: [0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100]
 
-Usage: Provides insights into the performance of block application, which can help identify potential bottlenecks or performance issues.
+Usage: Provides insights into the performance of block application which can help identify potential bottlenecks or performance issues.
 
 #### Sample queries
 ```promql
@@ -61,10 +53,16 @@ histogram_quantile(0.5, rate(hl_apply_duration_seconds_bucket[5m]))
 histogram_quantile(0.9, rate(hl_apply_duration_seconds_bucket[5m]))
 
 # Percentage of apply durations under 10ms
-sum(rate(hl_apply_duration_seconds_bucket{le="0.01"}[5m])) / sum(rate(hl_apply_duration_seconds_count[5m])) 100
+sum(rate(hl_apply_duration_seconds_bucket{le="0.01"}[5m])) / sum(rate(hl_apply_duration_seconds_count[5m])) * 100
 
 # Average apply duration
 rate(hl_apply_duration_seconds_sum[5m]) / rate(hl_apply_duration_seconds_count[5m])
+
+# Distribution of apply durations
+rate(hl_apply_duration_seconds_bucket[5m])
+
+# Count of apply durations exceeding 1 second
+sum(rate(hl_apply_duration_seconds_bucket{le="+Inf"}[5m])) - sum(rate(hl_apply_duration_seconds_bucket{le="1"}[5m]))
 ```
 
 ### hl_proposer_count_total
@@ -82,7 +80,7 @@ Sample Queries:
 topk(5, hl_proposer_count_total)
 
 # Percentage of blocks proposed by each validator
-hl_proposer_count_total / sum(hl_proposer_count_total) 100
+hl_proposer_count_total / sum(hl_proposer_count_total) * 100
 
 # Proposal rate (blocks per minute) for each validator over the last hour
 rate(hl_proposer_count_total[1h]) 60
@@ -198,7 +196,6 @@ hl_validator_jailed_status{validator=~"$top_10_validators"} == 1
 ```
 
 
-
 ### hl_validator_count
 
 -   Type: Gauge
@@ -216,5 +213,3 @@ hl_validator_count - hl_validator_count offset 24h
 # Alert if validator count drops below a threshold
 hl_validator_count < 50
 ```
-
-These additional metrics provide a comprehensive view of the stake distribution, validator status, and overall network composition in the Hyperliquid blockchain. They can be used to monitor network health, track validator performance, and ensure the network remains decentralized and secure.
