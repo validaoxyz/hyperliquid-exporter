@@ -1,3 +1,0 @@
-prometheus_client
-python-dotenv
-requests
