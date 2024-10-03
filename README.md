@@ -1,5 +1,3 @@
-
-
 # Hyperliquid Exporter
 
 A Go-based exporter that collects and exposes metrics for Hyperliquid node operators to Prometheus. This exporter monitors various aspects of a Hyperliquid node, including block height, proposer counts, block metrics, jailed validator statuses, software version information, stake distribution, and more.
@@ -20,8 +18,7 @@ For the above last two requirements: We provide an easy-to-use prom+grafana stac
 
 ### Prerequisites
 
-- Ensure you have Go installed on your system. You can download it from the official website.
-- git installed for version control.
+- If you wish to build from source: ensure you have Go installed on your system. Otherwise you can rely on the pre-built binaries provided in the releases section.
 
 ### Building from Source
 
@@ -163,7 +160,7 @@ The exporter fetches validator summaries from the Hyperliquid testnet API. If ne
 
 ### Logging Level
 
-Adjust the logging level in the code if you need more or less verbosity. You can modify the log package settings in `logger/logger.go`.
+Adjust the logging level using the flag `--log-level` with values: `debug`, `info`, `warn`, `error`. Default is `debug`.
 
 ## Cleaning Up
 
@@ -175,23 +172,10 @@ make clean
 
 ## Contributing
 
-We welcome contributions to enhance this exporter by adding more metrics, improving performance, or fixing issues. To contribute:
+We welcome contributions to continue building out this exporter by adding more metrics, improving performance, or fixing issues. To contribute:
 
-- Fork the Repository
-- Create a Feature Branch
-  ```bash
-  git checkout -b feature/your-feature-name
-  ```
-- Commit Your Changes
-  ```
-  git commit -am 'Add new feature'
-  ```
-- Push to Your Branch
-  ```
-  git push origin feature/your-feature-name
-  ```
-- Open a Pull Request
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
+- Fork the repository
+- Create a feature branch
+- Commit your changes
+- Push to your branch
+- Open a pull request
