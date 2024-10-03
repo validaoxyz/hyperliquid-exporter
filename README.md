@@ -163,7 +163,7 @@ The exporter fetches validator summaries from the Hyperliquid testnet API. If ne
 
 ### Logging Level
 
-Adjust the logging level in the code if you need more or less verbosity. You can modify the log package settings in `logger/logger.go`.
+Adjust the logging level using the flag `--log-level` with values: `debug`, `info`, `warn`, `error`. Default is `debug`.
 
 ## Cleaning Up
 
