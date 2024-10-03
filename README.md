@@ -20,8 +20,7 @@ For the above last two requirements: We provide an easy-to-use prom+grafana stac
 
 ### Prerequisites
 
-- Ensure you have Go installed on your system. You can download it from the official website.
-- git installed for version control.
+- If you wish to build from source: ensure you have Go installed on your system. Otherwise you can rely on the pre-built binaries provided in the releases section.
 
 ### Building from Source
 
@@ -175,23 +174,10 @@ make clean
 
 ## Contributing
 
-We welcome contributions to enhance this exporter by adding more metrics, improving performance, or fixing issues. To contribute:
+We welcome contributions to continue building out this exporter by adding more metrics, improving performance, or fixing issues. To contribute:
 
-- Fork the Repository
-- Create a Feature Branch
-  ```bash
-  git checkout -b feature/your-feature-name
-  ```
-- Commit Your Changes
-  ```
-  git commit -am 'Add new feature'
-  ```
-- Push to Your Branch
-  ```
-  git push origin feature/your-feature-name
-  ```
-- Open a Pull Request
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
+- Fork the repository
+- Create a feature branch
+- Commit your changes
+- Push to your branch
+- Open a pull request
