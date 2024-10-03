@@ -1,5 +1,9 @@
 # Ignore .env file
 .env
 
+# Ignore any binaries
+hl_exporter
+bin/
+
 # Ignore hl-python-venv directory
 hl-python-venv/

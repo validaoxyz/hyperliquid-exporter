@@ -1,0 +1,55 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.19'
+
+      - name: Build binaries
+        run: |
+          mkdir -p bin
+          platforms=("linux/amd64" "darwin/amd64" "darwin/arm64" "windows/amd64")
+          for platform in "${platforms[@]}"; do
+            OS=${platform%/*}
+            ARCH=${platform#*/}
+            OUTPUT_NAME="hl_exporter_${OS}_${ARCH}"
+            if [ "$OS" = "windows" ]; then
+              OUTPUT_NAME+=".exe"
+            fi
+            echo "Building $OUTPUT_NAME..."
+            GOOS=$OS GOARCH=$ARCH go build -o bin/${OUTPUT_NAME} ./cmd/hl-exporter
+          done
+
+      - name: Compress binaries
+        run: |
+          cd bin
+          for file in *; do
+            if [[ $file == *.exe ]]; then
+              zip ${file%.*}.zip $file
+            else
+              tar -czf $file.tar.gz $file
+            fi
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: bin/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
