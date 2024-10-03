@@ -24,7 +24,7 @@ func StartValidatorMonitor() {
 	go func() {
 		for {
 			updateValidatorMetrics()
-			time.Sleep(600 * time.Second) // 10 minutes
+			time.Sleep(30 * time.Second) // 30 seconds
 		}
 	}()
 }
