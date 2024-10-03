@@ -20,6 +20,8 @@ func StartBlockMonitor(cfg config.Config) {
 		blockTimeDir := filepath.Join(cfg.NodeHome, "hl/data/block_times")
 		var latestFile string
 		var fileOffset int64 = 0
+		isFirstRun := true
+
 		for {
 			newLatestFile, err := utils.GetLatestFile(blockTimeDir)
 			if err != nil {
@@ -32,21 +34,35 @@ func StartBlockMonitor(cfg config.Config) {
 				logger.Info("Switching to new block time file: %s", newLatestFile)
 				latestFile = newLatestFile
 				fileOffset = 0
+				isFirstRun = false // Reset isFirstRun when switching to a new file
 			}
 
-			fileOffset = processBlockTimeFile(latestFile, fileOffset)
+			fileOffset = processBlockTimeFile(latestFile, fileOffset, isFirstRun)
+			isFirstRun = false // Set isFirstRun to false after the first processing
 			time.Sleep(3 * time.Second)
 		}
 	}()
 }
 
-func processBlockTimeFile(filePath string, offset int64) int64 {
+func processBlockTimeFile(filePath string, offset int64, isFirstRun bool) int64 {
 	file, err := os.Open(filePath)
 	if err != nil {
 		logger.Error("Error opening block time file %s: %v", filePath, err)
 		return offset
 	}
 	defer file.Close()
+
+	fileInfo, err := file.Stat()
+	if err != nil {
+		logger.Error("Error getting file info for %s: %v", filePath, err)
+		return offset
+	}
+
+	if isFirstRun && offset == 0 {
+		// If it's the first run and we haven't processed this file before,
+		// start reading from the end of the file
+		offset = fileInfo.Size()
+	}
 
 	_, err = file.Seek(offset, 0)
 	if err != nil {
