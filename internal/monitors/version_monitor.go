@@ -44,6 +44,8 @@ func updateVersionInfo(cfg config.Config) {
 			currentCommitHash = strings.TrimSpace(commitParts[1])
 		}
 
+		// Reset the metric before setting the new value
+		metrics.HLSoftwareVersionInfo.Reset()
 		metrics.HLSoftwareVersionInfo.WithLabelValues(currentCommitHash, date).Set(1)
 		logger.Info("Updated software version: commit=%s, date=%s", currentCommitHash, date)
 	} else {
