@@ -1,6 +1,7 @@
 package config
 
 import (
+        "fmt"
 	"os"
 	"strconv"
 
@@ -29,6 +30,7 @@ func LoadConfig() Config {
         if nodeHome == "" {
             nodeHome = homeDir + "/hl"
         }
+	fmt.Println(nodeHome)
 
 	nodeBinary := os.Getenv("NODE_BINARY")
 	if nodeBinary == "" {
