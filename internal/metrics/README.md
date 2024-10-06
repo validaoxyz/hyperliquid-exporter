@@ -37,12 +37,16 @@ hl_latest_block_time * 1000
 - Type: Histogram
 - Description: Distribution of block apply durations in seconds.
 
-- Type: Histogram
-- Description: Distribution of block apply durations in seconds.
-
 Buckets: [0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100]
 
 Usage: Provides insights into the performance of block application which can help identify potential bottlenecks or performance issues.
+
+### hl_block_time_milliseconds
+
+Type: Histogram
+Description: Histogram of time between blocks in milliseconds.
+
+Usage: Similar to `hl_apply_duration_seconds`, but for the time between blocks.
 
 #### Sample queries
 ```promql
@@ -213,3 +217,4 @@ hl_validator_count - hl_validator_count offset 24h
 # Alert if validator count drops below a threshold
 hl_validator_count < 50
 ```
+
