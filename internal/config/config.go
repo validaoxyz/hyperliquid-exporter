@@ -25,12 +25,13 @@ func LoadConfig() Config {
 
 	nodeHome := os.Getenv("NODE_HOME")
 	if nodeHome == "" {
-		nodeHome = os.Getenv("HOME")
+		nodeHome = os.Getenv("HOME") + "/hl"
 	}
 
 	nodeBinary := os.Getenv("NODE_BINARY")
 	if nodeBinary == "" {
-		nodeBinary = nodeHome + "/hl-visor"
+                homeDir = os.Getenv("HOME")
+		nodeBinary = homeDir + "/hl-visor"
 	}
 
 	isValidatorEnv := os.Getenv("IS_VALIDATOR")
@@ -42,6 +43,7 @@ func LoadConfig() Config {
 	validatorAddress := os.Getenv("VALIDATOR_ADDRESS")
 
 	return Config{
+                HomeDir:          homeDir,
 		NodeHome:         nodeHome,
 		NodeBinary:       nodeBinary,
 		IsValidator:      isValidator,
