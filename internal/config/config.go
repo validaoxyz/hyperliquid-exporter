@@ -38,7 +38,7 @@ func LoadConfig() Config {
 
 	nodeBinary := os.Getenv("NODE_BINARY")
 	if nodeBinary == "" {
-		nodeBinary = binaryHome + "/hl-visor"
+		nodeBinary = binaryHome + "/hl-node"
 	}
 
 	isValidatorEnv := os.Getenv("IS_VALIDATOR")
