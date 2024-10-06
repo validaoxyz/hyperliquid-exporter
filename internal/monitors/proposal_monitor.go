@@ -18,7 +18,7 @@ import (
 // StartProposalMonitor starts monitoring proposal logs
 func StartProposalMonitor(cfg config.Config) {
 	go func() {
-		logsDir := filepath.Join(cfg.NodeHome, "hl/data/replica_cmds")
+		logsDir := filepath.Join(cfg.NodeHome, "data/replica_cmds")
 		var latestFile string
 		var fileOffset int64 = 0
 		for {

@@ -55,8 +55,8 @@ nano .env
 ```
 Make sure that you fill out all the relevant variables:
 ```bash
-# The path to your node’s home directory.
-NODE_HOME=/path/to/your/node/home
+# The path to your node’s directory.
+NODE_HOME=/path/to/your/hl
 # The path to your hl-visor binary.
 NODE_BINARY=/path/to/hl-visor
 # Set to true if this node is a validator; otherwise, false.
