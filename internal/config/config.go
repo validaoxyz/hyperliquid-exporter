@@ -10,7 +10,9 @@ import (
 
 // Config holds configuration values
 type Config struct {
+        HomeDir          string
 	NodeHome         string
+        BinaryHome       string
 	NodeBinary       string
 	IsValidator      bool
 	ValidatorAddress string
@@ -23,14 +25,20 @@ func LoadConfig() Config {
 		logger.Warning("No .env file found, using default environment variables")
 	}
 
-	nodeHome := os.Getenv("NODE_HOME")
-	if nodeHome == "" {
-		nodeHome = os.Getenv("HOME")
-	}
+        homeDir := os.Getenv("HOME")
+        nodeHome := os.Getenv("NODE_HOME")
+        if nodeHome == "" {
+            nodeHome = homeDir + "/hl"
+        }
+
+        binaryHome := os.Getenv("BINARY_HOME")
+        if binaryHome == "" {
+            binaryHome = homeDir
+        }
 
 	nodeBinary := os.Getenv("NODE_BINARY")
 	if nodeBinary == "" {
-		nodeBinary = nodeHome + "/hl-visor"
+		nodeBinary = binaryHome + "/hl-visor"
 	}
 
 	isValidatorEnv := os.Getenv("IS_VALIDATOR")
@@ -42,7 +50,9 @@ func LoadConfig() Config {
 	validatorAddress := os.Getenv("VALIDATOR_ADDRESS")
 
 	return Config{
+                HomeDir:          homeDir,
 		NodeHome:         nodeHome,
+		BinaryHome:       binaryHome,
 		NodeBinary:       nodeBinary,
 		IsValidator:      isValidator,
 		ValidatorAddress: validatorAddress,
