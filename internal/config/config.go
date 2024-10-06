@@ -10,6 +10,7 @@ import (
 
 // Config holds configuration values
 type Config struct {
+        HomeDir          string
 	NodeHome         string
 	NodeBinary       string
 	IsValidator      bool
