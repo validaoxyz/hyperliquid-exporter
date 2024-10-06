@@ -16,7 +16,6 @@ func main() {
 		fmt.Println("Commands:")
 		fmt.Println("  start    Start the Hyperliquid exporter")
 		fmt.Println("\nOptions:")
-		fmt.Println("  --config     Path to configuration file (default: \"config.yaml\")")
 		fmt.Println("  --log-level  Set the logging level (default: \"debug\")")
 		fmt.Println("               Available levels: debug, info, warning, error")
 		os.Exit(1)
