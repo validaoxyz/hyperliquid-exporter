@@ -18,28 +18,65 @@ import (
 func StartBlockMonitor(cfg config.Config) {
 	go func() {
 		blockTimeDir := filepath.Join(cfg.NodeHome, "data/block_times")
-		var latestFile string
-		var fileOffset int64 = 0
+		var currentFile string
+		var fileReader *bufio.Reader
 		isFirstRun := true
 
 		for {
-			newLatestFile, err := utils.GetLatestFile(blockTimeDir)
+			// Check for new files
+			latestFile, err := utils.GetLatestFile(blockTimeDir)
 			if err != nil {
 				logger.Error("Error finding latest block time file: %v", err)
-				time.Sleep(5 * time.Second)
+				time.Sleep(1 * time.Second)
 				continue
 			}
 
-			if newLatestFile != latestFile {
-				logger.Info("Switching to new block time file: %s", newLatestFile)
-				latestFile = newLatestFile
-				fileOffset = 0
-				isFirstRun = false // Reset isFirstRun when switching to a new file
+			// If a new file is found, switch to it
+			if latestFile != currentFile {
+				logger.Info("Switching to new block time file: %s", latestFile)
+				if fileReader != nil {
+					fileReader = nil // Allow the old file to be garbage collected
+				}
+				file, err := os.Open(latestFile)
+				if err != nil {
+					logger.Error("Error opening new block time file: %v", err)
+					time.Sleep(1 * time.Second)
+					continue
+				}
+
+				if isFirstRun {
+					// On first run, seek to the end of the file
+					_, err = file.Seek(0, io.SeekEnd)
+					if err != nil {
+						logger.Error("Error seeking to end of file: %v", err)
+						file.Close()
+						time.Sleep(1 * time.Second)
+						continue
+					}
+					logger.Info("First run: starting to stream from the end of file %s", latestFile)
+				} else {
+					logger.Info("Not first run: reading entire file %s", latestFile)
+				}
+
+				fileReader = bufio.NewReader(file)
+				currentFile = latestFile
+				isFirstRun = false
 			}
 
-			fileOffset = processBlockTimeFile(latestFile, fileOffset, isFirstRun)
-			isFirstRun = false // Set isFirstRun to false after the first processing
-			time.Sleep(3 * time.Second)
+			// Read and process lines
+			for {
+				line, err := fileReader.ReadString('\n')
+				if err != nil {
+					if err == io.EOF {
+						// End of file reached, wait a bit before checking for more data
+						time.Sleep(100 * time.Millisecond)
+						break
+					}
+					logger.Error("Error reading from block time file: %v", err)
+					break
+				}
+				parseBlockTimeLine(line)
+			}
 		}
 	}()
 }
