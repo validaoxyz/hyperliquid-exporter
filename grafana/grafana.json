@@ -442,19 +442,6 @@
         "x": 0,
         "y": 13
       },
-      "id": 356,
-      "panels": [],
-      "title": "CLIENT INFO",
-      "type": "row"
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 14
-      },
       "id": 357,
       "panels": [],
       "title": "CONSENSUS METRICS",
@@ -511,7 +498,7 @@
         "h": 8,
         "w": 17,
         "x": 0,
-        "y": 15
+        "y": 14
       },
       "id": 345,
       "options": {
@@ -599,7 +586,7 @@
         "h": 4,
         "w": 7,
         "x": 17,
-        "y": 15
+        "y": 14
       },
       "id": 349,
       "options": {
@@ -671,7 +658,7 @@
         "h": 4,
         "w": 7,
         "x": 17,
-        "y": 19
+        "y": 18
       },
       "id": 358,
       "options": {
@@ -803,7 +790,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 23
+        "y": 22
       },
       "id": 359,
       "options": {
@@ -902,7 +889,7 @@
         "h": 11,
         "w": 12,
         "x": 0,
-        "y": 30
+        "y": 29
       },
       "id": 346,
       "options": {
@@ -1001,7 +988,7 @@
         "h": 11,
         "w": 12,
         "x": 12,
-        "y": 30
+        "y": 29
       },
       "id": 351,
       "options": {
@@ -1041,7 +1028,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 41
+        "y": 40
       },
       "id": 340,
       "panels": [],
@@ -1096,8 +1083,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
-                "value": null
+                "color": "green"
               },
               {
                 "color": "red",
@@ -1113,7 +1099,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 42
+        "y": 41
       },
       "id": 323,
       "options": {
@@ -1194,8 +1180,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
-                "value": null
+                "color": "green"
               },
               {
                 "color": "red",
@@ -1211,7 +1196,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 42
+        "y": 41
       },
       "id": 333,
       "options": {
@@ -1336,7 +1321,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 50
+        "y": 49
       },
       "id": 360,
       "options": {
@@ -1457,8 +1442,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
-                "value": null
+                "color": "green"
               },
               {
                 "color": "red",
@@ -1474,7 +1458,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 50
+        "y": 49
       },
       "id": 361,
       "options": {
@@ -1601,8 +1585,8 @@
   },
   "timepicker": {},
   "timezone": "utc",
-  "title": "Hyperliquid Testnet",
+  "title": "Hyperliquid ",
   "uid": "",
-  "version": 40,
+  "version": 41,
   "weekStart": ""
 }
