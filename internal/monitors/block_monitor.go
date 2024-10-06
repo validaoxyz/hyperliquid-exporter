@@ -17,7 +17,7 @@ import (
 // StartBlockMonitor starts monitoring block time logs
 func StartBlockMonitor(cfg config.Config) {
 	go func() {
-		blockTimeDir := filepath.Join(cfg.NodeHome, "hl/data/block_times")
+		blockTimeDir := filepath.Join(cfg.NodeHome, "data/block_times")
 		var latestFile string
 		var fileOffset int64 = 0
 		isFirstRun := true
