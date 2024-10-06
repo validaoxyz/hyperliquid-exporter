@@ -123,7 +123,8 @@ hl_validator_count
 hl_software_version_info
 hl_software_up_to_date
 hl_latest_block_time
-hl_apply_duration_seconds 
+hl_apply_duration_seconds
+hl_block_time_milliseconds_bucket
 ```
 To see an example of how to query these metrics in Grafana, see the example dashboard provided [in this repository](./grafana/). To understand what these metrics mean, see the [metrics documentation](./internal/metrics/).
 
@@ -141,3 +142,4 @@ Adjust the logging level using the flag `--log-level` with values: `debug`, `inf
 ## Contributing
 
 Contributions are greatly appreciated. Please submit a PR or open an issue on GitHub.
+
