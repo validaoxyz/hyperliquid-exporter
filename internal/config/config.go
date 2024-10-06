@@ -1,7 +1,6 @@
 package config
 
 import (
-        "fmt"
 	"os"
 	"strconv"
 
@@ -13,6 +12,7 @@ import (
 type Config struct {
         HomeDir          string
 	NodeHome         string
+        BinaryHome       string
 	NodeBinary       string
 	IsValidator      bool
 	ValidatorAddress string
@@ -30,11 +30,15 @@ func LoadConfig() Config {
         if nodeHome == "" {
             nodeHome = homeDir + "/hl"
         }
-	fmt.Println(nodeHome)
+
+        binaryHome := os.Getenv("BINARY_HOME")
+        if binaryHome == "" {
+            binaryHome = homeDir
+        }
 
 	nodeBinary := os.Getenv("NODE_BINARY")
 	if nodeBinary == "" {
-		nodeBinary = homeDir + "/hl-visor"
+		nodeBinary = binaryHome + "/hl-visor"
 	}
 
 	isValidatorEnv := os.Getenv("IS_VALIDATOR")
@@ -48,6 +52,7 @@ func LoadConfig() Config {
 	return Config{
                 HomeDir:          homeDir,
 		NodeHome:         nodeHome,
+		BinaryHome:       binaryHome,
 		NodeBinary:       nodeBinary,
 		IsValidator:      isValidator,
 		ValidatorAddress: validatorAddress,
