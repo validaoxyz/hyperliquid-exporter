@@ -24,14 +24,14 @@ func LoadConfig() Config {
 		logger.Warning("No .env file found, using default environment variables")
 	}
 
-	nodeHome := os.Getenv("NODE_HOME")
-	if nodeHome == "" {
-		nodeHome = os.Getenv("HOME") + "/hl"
-	}
+        homeDir := os.Getenv("HOME")
+        nodeHome := os.Getenv("NODE_HOME")
+        if nodeHome == "" {
+            nodeHome = homeDir + "/hl"
+        }
 
 	nodeBinary := os.Getenv("NODE_BINARY")
 	if nodeBinary == "" {
-                homeDir = os.Getenv("HOME")
 		nodeBinary = homeDir + "/hl-visor"
 	}
 
