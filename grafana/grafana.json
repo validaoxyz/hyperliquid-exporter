@@ -541,7 +541,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "validator_jailed_status",
+          "expr": "hl_validator_jailed_status",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -627,7 +627,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(validator_jailed_status)",
+          "expr": "sum(hl_validator_jailed_status)",
           "format": "time_series",
           "instant": true,
           "interval": "",
@@ -826,7 +826,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "validator_jailed_status",
+          "expr": "hl_validator_jailed_status",
           "format": "time_series",
           "interval": "",
           "legendFormat": "{{name}}",
@@ -925,7 +925,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "rate(proposer_count_total[15m])",
+          "expr": "rate(hl_proposer_count_total[15m])",
           "format": "time_series",
           "interval": "",
           "legendFormat": "{{proposer}}",
@@ -1024,7 +1024,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (proposer) (increase(proposer_count_total[4h]))\n/\nscalar(sum(increase(proposer_count_total[4h])))\n* 100\n",
+          "expr": "sum by (proposer) (increase(hl_proposer_count_total[4h]))\n/\nscalar(sum(increase(hl_proposer_count_total[4h])))\n* 100\n",
           "format": "time_series",
           "interval": "",
           "legendFormat": "{{proposer}}",
@@ -1603,6 +1603,6 @@
   "timezone": "utc",
   "title": "Hyperliquid Testnet",
   "uid": "",
-  "version": 35,
+  "version": 40,
   "weekStart": ""
 }
