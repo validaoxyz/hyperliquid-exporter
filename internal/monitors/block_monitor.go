@@ -14,6 +14,8 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/utils"
 )
 
+var lastBlockTime time.Time
+
 // StartBlockMonitor starts monitoring block time logs
 func StartBlockMonitor(cfg config.Config) {
 	go func() {
@@ -154,7 +156,7 @@ func parseBlockTimeLine(line string) {
 	}
 
 	// Parse block_time to Unix timestamp
-	layout := "2006-01-02T15:04:05.999"
+	layout := "2006-01-02T15:04:05.999999999"
 	parsedTime, err := time.Parse(layout, blockTime)
 	if err != nil {
 		logger.Error("Error parsing block time: %v", err)
@@ -165,6 +167,20 @@ func parseBlockTimeLine(line string) {
 	parsedTime = parsedTime.UTC()
 
 	unixTimestamp := float64(parsedTime.Unix())
+
+	// Calculate block time difference
+	if !lastBlockTime.IsZero() {
+		blockTimeDiff := parsedTime.Sub(lastBlockTime).Milliseconds()
+		if blockTimeDiff > 0 {
+			metrics.HLBlockTimeHistogram.Observe(float64(blockTimeDiff))
+			logger.Debug("Block time difference: %d milliseconds", blockTimeDiff)
+		} else {
+			logger.Warning("Invalid block time difference: %d milliseconds", blockTimeDiff)
+		}
+	}
+
+	// Update last block time
+	lastBlockTime = parsedTime
 
 	// Update metrics
 	metrics.HLBlockHeightGauge.Set(height)
