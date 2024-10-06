@@ -10,10 +10,6 @@ If you don't have a grafana+prom monitoring stack, you can find an easy-to-use o
 
 ## Installation
 
-### Prerequisites
-
-- If you wish to build from source: ensure you have Go installed on your system. Otherwise you can rely on the pre-built binaries provided in the releases section.
-
 ### Building from Source
 
 Clone the repository:
@@ -31,8 +27,6 @@ make build
 
 The compiled binary will be placed in the `bin/` directory.
 
-### Installing
-
 #### Install to System Directory
 
 To install `hl_exporter` to `/usr/local/bin`:
@@ -43,28 +37,16 @@ make install
 
 ## Configuration
 
-Create an `.env` file in the project's root directory with the following content. 
+Create an `.env` file in the project's root directory with the required variables. 
 
 To do so:
 ```bash
 cp .env.sample .env
 ```
-Then open it with your text editor of choice, e.g.:
+Open it with your text editor of choice, e.g.:
 ```bash
 nano .env
 ```
-Make sure that you fill out all the relevant variables:
-```bash
-# The path to your node’s directory.
-NODE_HOME=/path/to/your/hl
-# The path to your hl-visor binary.
-NODE_BINARY=/path/to/hl-visor
-# Set to true if this node is a validator; otherwise, false.
-IS_VALIDATOR=false
-# Your validator’s address, if applicable.
-VALIDATOR_ADDRESS=your_validator_address
-```
-
 
 ## Running the Exporter
 
@@ -156,20 +138,6 @@ The exporter fetches validator summaries from the Hyperliquid testnet API. If ne
 
 Adjust the logging level using the flag `--log-level` with values: `debug`, `info`, `warn`, `error`. Default is `debug`.
 
-## Cleaning Up
-
-To remove build artifacts:
-
-```
-make clean
-```
-
 ## Contributing
 
-We welcome contributions to continue building out this exporter by adding more metrics, improving performance, or fixing issues. To contribute:
-
-- Fork the repository
-- Create a feature branch
-- Commit your changes
-- Push to your branch
-- Open a pull request
+Contributions are greatly appreciated. Please submit a PR or open an issue on GitHub.
