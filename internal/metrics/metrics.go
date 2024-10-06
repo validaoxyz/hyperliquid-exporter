@@ -113,6 +113,17 @@ var (
 			0.015, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5,
 		},
 	})
+
+	HLBlockTimeHistogram = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name: "hl_block_time_milliseconds",
+		Help: "Histogram of time between blocks in milliseconds",
+		Buckets: []float64{
+			10, 20, 30, 40, 50, 60, 70, 80, 90, 100,
+			120, 140, 160, 180, 200, 220, 240, 260, 280, 300,
+			350, 400, 450, 500, 600, 700, 800, 900, 1000,
+			1500, 2000, 3000, 5000, 10000,
+		},
+	})
 )
 
 // RegisterMetrics registers all Prometheus metrics
@@ -130,4 +141,5 @@ func RegisterMetrics() {
 	prometheus.MustRegister(HLSoftwareUpToDate)
 	prometheus.MustRegister(HLLatestBlockTimeGauge)
 	prometheus.MustRegister(HLApplyDurationHistogram)
+	prometheus.MustRegister(HLBlockTimeHistogram)
 }
