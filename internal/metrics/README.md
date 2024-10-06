@@ -37,15 +37,47 @@ hl_latest_block_time * 1000
 - Type: Histogram
 - Description: Distribution of block apply durations in seconds.
 
-Buckets: [0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100]
-
+Buckets: 
+```
+[.0001, 0.0002, 0.0005, 0.001, 0.002, 0.003,
+0.005, 0.007, 0.01, 0.015, 0.02, 0.03, 0.05,
+0.075, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5]
+```
 Usage: Provides insights into the performance of block application which can help identify potential bottlenecks or performance issues.
+
+#### Sample queries
+```promql
+# Median apply duration over the last 5 minutes
+histogram_quantile(0.5, rate(hl_apply_duration_seconds_bucket[5m]))
+
+# 90th percentile apply duration over the last 5 minutes
+histogram_quantile(0.9, rate(hl_apply_duration_seconds_bucket[5m]))
+
+# Percentage of apply durations under 10ms
+sum(rate(hl_apply_duration_seconds_bucket{le="0.01"}[5m])) / sum(rate(hl_apply_duration_seconds_count[5m])) * 100
+
+# Average apply duration
+rate(hl_apply_duration_seconds_sum[5m]) / rate(hl_apply_duration_seconds_count[5m])
+
+# Distribution of apply durations
+rate(hl_apply_duration_seconds_bucket[5m])
+
+# Count of apply durations exceeding 1 second
+sum(rate(hl_apply_duration_seconds_bucket{le="+Inf"}[5m])) - sum(rate(hl_apply_duration_seconds_bucket{le="1"}[5m]))
+```
 
 ### hl_block_time_milliseconds
 
 Type: Histogram
 Description: Histogram of time between blocks in milliseconds.
 
+Buckets: 
+```
+[10, 20, 30, 40, 50, 60, 70, 80, 90, 100,
+120, 140, 160, 180, 200, 220, 240, 260, 280, 300,
+300, 350, 400, 450, 500, 600, 700, 800,
+900, 1000, 1500, 2000, 3000, 5000, 10000]
+```
 Usage: Similar to `hl_apply_duration_seconds`, but for the time between blocks.
 
 #### Sample queries
@@ -217,4 +249,3 @@ hl_validator_count - hl_validator_count offset 24h
 # Alert if validator count drops below a threshold
 hl_validator_count < 50
 ```
-
