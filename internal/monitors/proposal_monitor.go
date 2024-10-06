@@ -19,24 +19,65 @@ import (
 func StartProposalMonitor(cfg config.Config) {
 	go func() {
 		logsDir := filepath.Join(cfg.NodeHome, "data/replica_cmds")
-		var latestFile string
-		var fileOffset int64 = 0
+		var currentFile string
+		var fileReader *bufio.Reader
+		isFirstRun := true
+
 		for {
-			newLatestFile, err := utils.GetLatestFile(logsDir)
+			// Check for new files
+			latestFile, err := utils.GetLatestFile(logsDir)
 			if err != nil {
-				logger.Error("Error finding latest log file: %v", err)
-				time.Sleep(10 * time.Second)
+				logger.Error("Error finding latest proposal log file: %v", err)
+				time.Sleep(1 * time.Second)
 				continue
 			}
 
-			if newLatestFile != latestFile {
-				logger.Info("Switching to new proposal log file: %s", newLatestFile)
-				latestFile = newLatestFile
-				fileOffset = 0
+			// If a new file is found, switch to it
+			if latestFile != currentFile {
+				logger.Info("Switching to new proposal log file: %s", latestFile)
+				if fileReader != nil {
+					fileReader = nil // Allow the old file to be garbage collected
+				}
+				file, err := os.Open(latestFile)
+				if err != nil {
+					logger.Error("Error opening new proposal log file: %v", err)
+					time.Sleep(1 * time.Second)
+					continue
+				}
+
+				if isFirstRun {
+					// On first run, seek to the end of the file
+					_, err = file.Seek(0, io.SeekEnd)
+					if err != nil {
+						logger.Error("Error seeking to end of file: %v", err)
+						file.Close()
+						time.Sleep(1 * time.Second)
+						continue
+					}
+					logger.Info("First run: starting to stream from the end of file %s", latestFile)
+				} else {
+					logger.Info("Not first run: reading entire file %s", latestFile)
+				}
+
+				fileReader = bufio.NewReader(file)
+				currentFile = latestFile
+				isFirstRun = false
 			}
 
-			fileOffset = processProposalFile(latestFile, fileOffset)
-			time.Sleep(3 * time.Second)
+			// Read and process lines
+			for {
+				line, err := fileReader.ReadString('\n')
+				if err != nil {
+					if err == io.EOF {
+						// End of file reached, wait a bit before checking for more data
+						time.Sleep(100 * time.Millisecond)
+						break
+					}
+					logger.Error("Error reading from proposal log file: %v", err)
+					break
+				}
+				parseProposalLine(line)
+			}
 		}
 	}()
 }
