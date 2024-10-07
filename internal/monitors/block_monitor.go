@@ -155,6 +155,9 @@ func parseBlockTimeLine(line string) {
 		return
 	}
 
+	// Convert applyDuration from seconds to milliseconds
+	applyDurationMs := applyDuration * 1000
+
 	// Parse block_time to Unix timestamp
 	layout := "2006-01-02T15:04:05.999999999"
 	parsedTime, err := time.Parse(layout, blockTime)
@@ -184,9 +187,9 @@ func parseBlockTimeLine(line string) {
 
 	// Update metrics
 	metrics.HLBlockHeightGauge.Set(height)
-	metrics.HLApplyDurationGauge.Set(applyDuration)
+	metrics.HLApplyDurationGauge.Set(applyDurationMs)
 	metrics.HLLatestBlockTimeGauge.Set(unixTimestamp)
-	metrics.HLApplyDurationHistogram.Observe(applyDuration)
+	metrics.HLApplyDurationHistogram.Observe(applyDurationMs)
 
 	logger.Debug("Updated metrics: height=%.0f, apply_duration=%.6f, block_time=%s UTC, unix_time=%f",
 		height, applyDuration, parsedTime.Format(time.RFC3339), unixTimestamp)

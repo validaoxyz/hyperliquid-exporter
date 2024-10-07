@@ -32,38 +32,38 @@ rate(hl_block_height[1h])
 hl_latest_block_time * 1000
 ```
 
-### hl_apply_duration_seconds
+### hl_apply_duration_milliseconds
 
 - Type: Histogram
-- Description: Distribution of block apply durations in seconds.
+- Description: Distribution of block apply durations in milliseconds.
 
 Buckets: 
 ```
-[.0001, 0.0002, 0.0005, 0.001, 0.002, 0.003,
-0.005, 0.007, 0.01, 0.015, 0.02, 0.03, 0.05,
-0.075, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5]
+[0.1, 0.2, 0.5, 1, 2, 3, 5, 7, 10, 15, 20,
+30, 50, 75, 100, 150, 160, 170, 180, 190, 
+200, 210, 220, 230, 240, 250]
 ```
 Usage: Provides insights into the performance of block application which can help identify potential bottlenecks or performance issues.
 
 #### Sample queries
 ```promql
 # Median apply duration over the last 5 minutes
-histogram_quantile(0.5, rate(hl_apply_duration_seconds_bucket[5m]))
+histogram_quantile(0.5, rate(hl_apply_duration_milliseconds_bucket[5m]))
 
 # 90th percentile apply duration over the last 5 minutes
-histogram_quantile(0.9, rate(hl_apply_duration_seconds_bucket[5m]))
+histogram_quantile(0.9, rate(hl_apply_duration_milliseconds_bucket[5m]))
 
 # Percentage of apply durations under 10ms
-sum(rate(hl_apply_duration_seconds_bucket{le="0.01"}[5m])) / sum(rate(hl_apply_duration_seconds_count[5m])) * 100
+sum(rate(hl_apply_duration_milliseconds_bucket{le="10"}[5m])) / sum(rate(hl_apply_duration_milliseconds_count[5m])) * 100
 
 # Average apply duration
-rate(hl_apply_duration_seconds_sum[5m]) / rate(hl_apply_duration_seconds_count[5m])
+rate(hl_apply_duration_milliseconds_sum[5m]) / rate(hl_apply_duration_milliseconds_count[5m])
 
 # Distribution of apply durations
-rate(hl_apply_duration_seconds_bucket[5m])
+rate(hl_apply_duration_milliseconds_bucket[5m])
 
 # Count of apply durations exceeding 1 second
-sum(rate(hl_apply_duration_seconds_bucket{le="+Inf"}[5m])) - sum(rate(hl_apply_duration_seconds_bucket{le="1"}[5m]))
+sum(rate(hl_apply_duration_milliseconds_bucket{le="+Inf"}[5m])) - sum(rate(hl_apply_duration_milliseconds_bucket{le="1"}[5m]))
 ```
 
 ### hl_block_time_milliseconds
@@ -76,30 +76,9 @@ Buckets:
 [10, 20, 30, 40, 50, 60, 70, 80, 90, 100,
 120, 140, 160, 180, 200, 220, 240, 260, 280, 300,
 300, 350, 400, 450, 500, 600, 700, 800,
-900, 1000, 1500, 2000, 3000, 5000, 10000]
+900, 1000, 1500, 2000]
 ```
-Usage: Similar to `hl_apply_duration_seconds`, but for the time between blocks.
-
-#### Sample queries
-```promql
-# Median apply duration over the last 5 minutes
-histogram_quantile(0.5, rate(hl_apply_duration_seconds_bucket[5m]))
-
-# 90th percentile apply duration over the last 5 minutes
-histogram_quantile(0.9, rate(hl_apply_duration_seconds_bucket[5m]))
-
-# Percentage of apply durations under 10ms
-sum(rate(hl_apply_duration_seconds_bucket{le="0.01"}[5m])) / sum(rate(hl_apply_duration_seconds_count[5m])) * 100
-
-# Average apply duration
-rate(hl_apply_duration_seconds_sum[5m]) / rate(hl_apply_duration_seconds_count[5m])
-
-# Distribution of apply durations
-rate(hl_apply_duration_seconds_bucket[5m])
-
-# Count of apply durations exceeding 1 second
-sum(rate(hl_apply_duration_seconds_bucket{le="+Inf"}[5m])) - sum(rate(hl_apply_duration_seconds_bucket{le="1"}[5m]))
-```
+Usage: Similar queries as to `hl_apply_duration_milliseconds` can be applied
 
 ### hl_proposer_count_total
 - hl_proposer_count_total
