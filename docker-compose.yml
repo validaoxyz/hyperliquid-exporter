@@ -2,7 +2,9 @@ services:
   hl_exporter:
     container_name: hyperliquid_exporter
     build: .
-    command: "start"
+    command: "start --log-level=info"
+    volumes:
+      - <HYPERLIQUID LOCAL HOME>:/hl:ro
     environment:
       NODE_HOME: "/hl/"
       NODE_BINARY: "/hl_visor"
