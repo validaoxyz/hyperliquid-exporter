@@ -10,7 +10,7 @@ ADD internal ./internal
 RUN mkdir ./bin
 RUN go build -o ./bin/hl_exporter ./cmd/hl-exporter
 
-RUN wget https://binaries.hyperliquid.xyz/Testnet/hl-visor -o /hl-visor
+RUN wget https://binaries.hyperliquid.xyz/Testnet/hl-visor -O /hl-visor
 RUN chmod a+x /hl-visor
 
 EXPOSE 8086
