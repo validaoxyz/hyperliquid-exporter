@@ -7,7 +7,7 @@ services:
       - <HYPERLIQUID LOCAL HOME>:/hl:ro
     environment:
       NODE_HOME: "/hl/"
-      NODE_BINARY: "/hl_visor"
+      NODE_BINARY: "/hl-visor"
       IS_VALIDATOR: "true"
       VALIDATOR_ADDRESS: "0x1cb27f272899e8abe59374fcb9b9d677c97504f0"
     ports:
