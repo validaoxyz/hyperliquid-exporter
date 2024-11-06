@@ -27,6 +27,21 @@ make build
 
 The compiled binary will be placed in the `bin/` directory.
 
+#### Using Docker
+
+Use Docker to run the hl_exporter in a container :
+
+1. Edit the `docker-compose.yml` to change the local hyperliquid home folder :
+Example : Replace
+`- <HYPERLIQUID LOCAL HOME>:/hl:ro`
+by
+`- /home/hyperliquid/hl:/hl:ro` 
+
+2. Build the image and run the container :
+```bash
+docker compose up -d
+```
+
 #### Install to System Directory
 
 To install `hl_exporter` to `/usr/local/bin`:
