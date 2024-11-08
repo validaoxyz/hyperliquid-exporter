@@ -2,7 +2,6 @@ module github.com/validaoxyz/hyperliquid-exporter
 
 go 1.22
 
-toolchain go1.23.2
 
 require (
 	github.com/joho/godotenv v1.5.1
