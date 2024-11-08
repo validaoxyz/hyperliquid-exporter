@@ -2,7 +2,9 @@ package monitors
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,8 +17,12 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/utils"
 )
 
-// StartProposalMonitor starts monitoring proposal logs
-func StartProposalMonitor(cfg config.Config) {
+var (
+	proposerCounts = make(map[string]int)
+	proposerMutex  sync.Mutex
+)
+
+func StartProposalMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	go func() {
 		logsDir := filepath.Join(cfg.NodeHome, "data/replica_cmds")
 		var currentFile string
@@ -24,124 +30,89 @@ func StartProposalMonitor(cfg config.Config) {
 		isFirstRun := true
 
 		for {
-			// Check for new files
-			latestFile, err := utils.GetLatestFile(logsDir)
-			if err != nil {
-				logger.Error("Error finding latest proposal log file: %v", err)
-				time.Sleep(1 * time.Second)
-				continue
-			}
-
-			// If a new file is found, switch to it
-			if latestFile != currentFile {
-				logger.Info("Switching to new proposal log file: %s", latestFile)
-				if fileReader != nil {
-					fileReader = nil // Allow the old file to be garbage collected
-				}
-				file, err := os.Open(latestFile)
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				// Check for new files
+				latestFile, err := utils.GetLatestFile(logsDir)
 				if err != nil {
-					logger.Error("Error opening new proposal log file: %v", err)
+					errCh <- fmt.Errorf("error finding latest proposal log file: %w", err)
 					time.Sleep(1 * time.Second)
 					continue
 				}
 
-				if isFirstRun {
-					// On first run, seek to the end of the file
-					_, err = file.Seek(0, io.SeekEnd)
+				// If a new file is found, switch to it
+				if latestFile != currentFile {
+					logger.Info("Switching to new proposal log file: %s", latestFile)
+					if fileReader != nil {
+						fileReader = nil // Allow the old file to be garbage collected
+					}
+					file, err := os.Open(latestFile)
 					if err != nil {
-						logger.Error("Error seeking to end of file: %v", err)
-						file.Close()
+						errCh <- fmt.Errorf("error opening new proposal log file: %w", err)
 						time.Sleep(1 * time.Second)
 						continue
 					}
-					logger.Info("First run: starting to stream from the end of file %s", latestFile)
-				} else {
-					logger.Info("Not first run: reading entire file %s", latestFile)
+
+					if isFirstRun {
+						// On first run, seek to the end of the file
+						_, err = file.Seek(0, io.SeekEnd)
+						if err != nil {
+							errCh <- fmt.Errorf("error seeking to end of file: %w", err)
+							file.Close()
+							time.Sleep(1 * time.Second)
+							continue
+						}
+						logger.Info("First run: starting to stream from the end of file %s", latestFile)
+					} else {
+						logger.Info("Not first run: reading entire file %s", latestFile)
+					}
+
+					fileReader = bufio.NewReader(file)
+					currentFile = latestFile
+					isFirstRun = false
 				}
 
-				fileReader = bufio.NewReader(file)
-				currentFile = latestFile
-				isFirstRun = false
-			}
-
-			// Read and process lines
-			for {
-				line, err := fileReader.ReadString('\n')
-				if err != nil {
-					if err == io.EOF {
-						// End of file reached, wait a bit before checking for more data
-						time.Sleep(100 * time.Millisecond)
+				// Read and process lines
+				for {
+					line, err := fileReader.ReadString('\n')
+					if err != nil {
+						if err == io.EOF {
+							// End of file reached, wait a bit before checking for more data
+							time.Sleep(100 * time.Millisecond)
+							break
+						}
+						errCh <- fmt.Errorf("error reading from proposal log file: %w", err)
 						break
 					}
-					logger.Error("Error reading from proposal log file: %v", err)
-					break
+					if err := parseProposalLine(ctx, line); err != nil {
+						errCh <- fmt.Errorf("error parsing proposal line: %w", err)
+					}
 				}
-				parseProposalLine(line)
 			}
 		}
 	}()
 }
 
-func processProposalFile(filePath string, offset int64) int64 {
-	file, err := os.Open(filePath)
-	if err != nil {
-		logger.Error("Error opening proposal file %s: %v", filePath, err)
-		return offset
-	}
-	defer file.Close()
-
-	_, err = file.Seek(offset, 0)
-	if err != nil {
-		logger.Error("Error seeking in file %s: %v", filePath, err)
-		return offset
-	}
-
-	reader := bufio.NewReader(file)
-	lineCount := 0
-	for {
-		line, err := reader.ReadString('\n')
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			logger.Error("Error reading line from proposal file %s: %v", filePath, err)
-			break
-		}
-		parseProposalLine(line)
-		lineCount++
-		offset += int64(len(line))
-	}
-
-	logger.Info("Processed %d new lines from proposal file %s", lineCount, filePath)
-	return offset
-}
-
-var (
-	proposerCounts = make(map[string]int)
-	proposerMutex  sync.Mutex
-)
-
-func parseProposalLine(line string) {
+func parseProposalLine(ctx context.Context, line string) error {
 	var data map[string]interface{}
-	err := json.Unmarshal([]byte(line), &data)
-	if err != nil {
-		logger.Error("Error parsing proposal line: %v", err)
-		return
+	if err := json.Unmarshal([]byte(line), &data); err != nil {
+		return fmt.Errorf("error parsing proposal line: %w", err)
 	}
 
 	abciBlock, ok := data["abci_block"].(map[string]interface{})
 	if !ok {
-		logger.Error("ABCI block not found in proposal line")
-		return
+		return fmt.Errorf("ABCI block not found in proposal line")
 	}
 
 	proposer, ok := abciBlock["proposer"].(string)
 	if !ok {
-		logger.Error("Proposer not found in ABCI block")
-		return
+		return fmt.Errorf("proposer not found in ABCI block")
 	}
 
-	metrics.HLProposerCounter.WithLabelValues(proposer).Inc()
+	// Update OpenTelemetry metric
+	metrics.IncrementProposerCounter(proposer)
 
 	// Update our local counter
 	proposerMutex.Lock()
@@ -150,6 +121,7 @@ func parseProposalLine(line string) {
 	proposerMutex.Unlock()
 
 	logger.Debug("Proposer %s counter incremented. Local count: %d", proposer, count)
+	return nil
 }
 
 func GetProposerCounts() map[string]int {

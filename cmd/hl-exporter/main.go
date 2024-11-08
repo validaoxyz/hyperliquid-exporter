@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/exporter"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
+	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
 func main() {
@@ -16,13 +20,30 @@ func main() {
 		fmt.Println("Commands:")
 		fmt.Println("  start    Start the Hyperliquid exporter")
 		fmt.Println("\nOptions:")
-		fmt.Println("  --log-level  Set the logging level (default: \"debug\")")
-		fmt.Println("               Available levels: debug, info, warning, error")
+		fmt.Println("  --log-level        Set the logging level (default: \"debug\")")
+		fmt.Println("  --enable-prom      Enable Prometheus endpoint (default: true)")
+		fmt.Println("  --disable-prom     Disable Prometheus endpoint")
+		fmt.Println("  --enable-otlp      Enable OTLP export (default: false)")
+		fmt.Println("  --otlp-endpoint    OTLP endpoint (default: otel.hyperliquid.validao.xyz)")
+		fmt.Println("  --node-home        Node home directory (overrides env var)")
+		fmt.Println("  --node-binary      Node binary path (overrides env var)")
+		fmt.Println("  --identity         Node identity (required when OTLP is enabled)")
+		fmt.Println("  --chain            Chain type (required when OTLP is enabled: 'mainnet' or 'testnet')")
+		fmt.Println("  --otlp-insecure    Use insecure connection for OTLP (default: false)")
 		os.Exit(1)
 	}
 
 	startCmd := flag.NewFlagSet("start", flag.ExitOnError)
-	logLevel := startCmd.String("log-level", "debug", "Log level (debug, info, warning, error)")
+	logLevel := startCmd.String("log-level", "info", "Log level (debug, info, warning, error)")
+	enableProm := startCmd.Bool("enable-prom", true, "Enable Prometheus endpoint (default: true)")
+	disableProm := startCmd.Bool("disable-prom", false, "Disable Prometheus endpoint")
+	enableOTLP := startCmd.Bool("enable-otlp", false, "Enable OTLP export")
+	otlpEndpoint := startCmd.String("otlp-endpoint", "otel.hyperliquid.validao.xyz", "OTLP endpoint (default: otel.hyperliquid.validao.xyz)")
+	nodeHome := startCmd.String("node-home", "", "Node home directory (overrides env var)")
+	nodeBinary := startCmd.String("node-binary", "", "Node binary path (overrides env var)")
+	identity := startCmd.String("identity", "", "Node identity (required when OTLP is enabled)")
+	chain := startCmd.String("chain", "", "Chain type (required when OTLP is enabled: 'mainnet' or 'testnet')")
+	otlpInsecure := startCmd.Bool("otlp-insecure", false, "Use insecure connection for OTLP (default: false)")
 
 	switch os.Args[1] {
 	case "start":
@@ -32,18 +53,49 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Set log level
 	if err := logger.SetLogLevel(*logLevel); err != nil {
 		fmt.Printf("Error setting log level: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Load configuration
-	cfg := config.LoadConfig()
+	flags := &config.Flags{
+		NodeHome:   *nodeHome,
+		NodeBinary: *nodeBinary,
+	}
 
-	// Start the exporter
-	exporter.Start(cfg)
+	cfg := config.LoadConfig(flags)
 
-	// Keep the program running
-	select {}
+	if *enableOTLP {
+		if *identity == "" {
+			logger.Error("--identity flag is required when OTLP is enabled. This can be whatever you choose and is just an identifier for your node.")
+			os.Exit(1)
+		}
+		if *chain != "mainnet" && *chain != "testnet" {
+			logger.Error("--chain flag must be either 'mainnet' or 'testnet' when OTLP is enabled")
+			os.Exit(1)
+		}
+	}
+
+	// Initialize metrics
+	metricsConfig := metrics.MetricsConfig{
+		EnablePrometheus: !*disableProm && *enableProm,
+		EnableOTLP:       *enableOTLP,
+		OTLPEndpoint:     *otlpEndpoint,
+		OTLPInsecure:     *otlpInsecure,
+		Identity:         *identity,
+		Chain:            *chain,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if err := metrics.InitMetrics(ctx, metricsConfig); err != nil {
+		logger.Error("Failed to initialize metrics: %v", err)
+		os.Exit(1)
+	}
+
+	exporter.Start(ctx, cfg)
+
+	<-ctx.Done()
+	logger.Info("Shutting down gracefully")
 }
