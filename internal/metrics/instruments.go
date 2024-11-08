@@ -156,7 +156,7 @@ func createInstruments() error {
 	}
 
 	HLSoftwareVersionInfo, err = meter.Int64ObservableGauge(
-		"hl_software_version_info",
+		"hl_software_version",
 		api.WithDescription("Software version information"),
 	)
 	if err != nil {

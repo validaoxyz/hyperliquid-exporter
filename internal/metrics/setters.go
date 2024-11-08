@@ -99,7 +99,7 @@ func SetValidatorCount(count int64) {
 	currentValues[HLValidatorCountGauge] = count
 }
 
-func SetSoftwareVersion(version string, commitHash string) {
+func SetSoftwareVersion(commit string, date string) {
 	metricsMutex.Lock()
 	defer metricsMutex.Unlock()
 	if _, exists := labeledValues[HLSoftwareVersionInfo]; !exists {
@@ -108,12 +108,11 @@ func SetSoftwareVersion(version string, commitHash string) {
 	labeledValues[HLSoftwareVersionInfo]["current"] = labeledValue{
 		value: 1,
 		labels: []attribute.KeyValue{
-			attribute.String("version", version),
-			attribute.String("commit_hash", commitHash),
+			attribute.String("date", date),
+			attribute.String("commit", commit),
 		},
 	}
 }
-
 func SetSoftwareUpToDate(upToDate bool) {
 	metricsMutex.Lock()
 	defer metricsMutex.Unlock()
