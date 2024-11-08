@@ -64,10 +64,6 @@ func Start(ctx context.Context, cfg config.Config) {
 			logger.Error("Version monitor error: %v", err)
 		case err := <-updateErrCh:
 			logger.Error("Update checker error: %v", err)
-		case err := <-evmErrCh: // Handle errors from the EVM Monitor
-			logger.Error("EVM monitor error: %v", err)
-		case err := <-evmTxsErrCh:
-			logger.Error("EVM Transactions Monitor error: %v", err)
 		case <-ctx.Done():
 			logger.Info("Shutting down monitors...")
 			return
