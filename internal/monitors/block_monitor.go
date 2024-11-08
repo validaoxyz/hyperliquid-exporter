@@ -2,7 +2,9 @@ package monitors
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -16,8 +18,7 @@ import (
 
 var lastBlockTime time.Time
 
-// StartBlockMonitor starts monitoring block time logs
-func StartBlockMonitor(cfg config.Config) {
+func StartBlockMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	go func() {
 		blockTimeDir := filepath.Join(cfg.NodeHome, "data/block_times")
 		var currentFile string
@@ -25,134 +26,90 @@ func StartBlockMonitor(cfg config.Config) {
 		isFirstRun := true
 
 		for {
-			// Check for new files
-			latestFile, err := utils.GetLatestFile(blockTimeDir)
-			if err != nil {
-				logger.Error("Error finding latest block time file: %v", err)
-				time.Sleep(1 * time.Second)
-				continue
-			}
-
-			// If a new file is found, switch to it
-			if latestFile != currentFile {
-				logger.Info("Switching to new block time file: %s", latestFile)
-				if fileReader != nil {
-					fileReader = nil // Allow the old file to be garbage collected
-				}
-				file, err := os.Open(latestFile)
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				// Check for new files
+				latestFile, err := utils.GetLatestFile(blockTimeDir)
 				if err != nil {
-					logger.Error("Error opening new block time file: %v", err)
+					errCh <- fmt.Errorf("error finding latest block time file: %w", err)
 					time.Sleep(1 * time.Second)
 					continue
 				}
 
-				if isFirstRun {
-					// On first run, seek to the end of the file
-					_, err = file.Seek(0, io.SeekEnd)
+				// If a new file is found, switch to it
+				if latestFile != currentFile {
+					logger.Info("Switching to new block time file: %s", latestFile)
+					if fileReader != nil {
+						fileReader = nil // Allow the old file to be garbage collected
+					}
+					file, err := os.Open(latestFile)
 					if err != nil {
-						logger.Error("Error seeking to end of file: %v", err)
-						file.Close()
+						errCh <- fmt.Errorf("error opening new block time file: %w", err)
 						time.Sleep(1 * time.Second)
 						continue
 					}
-					logger.Info("First run: starting to stream from the end of file %s", latestFile)
-				} else {
-					logger.Info("Not first run: reading entire file %s", latestFile)
+
+					if isFirstRun {
+						// On first run, seek to the end of the file
+						_, err = file.Seek(0, io.SeekEnd)
+						if err != nil {
+							errCh <- fmt.Errorf("error seeking to end of file: %w", err)
+							file.Close()
+							time.Sleep(1 * time.Second)
+							continue
+						}
+						logger.Info("First run: starting to stream from the end of file %s", latestFile)
+					} else {
+						logger.Info("Not first run: reading entire file %s", latestFile)
+					}
+
+					fileReader = bufio.NewReader(file)
+					currentFile = latestFile
+					isFirstRun = false
 				}
 
-				fileReader = bufio.NewReader(file)
-				currentFile = latestFile
-				isFirstRun = false
-			}
-
-			// Read and process lines
-			for {
-				line, err := fileReader.ReadString('\n')
-				if err != nil {
-					if err == io.EOF {
-						// End of file reached, wait a bit before checking for more data
-						time.Sleep(100 * time.Millisecond)
+				// Read and process lines
+				for {
+					line, err := fileReader.ReadString('\n')
+					if err != nil {
+						if err == io.EOF {
+							// End of file reached, wait a bit before checking for more data
+							time.Sleep(100 * time.Millisecond)
+							break
+						}
+						errCh <- fmt.Errorf("error reading from block time file: %w", err)
 						break
 					}
-					logger.Error("Error reading from block time file: %v", err)
-					break
+					if err := parseBlockTimeLine(ctx, line); err != nil {
+						errCh <- fmt.Errorf("error parsing block time line: %w", err)
+					}
 				}
-				parseBlockTimeLine(line)
 			}
 		}
 	}()
 }
 
-func processBlockTimeFile(filePath string, offset int64, isFirstRun bool) int64 {
-	file, err := os.Open(filePath)
-	if err != nil {
-		logger.Error("Error opening block time file %s: %v", filePath, err)
-		return offset
-	}
-	defer file.Close()
-
-	fileInfo, err := file.Stat()
-	if err != nil {
-		logger.Error("Error getting file info for %s: %v", filePath, err)
-		return offset
-	}
-
-	if isFirstRun && offset == 0 {
-		// If it's the first run and we haven't processed this file before,
-		// start reading from the end of the file
-		offset = fileInfo.Size()
-	}
-
-	_, err = file.Seek(offset, 0)
-	if err != nil {
-		logger.Error("Error seeking in file %s: %v", filePath, err)
-		return offset
-	}
-
-	reader := bufio.NewReader(file)
-	lineCount := 0
-	for {
-		line, err := reader.ReadString('\n')
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			logger.Error("Error reading line from block time file %s: %v", filePath, err)
-			break
-		}
-		parseBlockTimeLine(line)
-		lineCount++
-		offset += int64(len(line))
-	}
-
-	logger.Info("Processed %d new lines from block time file %s", lineCount, filePath)
-	return offset
-}
-
-func parseBlockTimeLine(line string) {
+func parseBlockTimeLine(ctx context.Context, line string) error {
 	var data map[string]interface{}
-	err := json.Unmarshal([]byte(line), &data)
-	if err != nil {
-		logger.Error("Error parsing block time line: %v", err)
-		return
+	if err := json.Unmarshal([]byte(line), &data); err != nil {
+		return fmt.Errorf("error parsing block time line: %w", err)
 	}
 
 	height, ok := data["height"].(float64)
 	if !ok {
-		logger.Warning("Height not found or not a number")
-		return
+		return fmt.Errorf("height not found or not a number")
 	}
 
 	blockTime, ok := data["block_time"].(string)
 	if !ok {
-		logger.Warning("Block time not found or not a string")
-		return
+		return fmt.Errorf("block time not found or not a string")
 	}
 
 	applyDuration, ok := data["apply_duration"].(float64)
 	if !ok {
-		logger.Warning("Apply duration not found or not a number")
-		return
+		return fmt.Errorf("apply duration not found or not a number")
 	}
 
 	// Convert applyDuration from seconds to milliseconds
@@ -162,20 +119,17 @@ func parseBlockTimeLine(line string) {
 	layout := "2006-01-02T15:04:05.999999999"
 	parsedTime, err := time.Parse(layout, blockTime)
 	if err != nil {
-		logger.Error("Error parsing block time: %v", err)
-		return
+		return fmt.Errorf("error parsing block time: %w", err)
 	}
 
 	// Assume the time is in UTC if no timezone is specified
 	parsedTime = parsedTime.UTC()
 
-	unixTimestamp := float64(parsedTime.Unix())
-
 	// Calculate block time difference
 	if !lastBlockTime.IsZero() {
 		blockTimeDiff := parsedTime.Sub(lastBlockTime).Milliseconds()
 		if blockTimeDiff > 0 {
-			metrics.HLBlockTimeHistogram.Observe(float64(blockTimeDiff))
+			metrics.RecordBlockTime(float64(blockTimeDiff))
 			logger.Debug("Block time difference: %d milliseconds", blockTimeDiff)
 		} else {
 			logger.Warning("Invalid block time difference: %d milliseconds", blockTimeDiff)
@@ -186,11 +140,12 @@ func parseBlockTimeLine(line string) {
 	lastBlockTime = parsedTime
 
 	// Update metrics
-	metrics.HLBlockHeightGauge.Set(height)
-	metrics.HLApplyDurationGauge.Set(applyDurationMs)
-	metrics.HLLatestBlockTimeGauge.Set(unixTimestamp)
-	metrics.HLApplyDurationHistogram.Observe(applyDurationMs)
+	metrics.SetBlockHeight(int64(height))
+	metrics.RecordApplyDuration(applyDurationMs)
+	metrics.SetLatestBlockTime(parsedTime.Unix())
 
-	logger.Debug("Updated metrics: height=%.0f, apply_duration=%.6f, block_time=%s UTC, unix_time=%f",
-		height, applyDuration, parsedTime.Format(time.RFC3339), unixTimestamp)
+	logger.Debug("Updated metrics: height=%.0f, apply_duration=%.6f, block_time=%s UTC",
+		height, applyDuration, parsedTime.Format(time.RFC3339))
+
+	return nil
 }
