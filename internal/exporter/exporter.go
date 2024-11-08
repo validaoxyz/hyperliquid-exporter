@@ -1,41 +1,78 @@
 package exporter
 
 import (
-	"net/http"
+	"context"
+	"time"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
-	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/monitors"
 )
 
-func Start(cfg config.Config) {
+func Start(ctx context.Context, cfg config.Config) {
 	logger.Info("Starting Hyperliquid exporter...")
 
+	// Create a context with cancellation for monitor goroutines
+	monitorCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Start monitors with error channels
+	blockErrCh := make(chan error, 1)
+	proposalErrCh := make(chan error, 1)
+	validatorErrCh := make(chan error, 1)
+	versionErrCh := make(chan error, 1)
+	updateErrCh := make(chan error, 1)
+	evmErrCh := make(chan error) // Add error channel for the EVM Monitor
+	evmTxsErrCh := make(chan error)
+	validatorStatusErrCh := make(chan error)
+
 	logger.Info("Initializing block monitor...")
-	monitors.StartBlockMonitor(cfg)
+	go monitors.StartBlockMonitor(monitorCtx, cfg, blockErrCh)
 
 	logger.Info("Initializing proposal monitor...")
-	monitors.StartProposalMonitor(cfg)
+	go monitors.StartProposalMonitor(monitorCtx, cfg, proposalErrCh)
 
 	logger.Info("Initializing validator monitor...")
-	monitors.StartValidatorMonitor()
+	go monitors.StartValidatorMonitor(monitorCtx, validatorErrCh)
 
 	logger.Info("Initializing version monitor...")
-	monitors.StartVersionMonitor(cfg)
+	go monitors.StartVersionMonitor(monitorCtx, cfg, versionErrCh)
 
 	logger.Info("Initializing update checker...")
-	monitors.StartUpdateChecker()
+	go monitors.StartUpdateChecker(monitorCtx, updateErrCh)
 
-	logger.Info("Setting up Prometheus metrics endpoint...")
-	http.Handle("/metrics", promhttp.Handler())
+	logger.Info("Initializing evm monitor...")
+	go monitors.StartEVMBlockHeightMonitor(monitorCtx, cfg, evmErrCh) // Start the EVM Monitor
 
-	metrics.RegisterMetrics()
+	logger.Info("Initializing EVM Transactions monitor...")
+	go monitors.StartEVMTransactionsMonitor(monitorCtx, cfg, evmTxsErrCh)
 
-	logger.Info("Exporter is now running. Listening on :8086")
-	err := http.ListenAndServe(":8086", nil)
-	if err != nil {
-		logger.Error("Error starting HTTP server: %v", err)
+	logger.Info("Initializing Validator Status monitor...")
+	monitors.StartValidatorStatusMonitor(ctx, cfg, validatorStatusErrCh)
+
+	logger.Info("Exporter is now running")
+
+	for {
+		select {
+		case err := <-blockErrCh:
+			logger.Error("Block monitor error: %v", err)
+		case err := <-proposalErrCh:
+			logger.Error("Proposal monitor error: %v", err)
+		case err := <-validatorErrCh:
+			logger.Error("Validator monitor error: %v", err)
+		case err := <-versionErrCh:
+			logger.Error("Version monitor error: %v", err)
+		case err := <-updateErrCh:
+			logger.Error("Update checker error: %v", err)
+		case err := <-evmErrCh: // Handle errors from the EVM Monitor
+			logger.Error("EVM monitor error: %v", err)
+		case err := <-evmTxsErrCh:
+			logger.Error("EVM Transactions Monitor error: %v", err)
+		case <-ctx.Done():
+			logger.Info("Shutting down monitors...")
+			return
+		}
+		// small sleep to prevent tight loop in case of repeated errors
+		time.Sleep(100 * time.Millisecond)
 	}
 }

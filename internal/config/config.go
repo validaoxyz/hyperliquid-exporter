@@ -2,59 +2,61 @@ package config
 
 import (
 	"os"
-	"strconv"
 
 	"github.com/joho/godotenv"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
 )
 
-// Config holds configuration values
 type Config struct {
-        HomeDir          string
-	NodeHome         string
-        BinaryHome       string
-	NodeBinary       string
-	IsValidator      bool
-	ValidatorAddress string
+	HomeDir    string
+	NodeHome   string
+	BinaryHome string
+	NodeBinary string
 }
 
-// LoadConfig loads environment variables and returns a Config struct
-func LoadConfig() Config {
-	err := godotenv.Load()
-	if err != nil {
-		logger.Warning("No .env file found, using default environment variables")
+type Flags struct {
+	NodeHome   string
+	NodeBinary string
+}
+
+// loads env vars and returns a Config struct
+func LoadConfig(flags *Flags) Config {
+	// Load .env file first
+	if err := godotenv.Load(); err != nil {
+		logger.Debug("No .env file found, using environment variables and flags")
 	}
 
-        homeDir := os.Getenv("HOME")
-        nodeHome := os.Getenv("NODE_HOME")
-        if nodeHome == "" {
-            nodeHome = homeDir + "/hl"
-        }
+	homeDir := os.Getenv("HOME")
 
-        binaryHome := os.Getenv("BINARY_HOME")
-        if binaryHome == "" {
-            binaryHome = homeDir
-        }
+	nodeHome := os.Getenv("NODE_HOME")
+	if nodeHome == "" {
+		nodeHome = homeDir + "/hl" //default fallback
+	}
+
+	binaryHome := os.Getenv("BINARY_HOME")
+	if binaryHome == "" {
+		binaryHome = homeDir
+	}
 
 	nodeBinary := os.Getenv("NODE_BINARY")
 	if nodeBinary == "" {
 		nodeBinary = binaryHome + "/hl-node"
 	}
 
-	isValidatorEnv := os.Getenv("IS_VALIDATOR")
-	isValidator, err := strconv.ParseBool(isValidatorEnv)
-	if err != nil {
-		isValidator = false
+	config := Config{
+		NodeHome:   nodeHome,
+		NodeBinary: nodeBinary,
 	}
 
-	validatorAddress := os.Getenv("VALIDATOR_ADDRESS")
-
-	return Config{
-                HomeDir:          homeDir,
-		NodeHome:         nodeHome,
-		BinaryHome:       binaryHome,
-		NodeBinary:       nodeBinary,
-		IsValidator:      isValidator,
-		ValidatorAddress: validatorAddress,
+	// override with flags if they're provided (non-empty)
+	if flags != nil {
+		if flags.NodeHome != "" {
+			config.NodeHome = flags.NodeHome
+		}
+		if flags.NodeBinary != "" {
+			config.NodeBinary = flags.NodeBinary
+		}
 	}
+
+	return config
 }

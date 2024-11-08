@@ -2,6 +2,8 @@ package monitors
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"os/exec"
 	"strings"
 	"time"
@@ -13,24 +15,31 @@ import (
 
 var currentCommitHash string
 
-// StartVersionMonitor starts monitoring the software version
-func StartVersionMonitor(cfg config.Config) {
+func StartVersionMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+
 		for {
-			updateVersionInfo(cfg)
-			time.Sleep(60 * time.Second)
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := updateVersionInfo(ctx, cfg); err != nil {
+					errCh <- fmt.Errorf("version monitor error: %w", err)
+				}
+			}
 		}
 	}()
 }
 
-func updateVersionInfo(cfg config.Config) {
-	cmd := exec.Command(cfg.NodeBinary, "--version")
+func updateVersionInfo(ctx context.Context, cfg config.Config) error {
+	cmd := exec.CommandContext(ctx, cfg.NodeBinary, "--version")
 	var out bytes.Buffer
 	cmd.Stdout = &out
-	err := cmd.Run()
-	if err != nil {
-		logger.Error("Error running version command: %v", err)
-		return
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("error running version command: %w", err)
 	}
 
 	versionOutput := out.String()
@@ -44,11 +53,10 @@ func updateVersionInfo(cfg config.Config) {
 			currentCommitHash = strings.TrimSpace(commitParts[1])
 		}
 
-		// Reset the metric before setting the new value
-		metrics.HLSoftwareVersionInfo.Reset()
-		metrics.HLSoftwareVersionInfo.WithLabelValues(currentCommitHash, date).Set(1)
+		metrics.SetSoftwareVersion(currentCommitHash, date)
 		logger.Info("Updated software version: commit=%s, date=%s", currentCommitHash, date)
-	} else {
-		logger.Error("Unexpected version output format: %s", versionOutput)
+		return nil
 	}
+
+	return fmt.Errorf("unexpected version output format: %s", versionOutput)
 }
