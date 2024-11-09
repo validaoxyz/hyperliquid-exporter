@@ -44,6 +44,17 @@ func InitMetrics(ctx context.Context, cfg MetricsConfig) error {
 	return nil
 }
 
+func sanitizeEndpoint(endpoint string) string {
+	// Remove https:// or http:// if present
+	if len(endpoint) > 8 && (endpoint[:8] == "https://" || endpoint[:7] == "http://") {
+		if endpoint[:8] == "https://" {
+			return endpoint[8:]
+		}
+		return endpoint[7:]
+	}
+	return endpoint
+}
+
 func InitProvider(ctx context.Context, cfg MetricsConfig) error {
 	metricsMutex.RLock()
 	serverIP := nodeIdentity.ServerIP
@@ -64,7 +75,9 @@ func InitProvider(ctx context.Context, cfg MetricsConfig) error {
 	opts = append(opts, sdkmetric.WithResource(res))
 
 	if cfg.EnablePrometheus {
-		promExporter, err := prometheus.New()
+		promExporter, err := prometheus.New(
+			prometheus.WithoutScopeInfo(),
+		)
 		if err != nil {
 			return fmt.Errorf("failed to create Prometheus exporter: %w", err)
 		}
@@ -74,7 +87,7 @@ func InitProvider(ctx context.Context, cfg MetricsConfig) error {
 	// Initialize OTLP if enabled
 	if cfg.EnableOTLP {
 		options := []otlpmetrichttp.Option{
-			otlpmetrichttp.WithEndpoint(cfg.OTLPEndpoint),
+			otlpmetrichttp.WithEndpoint(sanitizeEndpoint(cfg.OTLPEndpoint)),
 		}
 
 		if cfg.OTLPInsecure {
