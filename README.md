@@ -55,7 +55,9 @@ By default, the exporter:
 ## Dashboards
 
 ### Sample Dashboard
-A sample dashboard using these metrics can be found here: [ValiDAO Hyperliquid Testnet Monitor](https://hyperliquid-testnet-monitor.validao.xyz/public-dashboards/ff0fbe53299b4f95bb6e9651826b26e0)
+A sample dashboard that can be used as a base for tracking local metrics can found here: [ValiDAO Hyperliquid Testnet Monitor](https://hyperliquid-testnet-monitor.validao.xyz/public-dashboards/ff0fbe53299b4f95bb6e9651826b26e0)
+
+Nodes that push metrics to `otel.hyperliquid.validao.xyz` will have their metrics shown here: [ValiDAO Hylperliquid OTEL dashboard](https://otel.hyperliquid.validao.xyz)
 
 You can import the `grafana/grafana.json` file provided in this repository to create your own Grafana dashboard.
 
