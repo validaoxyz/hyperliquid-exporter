@@ -16,7 +16,7 @@ func setupOTLPExporter(ctx context.Context, endpoint string) error {
 		return fmt.Errorf("failed to create OTLP exporter: %w", err)
 	}
 
-	reader := metric.NewPeriodicReader(exporter, metric.WithInterval(15*time.Second))
+	reader := metric.NewPeriodicReader(exporter, metric.WithInterval(5*time.Second))
 	opts := []metric.Option{metric.WithReader(reader)}
 
 	provider := metric.NewMeterProvider(opts...)

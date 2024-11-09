@@ -101,7 +101,7 @@ func InitProvider(ctx context.Context, cfg MetricsConfig) error {
 
 		reader := sdkmetric.NewPeriodicReader(
 			otlpExporter,
-			sdkmetric.WithInterval(15*time.Second),
+			sdkmetric.WithInterval(5*time.Second),
 		)
 		opts = append(opts, sdkmetric.WithReader(reader))
 	}
