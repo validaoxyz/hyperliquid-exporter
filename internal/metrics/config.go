@@ -7,4 +7,7 @@ type MetricsConfig struct {
 	OTLPInsecure     bool
 	Alias            string
 	Chain            string
+	NodeHome         string
+	ValidatorAddress string
+	IsValidator      bool
 }

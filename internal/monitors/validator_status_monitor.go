@@ -136,3 +136,50 @@ func ReadLastLine(filePath string) (string, error) {
 	}
 	return lastLine, nil
 }
+
+func GetValidatorStatus(nodeHome string) (string, bool) {
+	statusDir := filepath.Join(nodeHome, "data/node_logs/status/hourly")
+	latestFile, err := utils.GetLatestFile(statusDir)
+	if err != nil {
+		logger.Warning("Error finding latest status file: %v", err)
+		return "", false
+	}
+
+	fileInfo, err := os.Stat(latestFile)
+	if err != nil {
+		logger.Warning("Error getting status file info: %v", err)
+		return "", false
+	}
+
+	if time.Since(fileInfo.ModTime()) > 24*time.Hour {
+		return "", false
+	}
+
+	lastLine, err := ReadLastLine(latestFile)
+	if err != nil {
+		logger.Warning("Error reading last line of status file: %v", err)
+		return "", false
+	}
+
+	var rawData []json.RawMessage
+	if err := json.Unmarshal([]byte(lastLine), &rawData); err != nil {
+		logger.Warning("Failed to parse status array: %v", err)
+		return "", false
+	}
+
+	if len(rawData) != 2 {
+		logger.Warning("Unexpected validator status data format")
+		return "", false
+	}
+
+	var data struct {
+		HomeValidator string `json:"home_validator"`
+	}
+
+	if err := json.Unmarshal(rawData[1], &data); err != nil {
+		logger.Warning("Failed to parse validator data: %v", err)
+		return "", false
+	}
+
+	return data.HomeValidator, data.HomeValidator != ""
+}
