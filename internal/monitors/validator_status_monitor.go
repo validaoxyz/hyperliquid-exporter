@@ -15,6 +15,15 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/utils"
 )
 
+type StatusData struct {
+	Timestamp string `json:"0"`
+	Data      struct {
+		HomeValidator string          `json:"home_validator"`
+		Round         int64           `json:"round"`
+		CurrentStakes [][]interface{} `json:"current_stakes"`
+	} `json:"1"`
+}
+
 func StartValidatorStatusMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
@@ -77,22 +86,34 @@ func readValidatorStatus(nodeHome string) error {
 }
 
 func processValidatorStatusLine(line string) error {
-	var statusData struct {
-		ValidatorAddress string `json:"validator_address"`
+	var rawData []json.RawMessage
+	if err := json.Unmarshal([]byte(line), &rawData); err != nil {
+		return fmt.Errorf("failed to parse status array: %w", err)
 	}
 
-	err := json.Unmarshal([]byte(line), &statusData)
-	if err != nil {
-		return fmt.Errorf("failed to parse validator status line: %w", err)
+	if len(rawData) != 2 {
+		return fmt.Errorf("unexpected validator status data format")
 	}
 
-	// If we have a ValidatorAddress, assume the node is a validator
-	if statusData.ValidatorAddress != "" {
-		metrics.SetValidatorAddress(statusData.ValidatorAddress)
+	// Parse the second element (index 1) which contains the actual data
+	var data struct {
+		HomeValidator string          `json:"home_validator"`
+		Round         int64           `json:"round"`
+		CurrentStakes [][]interface{} `json:"current_stakes"`
+	}
+
+	if err := json.Unmarshal(rawData[1], &data); err != nil {
+		return fmt.Errorf("failed to parse validator data: %w", err)
+	}
+
+	if data.HomeValidator != "" {
+		metrics.SetValidatorAddress(data.HomeValidator)
 		metrics.SetIsValidator(true)
+		logger.Info("Found validator address: %s", data.HomeValidator)
 	} else {
 		metrics.SetValidatorAddress("")
 		metrics.SetIsValidator(false)
+		logger.Info("No validator address found")
 	}
 
 	return nil
