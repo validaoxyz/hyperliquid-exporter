@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -11,6 +13,10 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
+)
+
+const (
+	currentBinaryPath = "/tmp/hl_node_current"
 )
 
 var currentCommitHash string
@@ -33,8 +39,33 @@ func StartVersionMonitor(ctx context.Context, cfg config.Config, errCh chan<- er
 	}()
 }
 
+func copyBinary(src string) error {
+	source, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("error opening source binary: %w", err)
+	}
+	defer source.Close()
+
+	dest, err := os.OpenFile(currentBinaryPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
+	if err != nil {
+		return fmt.Errorf("error creating destination binary: %w", err)
+	}
+	defer dest.Close()
+
+	if _, err := io.Copy(dest, source); err != nil {
+		return fmt.Errorf("error copying binary: %w", err)
+	}
+
+	return nil
+}
+
 func updateVersionInfo(ctx context.Context, cfg config.Config) error {
-	cmd := exec.CommandContext(ctx, cfg.NodeBinary, "--version")
+	// Copy binary to temp location
+	if err := copyBinary(cfg.NodeBinary); err != nil {
+		return fmt.Errorf("error copying binary: %w", err)
+	}
+
+	cmd := exec.CommandContext(ctx, currentBinaryPath, "--version")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 
