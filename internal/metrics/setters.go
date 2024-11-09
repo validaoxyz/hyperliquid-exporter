@@ -166,13 +166,13 @@ func IncrementEVMTransactionsCounter() {
 func SetIsValidator(isValidator bool) {
 	metricsMutex.Lock()
 	defer metricsMutex.Unlock()
-	nodeAlias.IsValidator = isValidator
+	nodeIdentity.IsValidator = isValidator
 }
 
 func SetValidatorAddress(address string) {
 	metricsMutex.Lock()
 	defer metricsMutex.Unlock()
-	nodeAlias.ValidatorAddress = address
+	nodeIdentity.ValidatorAddress = address
 }
 
 func SetActiveStake(stake float64) {

@@ -17,10 +17,12 @@ import (
 
 // InitMetrics initializes the metrics system with the given configuration
 func InitMetrics(ctx context.Context, cfg MetricsConfig) error {
-	if err := InitializeNodeAlias(cfg); err != nil {
-		return fmt.Errorf("failed to initialize node alias: %w", err)
+	// Initialize node identity with values from config
+	if err := InitializeNodeIdentity(cfg); err != nil {
+		return fmt.Errorf("failed to initialize node identity: %w", err)
 	}
 
+	// Initialize the provider
 	if err := InitProvider(ctx, cfg); err != nil {
 		return fmt.Errorf("failed to initialize provider: %w", err)
 	}
@@ -28,8 +30,6 @@ func InitMetrics(ctx context.Context, cfg MetricsConfig) error {
 	if err := createInstruments(); err != nil {
 		return fmt.Errorf("failed to initialize instruments: %w", err)
 	}
-
-	// SetNodeInfo()
 
 	if cfg.EnablePrometheus {
 		if err := StartPrometheusServer(ctx, 8086); err != nil {
@@ -57,9 +57,9 @@ func sanitizeEndpoint(endpoint string) string {
 
 func InitProvider(ctx context.Context, cfg MetricsConfig) error {
 	metricsMutex.RLock()
-	serverIP := nodeAlias.ServerIP
-	isValidator := nodeAlias.IsValidator
-	validatorAddress := nodeAlias.ValidatorAddress
+	serverIP := nodeIdentity.ServerIP
+	isValidator := nodeIdentity.IsValidator
+	validatorAddress := nodeIdentity.ValidatorAddress
 	metricsMutex.RUnlock()
 
 	res := resource.NewWithAttributes(

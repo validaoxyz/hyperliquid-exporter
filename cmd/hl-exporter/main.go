@@ -12,6 +12,7 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/exporter"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
+	"github.com/validaoxyz/hyperliquid-exporter/internal/monitors"
 )
 
 func main() {
@@ -76,7 +77,13 @@ func main() {
 		}
 	}
 
-	// Initialize metrics
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// After loading config, before metrics initialization
+	validatorAddress, isValidator := monitors.GetValidatorStatus(cfg.NodeHome)
+
+	// Initialize metrics configuration
 	metricsConfig := metrics.MetricsConfig{
 		EnablePrometheus: !*disableProm && *enableProm,
 		EnableOTLP:       *enableOTLP,
@@ -84,10 +91,10 @@ func main() {
 		OTLPInsecure:     *otlpInsecure,
 		Alias:            *alias,
 		Chain:            *chain,
+		NodeHome:         cfg.NodeHome,
+		ValidatorAddress: validatorAddress,
+		IsValidator:      isValidator,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	if err := metrics.InitMetrics(ctx, metricsConfig); err != nil {
 		logger.Error("Failed to initialize metrics: %v", err)

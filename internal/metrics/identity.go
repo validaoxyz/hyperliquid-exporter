@@ -21,7 +21,7 @@ func getPublicIP() (string, error) {
 	return string(ip), nil
 }
 
-func InitializeNodeAlias(cfg MetricsConfig) error {
+func InitializeNodeIdentity(cfg MetricsConfig) error {
 	ip, err := getPublicIP()
 	if err != nil {
 		return fmt.Errorf("failed to get public IP: %w", err)
@@ -30,10 +30,12 @@ func InitializeNodeAlias(cfg MetricsConfig) error {
 	metricsMutex.Lock()
 	defer metricsMutex.Unlock()
 
-	nodeAlias = NodeAlias{
-		ServerIP: ip,
-		Alias:    cfg.Alias,
-		Chain:    cfg.Chain,
+	nodeIdentity = NodeIdentity{
+		ServerIP:         ip,
+		Alias:            cfg.Alias,
+		Chain:            cfg.Chain,
+		ValidatorAddress: cfg.ValidatorAddress,
+		IsValidator:      cfg.IsValidator,
 	}
 
 	return nil
