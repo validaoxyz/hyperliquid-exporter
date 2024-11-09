@@ -12,10 +12,10 @@ type labeledValue struct {
 	labels []attribute.KeyValue
 }
 
-type NodeIdentity struct {
+type NodeAlias struct {
 	ValidatorAddress string
 	ServerIP         string
-	Identity         string
+	Alias            string
 	IsValidator      bool
 	Chain            string
 }
@@ -26,7 +26,7 @@ var (
 	labeledValues = make(map[api.Observable]map[string]labeledValue)
 	metricsMutex  sync.RWMutex
 	callbacks     []api.Registration
-	nodeIdentity  NodeIdentity
+	nodeAlias  NodeAlias
 )
 
 // TODO CommonLabels holds the common labels to be added to all metrics

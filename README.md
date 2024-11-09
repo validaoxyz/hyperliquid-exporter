@@ -42,7 +42,7 @@ By default, the exporter:
 - `--enable-otlp`: Enable OTLP export (default: false)
 - `--otlp-endpoint`: OTLP endpoint (default: https://otel.hyperliquid.validao.xyz)
 - `--otlp-insecure`: Use insecure connection for OTLP (default: false)
-- `--identity`: Node identity (required when OTLP is enabled)
+- `--alias`: Node alias (required when OTLP is enabled)
 - `--chain`: Chain type ('mainnet' or 'testnet', required when OTLP is enabled)
 
 ### Node Configuration

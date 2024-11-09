@@ -5,6 +5,6 @@ type MetricsConfig struct {
 	EnableOTLP       bool
 	OTLPEndpoint     string
 	OTLPInsecure     bool
-	Identity         string
+	Alias            string
 	Chain            string
 }

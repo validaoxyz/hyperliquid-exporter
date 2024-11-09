@@ -27,7 +27,7 @@ func main() {
 		fmt.Println("  --otlp-endpoint    OTLP endpoint (default: otel.hyperliquid.validao.xyz)")
 		fmt.Println("  --node-home        Node home directory (overrides env var)")
 		fmt.Println("  --node-binary      Node binary path (overrides env var)")
-		fmt.Println("  --identity         Node identity (required when OTLP is enabled)")
+		fmt.Println("  --alias            Node alias (required when OTLP is enabled)")
 		fmt.Println("  --chain            Chain type (required when OTLP is enabled: 'mainnet' or 'testnet')")
 		fmt.Println("  --otlp-insecure    Use insecure connection for OTLP (default: false)")
 		os.Exit(1)
@@ -41,7 +41,7 @@ func main() {
 	otlpEndpoint := startCmd.String("otlp-endpoint", "otel.hyperliquid.validao.xyz", "OTLP endpoint (default: otel.hyperliquid.validao.xyz)")
 	nodeHome := startCmd.String("node-home", "", "Node home directory (overrides env var)")
 	nodeBinary := startCmd.String("node-binary", "", "Node binary path (overrides env var)")
-	identity := startCmd.String("identity", "", "Node identity (required when OTLP is enabled)")
+	alias := startCmd.String("alias", "", "Node alias (required when OTLP is enabled)")
 	chain := startCmd.String("chain", "", "Chain type (required when OTLP is enabled: 'mainnet' or 'testnet')")
 	otlpInsecure := startCmd.Bool("otlp-insecure", false, "Use insecure connection for OTLP (default: false)")
 
@@ -66,8 +66,8 @@ func main() {
 	cfg := config.LoadConfig(flags)
 
 	if *enableOTLP {
-		if *identity == "" {
-			logger.Error("--identity flag is required when OTLP is enabled. This can be whatever you choose and is just an identifier for your node.")
+		if *alias == "" {
+			logger.Error("--alias flag is required when OTLP is enabled. This can be whatever you choose and is just an identifier for your node.")
 			os.Exit(1)
 		}
 		if *chain != "mainnet" && *chain != "testnet" {
@@ -82,7 +82,7 @@ func main() {
 		EnableOTLP:       *enableOTLP,
 		OTLPEndpoint:     *otlpEndpoint,
 		OTLPInsecure:     *otlpInsecure,
-		Identity:         *identity,
+		Alias:            *alias,
 		Chain:            *chain,
 	}
 
