@@ -17,16 +17,25 @@ import (
 )
 
 func StartEVMTransactionsMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
+	// Wait a bit for validator status to be determined
+	time.Sleep(60 * time.Second)
+
+	// Only proceed if we're a validator
+	if metrics.IsValidator() {
+		logger.Info("Node is a validator, skipping EVM transactions monitoring")
+		return
+	}
+
+	evmTxsDir := filepath.Join(cfg.NodeHome, "data/dhs/EthTxs/hourly")
+	logger.Info("Starting EVM transactions monitoring for validator node in directory: %s", evmTxsDir)
+
 	go func() {
-		evmTxsDir := filepath.Join(cfg.NodeHome, "data/dhs/EthTxs/hourly")
-
-		logger.Info("Monitoring EVM transactions in directory: %s", evmTxsDir)
-
 		if _, err := os.Stat(evmTxsDir); os.IsNotExist(err) {
 			logger.Warning("EVM transactions directory does not exist: %s", evmTxsDir)
+			// Continue running but log info - directory might be created later
 		}
 
-		var currentFilePath string
+		var currentTxsFilePath string
 		var fileReader *bufio.Reader
 		isFirstRun := true
 
@@ -43,7 +52,7 @@ func StartEVMTransactionsMonitor(ctx context.Context, cfg config.Config, errCh c
 					continue
 				}
 
-				if latestFile != currentFilePath {
+				if latestFile != currentTxsFilePath {
 					logger.Info("Switching to new EVM transactions file: %s", latestFile)
 
 					if fileReader != nil {
@@ -70,7 +79,7 @@ func StartEVMTransactionsMonitor(ctx context.Context, cfg config.Config, errCh c
 					}
 
 					fileReader = bufio.NewReader(file)
-					currentFilePath = latestFile
+					currentTxsFilePath = latestFile
 				}
 
 				if fileReader != nil {
