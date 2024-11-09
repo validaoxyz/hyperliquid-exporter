@@ -17,8 +17,8 @@ import (
 
 // InitMetrics initializes the metrics system with the given configuration
 func InitMetrics(ctx context.Context, cfg MetricsConfig) error {
-	if err := InitializeNodeIdentity(cfg); err != nil {
-		return fmt.Errorf("failed to initialize node identity: %w", err)
+	if err := InitializeNodeAlias(cfg); err != nil {
+		return fmt.Errorf("failed to initialize node alias: %w", err)
 	}
 
 	if err := InitProvider(ctx, cfg); err != nil {
@@ -57,14 +57,14 @@ func sanitizeEndpoint(endpoint string) string {
 
 func InitProvider(ctx context.Context, cfg MetricsConfig) error {
 	metricsMutex.RLock()
-	serverIP := nodeIdentity.ServerIP
-	isValidator := nodeIdentity.IsValidator
-	validatorAddress := nodeIdentity.ValidatorAddress
+	serverIP := nodeAlias.ServerIP
+	isValidator := nodeAlias.IsValidator
+	validatorAddress := nodeAlias.ValidatorAddress
 	metricsMutex.RUnlock()
 
 	res := resource.NewWithAttributes(
 		semconv.SchemaURL,
-		attribute.String("instance", cfg.Identity),
+		attribute.String("instance", cfg.Alias),
 		attribute.String("job", fmt.Sprintf("hyperliquid-exporter/%s", cfg.Chain)),
 		attribute.String("server_ip", serverIP),
 		attribute.Bool("is_validator", isValidator),
