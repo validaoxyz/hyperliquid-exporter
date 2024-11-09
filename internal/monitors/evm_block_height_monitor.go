@@ -17,11 +17,19 @@ import (
 )
 
 func StartEVMBlockHeightMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
+	// Wait a bit for validator status to be determined
+	time.Sleep(60 * time.Second)
+
+	// Only proceed if we're a validator
+	if metrics.IsValidator() {
+		logger.Info("Node is a validator, skipping EVM monitoring")
+		return
+	}
+
+	evmBlockHeightDir := filepath.Join(cfg.NodeHome, "data/dhs/EthBlocks/hourly")
+	logger.Info("Starting EVM monitoring for validator node in directory: %s", evmBlockHeightDir)
+
 	go func() {
-		evmBlockHeightDir := filepath.Join(cfg.NodeHome, "data/dhs/EthBlocks/hourly")
-
-		logger.Info("Monitoring EVM block heights in directory: %s", evmBlockHeightDir)
-
 		if _, err := os.Stat(evmBlockHeightDir); os.IsNotExist(err) {
 			logger.Warning("EVM block height directory does not exist: %s", evmBlockHeightDir)
 			// Continue running but log info - directory might be created later
@@ -112,7 +120,6 @@ func processEVMBlockHeightLine(line string) error {
 	blockNumber := int64(blockNumberFloat)
 
 	metrics.SetEVMBlockHeight(blockNumber)
-	logger.Debug("Updated EVM block height metric to: %d", blockNumber)
 
 	return nil
 }
