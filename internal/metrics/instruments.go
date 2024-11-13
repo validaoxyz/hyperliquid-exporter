@@ -28,6 +28,7 @@ var (
 	HLActiveStakeGauge      api.Float64ObservableGauge
 	HLInactiveStakeGauge    api.Float64ObservableGauge
 	HLValidatorActiveStatus api.Float64ObservableGauge
+	HLValidatorRTTGauge     api.Float64ObservableGauge
 
 	// Histograms
 	HLBlockTimeHistogram     api.Float64Histogram
@@ -217,6 +218,14 @@ func createInstruments() error {
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create validator active status gauge: %w", err)
+	}
+
+	HLValidatorRTTGauge, err = meter.Float64ObservableGauge(
+		"hl_validator_rtt",
+		api.WithDescription("Round-trip time (RTT) to validator nodes in milliseconds"),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create validator RTT gauge: %w", err)
 	}
 
 	return nil

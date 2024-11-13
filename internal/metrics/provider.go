@@ -31,6 +31,7 @@ func getAllObservables() []api.Observable {
 		HLActiveStakeGauge,
 		HLInactiveStakeGauge,
 		HLValidatorActiveStatus,
+		HLValidatorRTTGauge,
 	}
 }
 

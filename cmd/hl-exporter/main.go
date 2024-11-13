@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
@@ -59,9 +60,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	if *chain != "" {
+		*chain = strings.ToLower(*chain)
+		if *chain != "mainnet" && *chain != "testnet" {
+			logger.Error("--chain flag must be either 'mainnet' or 'testnet' (case insensitive)")
+			os.Exit(1)
+		}
+		*chain = strings.ToLower(*chain)
+	}
+
 	flags := &config.Flags{
 		NodeHome:   *nodeHome,
 		NodeBinary: *nodeBinary,
+		Chain:      *chain,
 	}
 
 	cfg := config.LoadConfig(flags)
@@ -71,8 +82,8 @@ func main() {
 			logger.Error("--alias flag is required when OTLP is enabled. This can be whatever you choose and is just an identifier for your node.")
 			os.Exit(1)
 		}
-		if *chain != "mainnet" && *chain != "testnet" {
-			logger.Error("--chain flag must be either 'mainnet' or 'testnet' when OTLP is enabled")
+		if *chain == "" {
+			logger.Error("--chain flag is required when OTLP is enabled")
 			os.Exit(1)
 		}
 	}
