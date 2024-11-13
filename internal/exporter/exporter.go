@@ -25,15 +25,13 @@ func Start(ctx context.Context, cfg config.Config) {
 	evmErrCh := make(chan error) // Add error channel for the EVM Monitor
 	evmTxsErrCh := make(chan error)
 	validatorStatusErrCh := make(chan error)
+	validatorIPErrCh := make(chan error, 1)
 
 	logger.Info("Initializing block monitor...")
 	go monitors.StartBlockMonitor(monitorCtx, cfg, blockErrCh)
 
 	logger.Info("Initializing proposal monitor...")
 	go monitors.StartProposalMonitor(monitorCtx, cfg, proposalErrCh)
-
-	logger.Info("Initializing validator monitor...")
-	go monitors.StartValidatorMonitor(monitorCtx, validatorErrCh)
 
 	logger.Info("Initializing version monitor...")
 	go monitors.StartVersionMonitor(monitorCtx, cfg, versionErrCh)
@@ -50,6 +48,12 @@ func Start(ctx context.Context, cfg config.Config) {
 	logger.Info("Initializing Validator Status monitor...")
 	monitors.StartValidatorStatusMonitor(ctx, cfg, validatorStatusErrCh)
 
+	logger.Info("Initializing validator IP monitor...")
+	go monitors.StartValidatorIPMonitor(monitorCtx, cfg, validatorIPErrCh)
+
+	logger.Info("Initializing validator API monitor...")
+	go monitors.StartValidatorMonitor(monitorCtx, validatorErrCh)
+
 	logger.Info("Exporter is now running")
 
 	for {
@@ -64,6 +68,14 @@ func Start(ctx context.Context, cfg config.Config) {
 			logger.Error("Version monitor error: %v", err)
 		case err := <-updateErrCh:
 			logger.Error("Update checker error: %v", err)
+		case err := <-evmErrCh:
+			logger.Error("EVM Monitor error: %v", err)
+		case err := <-evmTxsErrCh:
+			logger.Error("EVM Transactions Monitor error: %v", err)
+		case err := <-validatorStatusErrCh:
+			logger.Error("Validator Status Monitor error: %v", err)
+		case err := <-validatorIPErrCh:
+			logger.Error("Validator IP Monitor error: %v", err)
 		case <-ctx.Done():
 			logger.Info("Shutting down monitors...")
 			return

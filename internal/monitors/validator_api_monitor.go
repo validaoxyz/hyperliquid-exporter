@@ -14,17 +14,20 @@ import (
 )
 
 type ValidatorSummary struct {
-	Validator string  `json:"validator"`
-	Signer    string  `json:"signer"`
-	Name      string  `json:"name"`
-	Stake     float64 `json:"stake"`
-	IsJailed  bool    `json:"isJailed"`
-	IsActive  bool    `json:"isActive"`
+	Validator       string  `json:"validator"`
+	Signer          string  `json:"signer"`
+	Name            string  `json:"name"`
+	Description     string  `json:"description"`
+	NRecentBlocks   int     `json:"nRecentBlocks"`
+	Stake           float64 `json:"stake"`
+	IsJailed        bool    `json:"isJailed"`
+	UnjailableAfter int64   `json:"unjailableAfter"`
+	IsActive        bool    `json:"isActive"`
 }
 
 func StartValidatorMonitor(ctx context.Context, errCh chan<- error) {
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(1 * time.Minute)
 		defer ticker.Stop()
 
 		for {
@@ -33,7 +36,8 @@ func StartValidatorMonitor(ctx context.Context, errCh chan<- error) {
 				return
 			case <-ticker.C:
 				if err := updateValidatorMetrics(ctx); err != nil {
-					errCh <- fmt.Errorf("validator monitor error: %w", err)
+					logger.Error("Validator monitor error: %v", err)
+					errCh <- err
 				}
 			}
 		}
@@ -45,11 +49,12 @@ func updateValidatorMetrics(ctx context.Context) error {
 	url := "https://api.hyperliquid-testnet.xyz/info"
 	payload := []byte(`{"type": "validatorSummaries"}`)
 
+	logger.Debug("Making request to validator API")
+
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(payload))
 	if err != nil {
 		return fmt.Errorf("error creating request: %w", err)
 	}
-
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := client.Do(req)
@@ -64,8 +69,10 @@ func updateValidatorMetrics(ctx context.Context) error {
 	}
 
 	var summaries []ValidatorSummary
+
 	if err := json.Unmarshal(body, &summaries); err != nil {
-		return fmt.Errorf("error parsing validator summaries: %w", err)
+		logger.Debug("Unmarshal error occurred here in validator_api_monitor.go")
+		return fmt.Errorf("error unmarshaling response: %w", err)
 	}
 
 	totalStake := 0.0
@@ -75,7 +82,6 @@ func updateValidatorMetrics(ctx context.Context) error {
 	inactiveStake := 0.0
 
 	for _, summary := range summaries {
-		// Update validator stake metric
 		metrics.SetValidatorStake(summary.Validator, summary.Signer, summary.Name, summary.Stake)
 
 		// Update validator jailed status
