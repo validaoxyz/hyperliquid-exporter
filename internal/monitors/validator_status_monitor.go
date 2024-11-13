@@ -61,7 +61,8 @@ func readValidatorStatus(nodeHome string) error {
 		return nil
 	}
 
-	if time.Since(fileInfo.ModTime()) > 24*time.Hour {
+	// if last file is > 12 hours, optimistically assume node is no longer a validator
+	if time.Since(fileInfo.ModTime()) > 12*time.Hour {
 		metrics.SetIsValidator(false)
 		metrics.SetValidatorAddress("")
 		return nil
