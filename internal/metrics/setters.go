@@ -20,7 +20,6 @@ func IncrementProposerCounter(proposer string) {
 }
 
 func SetBlockHeight(height int64) {
-	logger.Debug("Setting block height to: %d", height)
 	metricsMutex.Lock()
 	defer metricsMutex.Unlock()
 	currentValues[HLBlockHeightGauge] = height
@@ -203,6 +202,26 @@ func SetValidatorActiveStatus(validator, signer, name string, status float64) {
 
 	labeledValues[HLValidatorActiveStatus][validator] = labeledValue{
 		value:  status,
+		labels: labels,
+	}
+}
+
+func SetValidatorRTT(validator string, moniker string, ip string, latency float64) {
+	metricsMutex.Lock()
+	defer metricsMutex.Unlock()
+
+	labels := append([]attribute.KeyValue{
+		attribute.String("validator", validator),
+		attribute.String("moniker", moniker),
+		attribute.String("ip", ip),
+	}, getCommonLabels()...)
+
+	if _, exists := labeledValues[HLValidatorRTTGauge]; !exists {
+		labeledValues[HLValidatorRTTGauge] = make(map[string]labeledValue)
+	}
+
+	labeledValues[HLValidatorRTTGauge][validator] = labeledValue{
+		value:  latency,
 		labels: labels,
 	}
 }

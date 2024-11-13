@@ -121,3 +121,12 @@
 - Type: Gauge
 - Description: Total number of validators in the network
 - Usage: Track validator set size
+
+### hl_validator_rtt
+- Type: Gauge
+- Description: Round-trip time (RTT) to validator nodes in milliseconds
+- Labels:
+  - `validator`: validator address
+  - `moniker`: validator name/moniker
+  - `ip`: validator node IP address
+- Usage: Monitor validator node connectivity and network latency

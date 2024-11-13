@@ -12,11 +12,13 @@ type Config struct {
 	NodeHome   string
 	BinaryHome string
 	NodeBinary string
+	Chain      string
 }
 
 type Flags struct {
 	NodeHome   string
 	NodeBinary string
+	Chain      string
 }
 
 // loads env vars and returns a Config struct
@@ -46,6 +48,7 @@ func LoadConfig(flags *Flags) Config {
 	config := Config{
 		NodeHome:   nodeHome,
 		NodeBinary: nodeBinary,
+		Chain:      flags.Chain,
 	}
 
 	// override with flags if they're provided (non-empty)
@@ -55,6 +58,9 @@ func LoadConfig(flags *Flags) Config {
 		}
 		if flags.NodeBinary != "" {
 			config.NodeBinary = flags.NodeBinary
+		}
+		if flags.Chain != "" {
+			config.Chain = flags.Chain
 		}
 	}
 
