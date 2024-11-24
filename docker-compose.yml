@@ -2,13 +2,16 @@ services:
   hl_exporter:
     container_name: hyperliquid_exporter
     build: .
-    command: "start --log-level=info"
+    command:
+      - "start"
+      - "--log-level=info"
+      - "--chain=testnet"
+      - "--enable-otlp=true" # set to true if you wish to push metrics to a collector
+      - "--otlp-endpoint=https://otel.hyperliquid.validao.xyz" # by default, our collector which will display on public dashboards
+      - "--alias=yourAlias"
     volumes:
-      - <HYPERLIQUID LOCAL HOME>:/hl:ro
-    environment:
-      NODE_HOME: "/hl/"
-      NODE_BINARY: "/bin/hl-visor"
-      IS_VALIDATOR: "true"
-      VALIDATOR_ADDRESS: "0x1cb27f272899e8abe59374fcb9b9d677c97504f0"
+      - /home/ubuntu/hl:/hl:ro
+      - /home/ubuntu/hl-node:/bin/hl-node
+      - /home/ubuntu/hl-visor:/bin/hl-visor
     ports:
       - 8086:8086
