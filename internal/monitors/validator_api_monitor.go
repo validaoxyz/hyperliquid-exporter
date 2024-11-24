@@ -27,7 +27,7 @@ type ValidatorSummary struct {
 
 func StartValidatorMonitor(ctx context.Context, errCh chan<- error) {
 	go func() {
-		ticker := time.NewTicker(1 * time.Minute)
+		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
 
 		for {
