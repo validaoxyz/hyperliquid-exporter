@@ -12,6 +12,5 @@ services:
     volumes:
       - <HYPERLIQUID LOCAL HOME>:/hl:ro # e.g. /home/ubuntu/hl
       - <HYPERLIQUID NODE BINARY:/bin/hl-node # e.g. /home/ubuntu/hl-node
-      - <HYPERLIQUID LOCAL HOME>:/bin/hl-visor # e.g. /home/ubuntu/hl-visor
     ports:
       - 8086:8086
