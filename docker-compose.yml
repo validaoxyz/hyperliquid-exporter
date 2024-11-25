@@ -10,8 +10,8 @@ services:
       - "--otlp-endpoint=https://otel.hyperliquid.validao.xyz" # by default, our collector which will display on public dashboards
       - "--alias=yourAlias"
     volumes:
-      - /home/ubuntu/hl:/hl:ro
-      - /home/ubuntu/hl-node:/bin/hl-node
-      - /home/ubuntu/hl-visor:/bin/hl-visor
+      - <HYPERLIQUID LOCAL HOME>:/hl:ro # e.g. /home/ubuntu/hl
+      - <HYPERLIQUID NODE BINARY:/bin/hl-node # e.g. /home/ubuntu/hl-node
+      - <HYPERLIQUID LOCAL HOME>:/bin/hl-visor # e.g. /home/ubuntu/hl-visor
     ports:
       - 8086:8086
