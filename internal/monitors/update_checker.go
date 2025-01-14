@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	binaryURL        = "https://binaries.hyperliquid.xyz/Testnet/hl-visor"
+	binaryURL        = "https://binaries.hyperliquid-testnet.xyz/Testnet/hl-visor"
 	localBinaryPath  = "/tmp/hl-visor-latest"
 	downloadInterval = 5 * time.Minute
 )
