@@ -13,12 +13,14 @@ type Config struct {
 	BinaryHome string
 	NodeBinary string
 	Chain      string
+	EnableEVM  bool
 }
 
 type Flags struct {
 	NodeHome   string
 	NodeBinary string
 	Chain      string
+	EnableEVM  bool
 }
 
 // loads env vars and returns a Config struct
@@ -49,6 +51,7 @@ func LoadConfig(flags *Flags) Config {
 		NodeHome:   nodeHome,
 		NodeBinary: nodeBinary,
 		Chain:      flags.Chain,
+		EnableEVM:  flags.EnableEVM,
 	}
 
 	// override with flags if they're provided (non-empty)

@@ -32,6 +32,7 @@ func main() {
 		fmt.Println("  --alias            Node alias (required when OTLP is enabled)")
 		fmt.Println("  --chain            Chain type (required when OTLP is enabled: 'mainnet' or 'testnet')")
 		fmt.Println("  --otlp-insecure    Use insecure connection for OTLP (default: false)")
+		fmt.Println("  --evm              Enable EVM monitoring (default: true)")
 		os.Exit(1)
 	}
 
@@ -46,6 +47,7 @@ func main() {
 	alias := startCmd.String("alias", "", "Node alias (required when OTLP is enabled)")
 	chain := startCmd.String("chain", "", "Chain type (required when OTLP is enabled: 'mainnet' or 'testnet')")
 	otlpInsecure := startCmd.Bool("otlp-insecure", false, "Use insecure connection for OTLP (default: false)")
+	enableEVM := startCmd.Bool("evm", true, "Enable EVM monitoring (default: true)")
 
 	switch os.Args[1] {
 	case "start":
@@ -73,6 +75,7 @@ func main() {
 		NodeHome:   *nodeHome,
 		NodeBinary: *nodeBinary,
 		Chain:      *chain,
+		EnableEVM:  *enableEVM,
 	}
 
 	cfg := config.LoadConfig(flags)
@@ -105,6 +108,7 @@ func main() {
 		NodeHome:         cfg.NodeHome,
 		ValidatorAddress: validatorAddress,
 		IsValidator:      isValidator,
+		EnableEVM:        *enableEVM,
 	}
 
 	if err := metrics.InitMetrics(ctx, metricsConfig); err != nil {

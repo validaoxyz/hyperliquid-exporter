@@ -10,4 +10,5 @@ type MetricsConfig struct {
 	NodeHome         string
 	ValidatorAddress string
 	IsValidator      bool
+	EnableEVM        bool
 }
