@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
@@ -25,7 +26,7 @@ type ValidatorSummary struct {
 	IsActive        bool    `json:"isActive"`
 }
 
-func StartValidatorMonitor(ctx context.Context, errCh chan<- error) {
+func StartValidatorMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
@@ -35,7 +36,7 @@ func StartValidatorMonitor(ctx context.Context, errCh chan<- error) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := updateValidatorMetrics(ctx); err != nil {
+				if err := updateValidatorMetrics(ctx, cfg); err != nil {
 					logger.Error("Validator monitor error: %v", err)
 					errCh <- err
 				}
@@ -44,14 +45,22 @@ func StartValidatorMonitor(ctx context.Context, errCh chan<- error) {
 	}()
 }
 
-func updateValidatorMetrics(ctx context.Context) error {
+func updateValidatorMetrics(ctx context.Context, cfg config.Config) error {
 	client := &http.Client{Timeout: 10 * time.Second}
-	url := "https://api.hyperliquid-testnet.xyz/info"
+	
+	// Déterminer l'URL de l'API en fonction de la chaîne
+	var apiURL string
+	if cfg.Chain == "mainnet" {
+		apiURL = "https://api.hyperliquid.xyz/info"
+	} else {
+		apiURL = "https://api.hyperliquid-testnet.xyz/info"
+	}
+	
 	payload := []byte(`{"type": "validatorSummaries"}`)
 
 	logger.Debug("Making request to validator API")
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewBuffer(payload))
 	if err != nil {
 		return fmt.Errorf("error creating request: %w", err)
 	}
