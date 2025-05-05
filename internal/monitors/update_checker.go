@@ -13,19 +13,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
 const (
-	binaryURL        = "https://binaries.hyperliquid-testnet.xyz/Testnet/hl-visor"
 	localBinaryPath  = "/tmp/hl-visor-latest"
 	downloadInterval = 5 * time.Minute
 )
 
 var lastDownloadTime time.Time
 
-func StartUpdateChecker(ctx context.Context, errCh chan<- error) {
+func StartUpdateChecker(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	go func() {
 		ticker := time.NewTicker(300 * time.Second) // 5 minutes
 		defer ticker.Stop()
@@ -35,7 +35,7 @@ func StartUpdateChecker(ctx context.Context, errCh chan<- error) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := checkSoftwareUpdate(ctx); err != nil {
+				if err := checkSoftwareUpdate(ctx, cfg); err != nil {
 					errCh <- fmt.Errorf("update checker error: %w", err)
 				}
 			}
@@ -43,7 +43,7 @@ func StartUpdateChecker(ctx context.Context, errCh chan<- error) {
 	}()
 }
 
-func shouldDownloadNewBinary(ctx context.Context) (bool, error) {
+func shouldDownloadNewBinary(ctx context.Context, cfg config.Config) (bool, error) {
 	// Check if we have a recent download
 	if time.Since(lastDownloadTime) < downloadInterval {
 		return false, nil
@@ -52,6 +52,14 @@ func shouldDownloadNewBinary(ctx context.Context) (bool, error) {
 	// Check if file exists
 	if _, err := os.Stat(localBinaryPath); os.IsNotExist(err) {
 		return true, nil
+	}
+
+	// Déterminer l'URL du binaire en fonction de la chaîne
+	var binaryURL string
+	if cfg.Chain == "mainnet" {
+		binaryURL = "https://binaries.hyperliquid.xyz/Mainnet/hl-visor"
+	} else {
+		binaryURL = "https://binaries.hyperliquid-testnet.xyz/Testnet/hl-visor"
 	}
 
 	// Get remote file hash
@@ -91,13 +99,21 @@ func getFileHash(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func checkSoftwareUpdate(ctx context.Context) error {
-	needsDownload, err := shouldDownloadNewBinary(ctx)
+func checkSoftwareUpdate(ctx context.Context, cfg config.Config) error {
+	needsDownload, err := shouldDownloadNewBinary(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("error checking binary status: %w", err)
 	}
 
 	if needsDownload {
+		// Déterminer l'URL du binaire en fonction de la chaîne
+		var binaryURL string
+		if cfg.Chain == "mainnet" {
+			binaryURL = "https://binaries.hyperliquid.xyz/Mainnet/hl-visor"
+		} else {
+			binaryURL = "https://binaries.hyperliquid-testnet.xyz/Testnet/hl-visor"
+		}
+
 		downloadCmd := exec.CommandContext(ctx, "curl", "-sSL", "-o", localBinaryPath, binaryURL)
 		if err := downloadCmd.Run(); err != nil {
 			return fmt.Errorf("error downloading latest binary: %w", err)
