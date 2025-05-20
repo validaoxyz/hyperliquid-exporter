@@ -37,13 +37,15 @@ func Start(ctx context.Context, cfg config.Config) {
 	go monitors.StartVersionMonitor(monitorCtx, cfg, versionErrCh)
 
 	logger.Info("Initializing update checker...")
-	go monitors.StartUpdateChecker(monitorCtx, updateErrCh)
+	go monitors.StartUpdateChecker(monitorCtx, cfg, updateErrCh)
 
-	logger.Info("Initializing evm monitor...")
-	go monitors.StartEVMBlockHeightMonitor(monitorCtx, cfg, evmErrCh) // Start the EVM Monitor
+	if cfg.EnableEVM {
+		logger.Info("Initializing evm monitor...")
+		go monitors.StartEVMBlockHeightMonitor(monitorCtx, cfg, evmErrCh) // Start the EVM Monitor
 
-	logger.Info("Initializing EVM Transactions monitor...")
-	go monitors.StartEVMTransactionsMonitor(monitorCtx, cfg, evmTxsErrCh)
+		logger.Info("Initializing EVM Transactions monitor...")
+		go monitors.StartEVMTransactionsMonitor(monitorCtx, cfg, evmTxsErrCh)
+	}
 
 	logger.Info("Initializing Validator Status monitor...")
 	monitors.StartValidatorStatusMonitor(ctx, cfg, validatorStatusErrCh)
@@ -52,7 +54,7 @@ func Start(ctx context.Context, cfg config.Config) {
 	go monitors.StartValidatorIPMonitor(monitorCtx, cfg, validatorIPErrCh)
 
 	logger.Info("Initializing validator API monitor...")
-	go monitors.StartValidatorMonitor(monitorCtx, validatorErrCh)
+	go monitors.StartValidatorMonitor(monitorCtx, cfg, validatorErrCh)
 
 	logger.Info("Exporter is now running")
 
