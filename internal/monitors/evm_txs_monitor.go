@@ -26,7 +26,7 @@ func StartEVMTransactionsMonitor(ctx context.Context, cfg config.Config, errCh c
 		return
 	}
 
-	evmTxsDir := filepath.Join(cfg.NodeHome, "data/dhs/EthTxs/hourly")
+	evmTxsDir := filepath.Join(cfg.NodeHome, "data/dhs/EvmTxs/hourly")
 	logger.Info("Starting EVM transactions monitoring for validator node in directory: %s", evmTxsDir)
 
 	go func() {

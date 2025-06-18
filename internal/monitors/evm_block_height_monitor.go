@@ -26,7 +26,7 @@ func StartEVMBlockHeightMonitor(ctx context.Context, cfg config.Config, errCh ch
 		return
 	}
 
-	evmBlockHeightDir := filepath.Join(cfg.NodeHome, "data/dhs/EthBlocks/hourly")
+	evmBlockHeightDir := filepath.Join(cfg.NodeHome, "data/dhs/EvmBlocks/hourly")
 	logger.Info("Starting EVM monitoring for validator node in directory: %s", evmBlockHeightDir)
 
 	go func() {

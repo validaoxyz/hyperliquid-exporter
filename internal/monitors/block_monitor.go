@@ -20,7 +20,7 @@ var lastBlockTime time.Time
 
 func StartBlockMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	go func() {
-		blockTimeDir := filepath.Join(cfg.NodeHome, "data/block_times")
+		blockTimeDir := filepath.Join(cfg.NodeHome, "data/node_fast_block_times")
 		var currentFile string
 		var fileReader *bufio.Reader
 		isFirstRun := true
