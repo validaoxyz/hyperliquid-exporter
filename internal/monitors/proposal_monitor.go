@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
@@ -17,13 +16,25 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/utils"
 )
 
-var (
-	proposerCounts = make(map[string]int)
-	proposerMutex  sync.Mutex
-)
-
 func StartProposalMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	go func() {
+		// skip if replica monitoring is enabled as it will handle proposer counting
+		if cfg.EnableReplicaMetrics {
+			// already logged in exporter.go, just return silently
+			return
+		}
+
+		// wait a short time at startup to ensure signer mappings are populated
+		// prevents early proposals from having incorrect validator labels
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
+			logger.DebugComponent("consensus", "Initial startup delay complete, beginning proposal monitoring")
+		}
+
+		logger.InfoComponent("consensus", "Proposal monitor started - tracking block proposers")
+
 		logsDir := filepath.Join(cfg.NodeHome, "data/replica_cmds")
 		var currentFile string
 		var fileReader *bufio.Reader
@@ -34,7 +45,7 @@ func StartProposalMonitor(ctx context.Context, cfg config.Config, errCh chan<- e
 			case <-ctx.Done():
 				return
 			default:
-				// Check for new files
+				// check for new files
 				latestFile, err := utils.GetLatestFile(logsDir)
 				if err != nil {
 					errCh <- fmt.Errorf("error finding latest proposal log file: %w", err)
@@ -42,11 +53,11 @@ func StartProposalMonitor(ctx context.Context, cfg config.Config, errCh chan<- e
 					continue
 				}
 
-				// If a new file is found, switch to it
+				// if a new file is found, switch to it
 				if latestFile != currentFile {
-					logger.Info("Switching to new proposal log file: %s", latestFile)
+					logger.InfoComponent("consensus", "Switching to new proposal log file: %s", latestFile)
 					if fileReader != nil {
-						fileReader = nil // Allow the old file to be garbage collected
+						fileReader = nil // allow the old file to be garbage collected
 					}
 					file, err := os.Open(latestFile)
 					if err != nil {
@@ -56,7 +67,7 @@ func StartProposalMonitor(ctx context.Context, cfg config.Config, errCh chan<- e
 					}
 
 					if isFirstRun {
-						// On first run, seek to the end of the file
+						// on first run, seek to the end of the file
 						_, err = file.Seek(0, io.SeekEnd)
 						if err != nil {
 							errCh <- fmt.Errorf("error seeking to end of file: %w", err)
@@ -64,9 +75,9 @@ func StartProposalMonitor(ctx context.Context, cfg config.Config, errCh chan<- e
 							time.Sleep(1 * time.Second)
 							continue
 						}
-						logger.Info("First run: starting to stream from the end of file %s", latestFile)
+						logger.InfoComponent("consensus", "First run: starting to stream from the end of file %s", latestFile)
 					} else {
-						logger.Info("Not first run: reading entire file %s", latestFile)
+						logger.InfoComponent("consensus", "Not first run: reading entire file %s", latestFile)
 					}
 
 					fileReader = bufio.NewReader(file)
@@ -74,12 +85,12 @@ func StartProposalMonitor(ctx context.Context, cfg config.Config, errCh chan<- e
 					isFirstRun = false
 				}
 
-				// Read and process lines
+				// read and process lines
 				for {
 					line, err := fileReader.ReadString('\n')
 					if err != nil {
 						if err == io.EOF {
-							// End of file reached, wait a bit before checking for more data
+							// end of file reached, wait a bit before checking for more data
 							time.Sleep(100 * time.Millisecond)
 							break
 						}
@@ -96,9 +107,15 @@ func StartProposalMonitor(ctx context.Context, cfg config.Config, errCh chan<- e
 }
 
 func parseProposalLine(ctx context.Context, line string) error {
+	// quick sanity-skip: logs sometimes emit plain-text lines; ignore if line doesn't start with '[' or '{'
+	if len(line) == 0 || (line[0] != '[' && line[0] != '{') {
+		return nil
+	}
+
 	var data map[string]interface{}
 	if err := json.Unmarshal([]byte(line), &data); err != nil {
-		return fmt.Errorf("error parsing proposal line: %w", err)
+		// skip malformed JSON lines silently
+		return nil
 	}
 
 	abciBlock, ok := data["abci_block"].(map[string]interface{})
@@ -111,25 +128,9 @@ func parseProposalLine(ctx context.Context, line string) error {
 		return fmt.Errorf("proposer not found in ABCI block")
 	}
 
-	// Update OpenTelemetry metric
+	// update OpenTelemetry metric
 	metrics.IncrementProposerCounter(proposer)
 
-	// Update our local counter
-	proposerMutex.Lock()
-	proposerCounts[proposer]++
-	count := proposerCounts[proposer]
-	proposerMutex.Unlock()
-
-	logger.Debug("Proposer %s counter incremented. Local count: %d", proposer, count)
+	logger.DebugComponent("consensus", "Proposer %s counter incremented", proposer)
 	return nil
-}
-
-func GetProposerCounts() map[string]int {
-	proposerMutex.Lock()
-	defer proposerMutex.Unlock()
-	counts := make(map[string]int)
-	for k, v := range proposerCounts {
-		counts[k] = v
-	}
-	return counts
 }

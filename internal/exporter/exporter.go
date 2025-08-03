@@ -6,80 +6,139 @@ import (
 
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
+	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/monitors"
 )
 
 func Start(ctx context.Context, cfg config.Config) {
-	logger.Info("Starting Hyperliquid exporter...")
+	logger.InfoComponent("system", "Starting Hyperliquid exporter...")
 
-	// Create a context with cancellation for monitor goroutines
+	// create context with cancellation for monitor goroutines
 	monitorCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Start monitors with error channels
+	// start monitors with error channels
 	blockErrCh := make(chan error, 1)
 	proposalErrCh := make(chan error, 1)
 	validatorErrCh := make(chan error, 1)
 	versionErrCh := make(chan error, 1)
 	updateErrCh := make(chan error, 1)
-	evmErrCh := make(chan error) // Add error channel for the EVM Monitor
+	evmErrCh := make(chan error)
 	evmTxsErrCh := make(chan error)
+	evmAccountErrCh := make(chan error)
 	validatorStatusErrCh := make(chan error)
 	validatorIPErrCh := make(chan error, 1)
+	coreTxErrCh := make(chan error, 1)
+	consensusErrCh := make(chan error, 1)
+	replicaErrCh := make(chan error, 1)
+	latencyErrCh := make(chan error, 1)
+	gossipErrCh := make(chan error, 1)
 
-	logger.Info("Initializing block monitor...")
+	logger.InfoComponent("core", "Initializing block monitor...")
 	go monitors.StartBlockMonitor(monitorCtx, cfg, blockErrCh)
 
-	logger.Info("Initializing proposal monitor...")
-	go monitors.StartProposalMonitor(monitorCtx, cfg, proposalErrCh)
+	// start val API monitor early to populate signer mappings
+	logger.InfoComponent("consensus", "Initializing validator API monitor...")
+	go monitors.StartValidatorMonitor(monitorCtx, cfg, validatorErrCh)
 
-	logger.Info("Initializing version monitor...")
+	// only initialize proposal monitor if replica metrics are disabled
+	if !cfg.EnableReplicaMetrics {
+		logger.InfoComponent("consensus", "Initializing proposal monitor...")
+		go monitors.StartProposalMonitor(monitorCtx, cfg, proposalErrCh)
+	} else {
+		logger.InfoComponent("consensus", "Proposal monitor disabled - replica monitor will handle proposer counting")
+	}
+
+	logger.InfoComponent("system", "Initializing version monitor...")
 	go monitors.StartVersionMonitor(monitorCtx, cfg, versionErrCh)
 
-	logger.Info("Initializing update checker...")
+	logger.InfoComponent("system", "Initializing update checker...")
 	go monitors.StartUpdateChecker(monitorCtx, cfg, updateErrCh)
 
 	if cfg.EnableEVM {
-		logger.Info("Initializing evm monitor...")
-		go monitors.StartEVMBlockHeightMonitor(monitorCtx, cfg, evmErrCh) // Start the EVM Monitor
+		// use EVM monitor that reads from evm_block_and_receipts
+		logger.InfoComponent("evm", "Initializing EVM monitor (using evm_block_and_receipts)...")
+		go monitors.StartEVMMonitor(monitorCtx, cfg, evmErrCh)
 
-		logger.Info("Initializing EVM Transactions monitor...")
-		go monitors.StartEVMTransactionsMonitor(monitorCtx, cfg, evmTxsErrCh)
+		logger.InfoComponent("evm", "Initializing EVM Account monitor...")
+		go monitors.StartEVMAccountMonitor(monitorCtx, cfg, evmAccountErrCh)
 	}
 
-	logger.Info("Initializing Validator Status monitor...")
+	logger.InfoComponent("consensus", "Initializing Validator Status monitor...")
 	monitors.StartValidatorStatusMonitor(ctx, cfg, validatorStatusErrCh)
 
-	logger.Info("Initializing validator IP monitor...")
-	go monitors.StartValidatorIPMonitor(monitorCtx, cfg, validatorIPErrCh)
+	if cfg.EnableValidatorRTT {
+		logger.InfoComponent("consensus", "Initializing validator IP monitor...")
+		go monitors.StartValidatorIPMonitor(monitorCtx, cfg, validatorIPErrCh)
+	} else {
+		logger.InfoComponent("consensus", "Validator IP monitor disabled")
+	}
 
-	logger.Info("Initializing validator API monitor...")
-	go monitors.StartValidatorMonitor(monitorCtx, cfg, validatorErrCh)
+	logger.InfoComponent("consensus", "Initializing comprehensive consensus monitor...")
+	go monitors.StartConsensusMonitor(monitorCtx, &cfg, consensusErrCh)
 
-	logger.Info("Exporter is now running")
+	// start validator latency monitor (only runs on validator nodes)
+	logger.InfoComponent("latency", "Initializing validator latency monitor...")
+	go monitors.StartValidatorLatencyMonitor(monitorCtx, &cfg, latencyErrCh)
+
+	// start gossip monitor (only runs if gossip_rpc logs exist)
+	logger.InfoComponent("gossip", "Initializing gossip monitor...")
+	go monitors.StartGossipMonitor(monitorCtx, &cfg, gossipErrCh)
+
+	if cfg.EnableReplicaMetrics {
+		logger.InfoComponent("replica", "Initializing replica commands monitor (streaming)...")
+		replicaMonitor := monitors.NewReplicaMonitor(cfg.ReplicaDataDir, cfg.ReplicaBufferSize)
+		go func() {
+			if err := replicaMonitor.Start(monitorCtx); err != nil {
+				replicaErrCh <- err
+			}
+		}()
+	}
+
+	logger.InfoComponent("system", "Exporter is now running")
+
+	// start memory monitoring
+	go metrics.StartMemoryMonitoring(monitorCtx)
+
+	// start metrics cleanup to prevent unbounded map growth
+	metrics.StartMetricsCleanup()
+	defer metrics.StopMetricsCleanup()
 
 	for {
 		select {
 		case err := <-blockErrCh:
-			logger.Error("Block monitor error: %v", err)
+			logger.ErrorComponent("core", "Block monitor error: %v", err)
 		case err := <-proposalErrCh:
-			logger.Error("Proposal monitor error: %v", err)
+			logger.ErrorComponent("consensus", "Proposal monitor error: %v", err)
 		case err := <-validatorErrCh:
-			logger.Error("Validator monitor error: %v", err)
+			logger.ErrorComponent("consensus", "Validator monitor error: %v", err)
 		case err := <-versionErrCh:
-			logger.Error("Version monitor error: %v", err)
+			logger.ErrorComponent("system", "Version monitor error: %v", err)
 		case err := <-updateErrCh:
-			logger.Error("Update checker error: %v", err)
+			logger.ErrorComponent("system", "Update checker error: %v", err)
 		case err := <-evmErrCh:
-			logger.Error("EVM Monitor error: %v", err)
+			logger.ErrorComponent("evm", "EVM Monitor error: %v", err)
 		case err := <-evmTxsErrCh:
-			logger.Error("EVM Transactions Monitor error: %v", err)
+			// This channel is no longer used but kept for compatibility
+			logger.ErrorComponent("evm", "Legacy EVM Transactions Monitor error (should not happen): %v", err)
+		case err := <-evmAccountErrCh:
+			logger.ErrorComponent("evm", "EVM Account Monitor error: %v", err)
 		case err := <-validatorStatusErrCh:
-			logger.Error("Validator Status Monitor error: %v", err)
+			logger.ErrorComponent("consensus", "Validator Status Monitor error: %v", err)
 		case err := <-validatorIPErrCh:
-			logger.Error("Validator IP Monitor error: %v", err)
+			logger.ErrorComponent("consensus", "Validator IP Monitor error: %v", err)
+		case err := <-coreTxErrCh:
+			logger.ErrorComponent("core", "Core TX Monitor error: %v", err)
+		case err := <-consensusErrCh:
+			logger.ErrorComponent("consensus", "Consensus monitor error: %v", err)
+		case err := <-replicaErrCh:
+			logger.ErrorComponent("replica", "Replica monitor error: %v", err)
+		case err := <-latencyErrCh:
+			logger.ErrorComponent("latency", "Validator latency monitor error: %v", err)
+		case err := <-gossipErrCh:
+			logger.ErrorComponent("gossip", "Gossip monitor error: %v", err)
 		case <-ctx.Done():
-			logger.Info("Shutting down monitors...")
+			logger.InfoComponent("system", "Shutting down monitors...")
 			return
 		}
 		// small sleep to prevent tight loop in case of repeated errors
