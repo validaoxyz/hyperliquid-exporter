@@ -154,7 +154,7 @@ func (m *ConsensusMonitor) monitorConsensusLogs(ctx context.Context, errCh chan<
 
 	// check if consensus log directory exists
 	if _, err := os.Stat(consensusDir); os.IsNotExist(err) {
-		logger.InfoComponent("consensus", "Consensus log directory not found, monitoring disabled: %s", consensusDir)
+		logger.InfoComponent("consensus", "Consensus logs not available (non-validator node) - skipping consensus monitoring")
 		return
 	}
 
@@ -674,7 +674,7 @@ func (m *ConsensusMonitor) monitorStatusLogs(ctx context.Context, errCh chan<- e
 
 	// check if status log dir exists
 	if _, err := os.Stat(statusDir); os.IsNotExist(err) {
-		logger.InfoComponent("consensus", "Status log directory not found, monitoring disabled: %s", statusDir)
+		logger.InfoComponent("consensus", "Status logs not available (non-validator node) - skipping status monitoring")
 		return
 	}
 
