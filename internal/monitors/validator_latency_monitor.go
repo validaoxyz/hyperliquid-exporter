@@ -57,7 +57,7 @@ func StartValidatorLatencyMonitor(ctx context.Context, cfg *config.Config, errCh
 
 	// check if latency directories exist
 	if _, err := os.Stat(m.latencyDir); os.IsNotExist(err) {
-		logger.InfoComponent("latency", "Validator latency directory not found, monitoring disabled: %s", m.latencyDir)
+		logger.InfoComponent("latency", "Validator latency metrics not available (non-validator node) - skipping latency monitoring")
 		return
 	}
 
