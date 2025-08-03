@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -139,8 +140,16 @@ func monitorBlockState(ctx context.Context, cfg config.Config, errCh chan<- erro
 					errCh <- fmt.Errorf("error reading from %s block time file: %w", stateType, err)
 					break
 				}
+				// Skip empty lines
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+
 				if err := parseBlockTimeLine(ctx, line, stateType); err != nil {
-					errCh <- fmt.Errorf("error parsing %s block time line: %w", stateType, err)
+					// Skip invalid lines silently - these are likely partial writes
+					// The next read cycle will get the complete line
+					logger.DebugComponent("core", "Skipping potentially incomplete %s block time line: %v", stateType, err)
 				}
 			}
 		}
@@ -298,9 +307,17 @@ func monitorLegacyBlockState(ctx context.Context, cfg config.Config, errCh chan<
 					errCh <- fmt.Errorf("error reading from block time file: %w", err)
 					break
 				}
+				// Skip empty lines
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+
 				// process without state label for legacy format
 				if err := parseLegacyBlockTimeLine(ctx, line); err != nil {
-					errCh <- fmt.Errorf("error parsing block time line: %w", err)
+					// Skip invalid lines silently - these are likely partial writes
+					// The next read cycle will get the complete line
+					logger.DebugComponent("core", "Skipping potentially incomplete legacy block time line: %v", err)
 				}
 			}
 		}
