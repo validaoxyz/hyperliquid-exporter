@@ -3,7 +3,12 @@
 
 # Ignore any binaries
 hl_exporter
+hl-exporter
+hl-exporter-*
 bin/
 
 # Ignore hl-python-venv directory
 hl-python-venv/
+
+# Ignore local Hyperliquid node data
+hl/

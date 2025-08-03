@@ -6,11 +6,9 @@ services:
       - "start"
       - "--log-level=info"
       - "--chain=testnet"
-      - "--enable-otlp=true" # set to true if you wish to push metrics to a collector
-      - "--otlp-endpoint=https://otel.hyperliquid.validao.xyz" # by default, our collector which will display on public dashboards
-      - "--alias=yourAlias"
+      - "--replica-metrics=true" # Enable replica monitor for core tx metrics
     volumes:
-      - <HYPERLIQUID LOCAL HOME>:/hl:ro # e.g. /home/ubuntu/hl
-      - <HYPERLIQUID NODE BINARY:/bin/hl-node # e.g. /home/ubuntu/hl-node
+      - /home/ubuntu/hl:/hl:ro # Hyperliquid node data directory
+      - /home/ubuntu/hl-node:/bin/hl-node # Hyperliquid node binary
     ports:
       - 8086:8086

@@ -15,15 +15,16 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
-const (
-	currentBinaryPath = "/tmp/hl_node_current"
-)
-
 var currentCommitHash string
 
 func StartVersionMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	go func() {
-		ticker := time.NewTicker(60 * time.Second)
+		// run immediately on startup
+		if err := updateVersionInfo(ctx, cfg); err != nil {
+			errCh <- fmt.Errorf("version monitor error: %w", err)
+		}
+
+		ticker := time.NewTicker(30 * time.Minute)
 		defer ticker.Stop()
 
 		for {
@@ -39,33 +40,43 @@ func StartVersionMonitor(ctx context.Context, cfg config.Config, errCh chan<- er
 	}()
 }
 
-func copyBinary(src string) error {
-	source, err := os.Open(src)
+func updateVersionInfo(ctx context.Context, cfg config.Config) error {
+	// create a temporary file for the binary copy
+	tmpFile, err := os.CreateTemp("", "hl_node_*.tmp")
+	if err != nil {
+		return fmt.Errorf("error creating temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close() // close immediately, we'll open it for writing
+
+	// ensure cleanup
+	defer os.Remove(tmpPath)
+
+	// copy the binary to the temp file
+	source, err := os.Open(cfg.NodeBinary)
 	if err != nil {
 		return fmt.Errorf("error opening source binary: %w", err)
 	}
 	defer source.Close()
 
-	dest, err := os.OpenFile(currentBinaryPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
+	dest, err := os.OpenFile(tmpPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
 	if err != nil {
-		return fmt.Errorf("error creating destination binary: %w", err)
+		return fmt.Errorf("error opening temp file: %w", err)
 	}
 	defer dest.Close()
 
 	if _, err := io.Copy(dest, source); err != nil {
 		return fmt.Errorf("error copying binary: %w", err)
 	}
+	dest.Close() // Close before executing
 
-	return nil
-}
-
-func updateVersionInfo(ctx context.Context, cfg config.Config) error {
-	// Copy binary to temp location
-	if err := copyBinary(cfg.NodeBinary); err != nil {
-		return fmt.Errorf("error copying binary: %w", err)
+	// make the temp file executable
+	if err := os.Chmod(tmpPath, 0755); err != nil {
+		return fmt.Errorf("error making temp file executable: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, currentBinaryPath, "--version")
+	// run version command on the temp copy
+	cmd := exec.CommandContext(ctx, tmpPath, "--version")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 
@@ -85,7 +96,7 @@ func updateVersionInfo(ctx context.Context, cfg config.Config) error {
 		}
 
 		metrics.SetSoftwareVersion(currentCommitHash, date)
-		logger.Info("Updated software version: commit=%s, date=%s", currentCommitHash, date)
+		logger.InfoComponent("system", "Detected hl-node version: commit=%s, date=%s", currentCommitHash, date)
 		return nil
 	}
 

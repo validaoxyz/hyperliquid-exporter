@@ -1,33 +1,29 @@
 package monitors
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
+	"strings"
 	"time"
 
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
+	hyperliquidapi "github.com/validaoxyz/hyperliquid-exporter/internal/hyperliquid-api"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
-type ValidatorSummary struct {
-	Validator       string  `json:"validator"`
-	Signer          string  `json:"signer"`
-	Name            string  `json:"name"`
-	Description     string  `json:"description"`
-	NRecentBlocks   int     `json:"nRecentBlocks"`
-	Stake           float64 `json:"stake"`
-	IsJailed        bool    `json:"isJailed"`
-	UnjailableAfter int64   `json:"unjailableAfter"`
-	IsActive        bool    `json:"isActive"`
-}
+var hlResolver *hyperliquidapi.Resolver
 
 func StartValidatorMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
+	// init HL resolver
+	hlResolver = hyperliquidapi.NewResolver(cfg.Chain)
+
 	go func() {
+		// run immediately on startup to populate mappings
+		if err := updateValidatorMetrics(ctx, cfg); err != nil {
+			logger.Error("Initial validator monitor update error: %v", err)
+			errCh <- err
+		}
+
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
 
@@ -46,42 +42,10 @@ func StartValidatorMonitor(ctx context.Context, cfg config.Config, errCh chan<- 
 }
 
 func updateValidatorMetrics(ctx context.Context, cfg config.Config) error {
-	client := &http.Client{Timeout: 10 * time.Second}
-	
-	// Déterminer l'URL de l'API en fonction de la chaîne
-	var apiURL string
-	if cfg.Chain == "mainnet" {
-		apiURL = "https://api.hyperliquid.xyz/info"
-	} else {
-		apiURL = "https://api.hyperliquid-testnet.xyz/info"
-	}
-	
-	payload := []byte(`{"type": "validatorSummaries"}`)
-
-	logger.Debug("Making request to validator API")
-
-	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewBuffer(payload))
+	// use resolver to get val summaries
+	summaries, err := hlResolver.GetValidatorSummaries(ctx, false)
 	if err != nil {
-		return fmt.Errorf("error creating request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("error making request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("error reading response body: %w", err)
-	}
-
-	var summaries []ValidatorSummary
-
-	if err := json.Unmarshal(body, &summaries); err != nil {
-		logger.Debug("Unmarshal error occurred here in validator_api_monitor.go")
-		return fmt.Errorf("error unmarshaling response: %w", err)
+		return err
 	}
 
 	totalStake := 0.0
@@ -89,11 +53,24 @@ func updateValidatorMetrics(ctx context.Context, cfg config.Config) error {
 	notJailedStake := 0.0
 	activeStake := 0.0
 	inactiveStake := 0.0
+	mappingCount := 0
 
 	for _, summary := range summaries {
+		// register signer->val mapping (lowercase for consistency)
+		metrics.RegisterSignerMapping(strings.ToLower(summary.Signer), strings.ToLower(summary.Validator))
+		mappingCount++
+
+		// register the full validator addr for expansion
+		metrics.RegisterFullAddress(strings.ToLower(summary.Validator))
+		// also register the signer addr for expansion (consensus logs use signer addrss)
+		metrics.RegisterFullAddress(strings.ToLower(summary.Signer))
+
+		// register val info (signer and name) for consensus metrics
+		metrics.RegisterValidatorInfo(strings.ToLower(summary.Validator), strings.ToLower(summary.Signer), summary.Name)
+
 		metrics.SetValidatorStake(summary.Validator, summary.Signer, summary.Name, summary.Stake)
 
-		// Update validator jailed status
+		// update val jailed status
 		jailedStatus := 0.0
 		if summary.IsJailed {
 			jailedStatus = 1.0
@@ -103,14 +80,14 @@ func updateValidatorMetrics(ctx context.Context, cfg config.Config) error {
 		}
 		metrics.SetValidatorJailedStatus(summary.Validator, summary.Signer, summary.Name, jailedStatus)
 
-		// Update active/inactive stake
+		// update active/inactive stake
 		if summary.IsActive {
 			activeStake += summary.Stake
 		} else {
 			inactiveStake += summary.Stake
 		}
 
-		// Set active status
+		// set active status
 		activeStatus := 0.0
 		if summary.IsActive {
 			activeStatus = 1.0
@@ -120,7 +97,7 @@ func updateValidatorMetrics(ctx context.Context, cfg config.Config) error {
 		totalStake += summary.Stake
 	}
 
-	// Update aggregate metrics
+	// update aggregate metrics
 	metrics.SetTotalStake(totalStake)
 	metrics.SetJailedStake(jailedStake)
 	metrics.SetNotJailedStake(notJailedStake)
@@ -128,9 +105,10 @@ func updateValidatorMetrics(ctx context.Context, cfg config.Config) error {
 	metrics.SetInactiveStake(inactiveStake)
 	metrics.SetValidatorCount(int64(len(summaries)))
 
-	logger.Info("Updated validator metrics: Total validators: %d", len(summaries))
-	logger.Info("Total stake: %f, Jailed stake: %f, Not jailed stake: %f, Active stake: %f, Inactive stake: %f",
-		totalStake, jailedStake, notJailedStake, activeStake, inactiveStake)
-
 	return nil
+}
+
+// returns the HL resolver instance
+func GetValidatorResolver() *hyperliquidapi.Resolver {
+	return hlResolver
 }
