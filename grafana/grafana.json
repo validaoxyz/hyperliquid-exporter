@@ -143,10 +143,10 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "hl_block_height",
+          "expr": "hl_core_block_height",
           "format": "time_series",
           "instant": true,
           "interval": "",
@@ -229,7 +229,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "hl_latest_block_time * 1000",
+          "expr": "hl_core_latest_block_time * 1000",
           "format": "time_series",
           "instant": true,
           "interval": "",
@@ -507,7 +507,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "hl_validator_jailed_status",
+          "expr": "hl_consensus_validator_jailed_status",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -593,7 +593,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(hl_validator_jailed_status)",
+          "expr": "sum(hl_consensus_validator_jailed_status)",
           "format": "time_series",
           "instant": true,
           "interval": "",
@@ -666,7 +666,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "hl_validator_count",
+          "expr": "hl_consensus_validator_count",
           "format": "time_series",
           "instant": false,
           "interval": "",
@@ -792,7 +792,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "hl_validator_jailed_status",
+          "expr": "hl_consensus_validator_jailed_status",
           "format": "time_series",
           "interval": "",
           "legendFormat": "{{name}}",
@@ -891,7 +891,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "rate(hl_proposer_count_total[15m])",
+          "expr": "rate(hl_consensus_proposer_count_total[15m])",
           "format": "time_series",
           "interval": "",
           "legendFormat": "{{proposer}}",
@@ -990,7 +990,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (proposer) (increase(hl_proposer_count_total[4h]))\n/\nscalar(sum(increase(hl_proposer_count_total[4h])))\n* 100\n",
+          "expr": "sum by (proposer) (increase(hl_consensus_proposer_count_total[4h]))\n/\nscalar(sum(increase(hl_consensus_proposer_count_total[4h])))\n* 100\n",
           "format": "time_series",
           "interval": "",
           "legendFormat": "{{proposer}}",
@@ -1102,7 +1102,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "hl_block_height",
+          "expr": "hl_core_block_height",
           "format": "time_series",
           "legendFormat": "block_height",
           "range": true,
@@ -1169,7 +1169,7 @@
               }
             ]
           },
-          "unit": "s"
+          "unit": "ms"
         },
         "overrides": []
       },
@@ -1201,7 +1201,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum(rate(hl_apply_duration_seconds_bucket[5m])) by (le))",
+          "expr": "histogram_quantile(0.95, sum(rate(hl_metal_apply_duration_milliseconds_bucket[5m])) by (le))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "5m",
@@ -1215,7 +1215,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum(rate(hl_apply_duration_seconds_bucket[15m])) by (le))",
+          "expr": "histogram_quantile(0.95, sum(rate(hl_metal_apply_duration_milliseconds_bucket[15m])) by (le))",
           "hide": false,
           "instant": false,
           "legendFormat": "15m",
@@ -1228,7 +1228,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum(rate(hl_apply_duration_seconds_bucket[1h])) by (le))",
+          "expr": "histogram_quantile(0.95, sum(rate(hl_metal_apply_duration_milliseconds_bucket[1h])) by (le))",
           "hide": false,
           "instant": false,
           "legendFormat": "1h",
@@ -1241,7 +1241,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum(rate(hl_apply_duration_seconds_bucket[4h])) by (le))",
+          "expr": "histogram_quantile(0.95, sum(rate(hl_metal_apply_duration_milliseconds_bucket[4h])) by (le))",
           "hide": false,
           "instant": false,
           "legendFormat": "4h",
@@ -1254,7 +1254,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum(rate(hl_apply_duration_seconds_bucket[12h])) by (le))",
+          "expr": "histogram_quantile(0.95, sum(rate(hl_metal_apply_duration_milliseconds_bucket[12h])) by (le))",
           "hide": false,
           "instant": false,
           "legendFormat": "12h",
@@ -1267,7 +1267,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum(rate(hl_apply_duration_seconds_bucket[24h])) by (le))",
+          "expr": "histogram_quantile(0.95, sum(rate(hl_metal_apply_duration_milliseconds_bucket[24h])) by (le))",
           "hide": false,
           "instant": false,
           "legendFormat": "24h",
@@ -1363,7 +1363,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "sum(increase(hl_apply_duration_seconds_bucket[15s])) by (le)",
+          "expr": "sum(increase(hl_metal_apply_duration_milliseconds_bucket[15s])) by (le)",
           "format": "heatmap",
           "instant": false,
           "interval": "15s",
@@ -1460,7 +1460,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "sum(increase(hl_block_time_milliseconds_bucket[15s])) by (le)",
+          "expr": "sum(increase(hl_core_block_time_milliseconds_bucket[15s])) by (le)",
           "format": "heatmap",
           "instant": false,
           "interval": "0",

@@ -15,14 +15,14 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 )
 
-// InitMetrics initializes the metrics system with the given configuration
+// initializes the metrics system with the given configuration
 func InitMetrics(ctx context.Context, cfg MetricsConfig) error {
-	// Initialize node identity with values from config
+	// initialize node identity with values from config
 	if err := InitializeNodeIdentity(cfg); err != nil {
 		return fmt.Errorf("failed to initialize node identity: %w", err)
 	}
 
-	// Initialize the provider
+	// initialize the provider
 	if err := InitProvider(ctx, cfg); err != nil {
 		return fmt.Errorf("failed to initialize provider: %w", err)
 	}
@@ -45,7 +45,6 @@ func InitMetrics(ctx context.Context, cfg MetricsConfig) error {
 }
 
 func sanitizeEndpoint(endpoint string) string {
-	// Remove https:// or http:// if present
 	if len(endpoint) > 8 && (endpoint[:8] == "https://" || endpoint[:7] == "http://") {
 		if endpoint[:8] == "https://" {
 			return endpoint[8:]
@@ -84,7 +83,7 @@ func InitProvider(ctx context.Context, cfg MetricsConfig) error {
 		opts = append(opts, sdkmetric.WithReader(promExporter))
 	}
 
-	// Initialize OTLP if enabled
+	// init OTLP if flag
 	if cfg.EnableOTLP {
 		options := []otlpmetrichttp.Option{
 			otlpmetrichttp.WithEndpoint(sanitizeEndpoint(cfg.OTLPEndpoint)),

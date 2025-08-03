@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// GetLatestFile returns the path to the latest modified file in the directory
+// returns the path to the latest modified file in the directory
 func GetLatestFile(directory string) (string, error) {
 	var latestFile string
 	var latestModTime time.Time
