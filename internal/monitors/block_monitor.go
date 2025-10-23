@@ -296,28 +296,30 @@ func monitorLegacyBlockState(ctx context.Context, cfg config.Config, errCh chan<
 			}
 
 			// read and process lines
-			for {
-				line, err := fileReader.ReadString('\n')
-				if err != nil {
-					if err == io.EOF {
-						// eof reached, wait a lil before checking for more data
-						time.Sleep(10 * time.Millisecond)
+			if fileReader != nil {
+				for {
+					line, err := fileReader.ReadString('\n')
+					if err != nil {
+						if err == io.EOF {
+							// eof reached, wait a lil before checking for more data
+							time.Sleep(10 * time.Millisecond)
+							break
+						}
+						errCh <- fmt.Errorf("error reading from block time file: %w", err)
 						break
 					}
-					errCh <- fmt.Errorf("error reading from block time file: %w", err)
-					break
-				}
-				// Skip empty lines
-				line = strings.TrimSpace(line)
-				if line == "" {
-					continue
-				}
+					// Skip empty lines
+					line = strings.TrimSpace(line)
+					if line == "" {
+						continue
+					}
 
-				// process without state label for legacy format
-				if err := parseLegacyBlockTimeLine(ctx, line); err != nil {
-					// Skip invalid lines silently - these are likely partial writes
-					// The next read cycle will get the complete line
-					logger.DebugComponent("core", "Skipping potentially incomplete legacy block time line: %v", err)
+					// process without state label for legacy format
+					if err := parseLegacyBlockTimeLine(ctx, line); err != nil {
+						// Skip invalid lines silently - these are likely partial writes
+						// The next read cycle will get the complete line
+						logger.DebugComponent("core", "Skipping potentially incomplete legacy block time line: %v", err)
+					}
 				}
 			}
 		}
