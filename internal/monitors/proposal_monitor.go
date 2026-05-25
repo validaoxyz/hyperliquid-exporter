@@ -17,7 +17,7 @@ import (
 )
 
 func StartProposalMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
-	go func() {
+	goSafe("proposal", func() {
 		// skip if replica monitoring is enabled as it will handle proposer counting
 		if cfg.EnableReplicaMetrics {
 			// already logged in exporter.go, just return silently
@@ -103,7 +103,7 @@ func StartProposalMonitor(ctx context.Context, cfg config.Config, errCh chan<- e
 				}
 			}
 		}
-	}()
+	})
 }
 
 func parseProposalLine(ctx context.Context, line string) error {

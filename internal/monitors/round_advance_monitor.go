@@ -28,7 +28,7 @@ func StartRoundAdvanceMonitor(ctx context.Context, cfg config.Config, errCh chan
 	// logs live under <node_home>/data/node_logs/status/hourly/YYYYMMDD/<hour>
 	statusHourlyRoot := filepath.Join(cfg.NodeHome, "data/node_logs/status/hourly")
 
-	go func() {
+	goSafe("round_advance", func() {
 		var currentFile string
 		var fileReader *bufio.Reader
 		isFirstRun := true
@@ -112,7 +112,7 @@ func StartRoundAdvanceMonitor(ctx context.Context, cfg config.Config, errCh chan
 				}
 			}
 		}
-	}()
+	})
 }
 
 func parseRoundAdvanceLine(line string) error {

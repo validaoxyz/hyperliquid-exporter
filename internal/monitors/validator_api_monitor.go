@@ -17,7 +17,7 @@ func StartValidatorMonitor(ctx context.Context, cfg config.Config, errCh chan<- 
 	// init HL resolver
 	hlResolver = hyperliquidapi.NewResolver(cfg.Chain)
 
-	go func() {
+	goSafe("validator_api", func() {
 		// run immediately on startup to populate mappings
 		if err := updateValidatorMetrics(ctx, cfg); err != nil {
 			logger.Error("Initial validator monitor update error: %v", err)
@@ -38,7 +38,7 @@ func StartValidatorMonitor(ctx context.Context, cfg config.Config, errCh chan<- 
 				}
 			}
 		}
-	}()
+	})
 }
 
 func updateValidatorMetrics(ctx context.Context, cfg config.Config) error {
@@ -105,6 +105,7 @@ func updateValidatorMetrics(ctx context.Context, cfg config.Config) error {
 	metrics.SetInactiveStake(inactiveStake)
 	metrics.SetValidatorCount(int64(len(summaries)))
 
+	metrics.MarkMonitorTick("validator_api")
 	return nil
 }
 

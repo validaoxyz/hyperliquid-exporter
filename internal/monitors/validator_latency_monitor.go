@@ -64,8 +64,8 @@ func StartValidatorLatencyMonitor(ctx context.Context, cfg *config.Config, errCh
 	logger.InfoComponent("latency", "Starting validator latency monitor")
 
 	// start monitoring goroutines
-	go m.monitorLatencies(ctx, errCh)
-	go m.monitorEMA(ctx, errCh)
+	goSafe("validator_latency", func() { m.monitorLatencies(ctx, errCh) })
+	goSafe("validator_latency", func() { m.monitorEMA(ctx, errCh) })
 }
 
 // monitors individual validator latency files

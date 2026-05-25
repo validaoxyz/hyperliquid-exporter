@@ -30,7 +30,7 @@ func StartEVMAccountMonitor(ctx context.Context, cfg config.Config, errCh chan<-
 
 	var lastModTime time.Time
 
-	go func() {
+	goSafe("evm_account", func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 
@@ -66,7 +66,7 @@ func StartEVMAccountMonitor(ctx context.Context, cfg config.Config, errCh chan<-
 				lastModTime = info.ModTime()
 			}
 		}
-	}()
+	})
 }
 
 // falls back to periodic snapshots if live state is unavailable

@@ -25,7 +25,7 @@ var (
 )
 
 func StartUpdateChecker(ctx context.Context, cfg config.Config, errCh chan<- error) {
-	go func() {
+	goSafe("update_checker", func() {
 		// wait a bit for version monitor to run first
 		time.Sleep(2 * time.Second)
 
@@ -47,7 +47,7 @@ func StartUpdateChecker(ctx context.Context, cfg config.Config, errCh chan<- err
 				}
 			}
 		}
-	}()
+	})
 }
 
 func checkSoftwareUpdate(ctx context.Context, cfg config.Config) error {

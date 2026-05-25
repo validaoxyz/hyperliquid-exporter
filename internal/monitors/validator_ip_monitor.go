@@ -60,7 +60,7 @@ func StartValidatorIPMonitor(ctx context.Context, cfg config.Config, errCh chan<
 	// create ABCI reader with 8MB buffer
 	reader := abci.NewReader(8)
 
-	go func() {
+	goSafe("validator_ip", func() {
 		stateDir := filepath.Join(cfg.NodeHome, "data/periodic_abci_states")
 
 		// add directory check
@@ -74,7 +74,7 @@ func StartValidatorIPMonitor(ctx context.Context, cfg config.Config, errCh chan<
 		var lastAttempt time.Time
 
 		// start the ping monitoring in a separate goroutine
-		go monitorValidatorRTT(ctx, errCh)
+		goSafe("validator_ip", func() { monitorValidatorRTT(ctx, errCh) })
 
 		// initial attempt
 		if err := processLatestState(ctx, stateDir, &currentFile, reader); err != nil {
@@ -103,7 +103,7 @@ func StartValidatorIPMonitor(ctx context.Context, cfg config.Config, errCh chan<
 				lastAttempt = time.Now()
 			}
 		}
-	}()
+	})
 }
 
 func processLatestState(ctx context.Context, stateDir string, currentFile *string, reader *abci.Reader) error {

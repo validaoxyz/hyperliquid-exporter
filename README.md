@@ -21,6 +21,11 @@ OPTIONS:
   --replica-metrics          # Transaction metrics (requires node --replica-cmds-style)
   --evm-metrics             # EVM chain metrics
   --contract-metrics        # Per-contract transaction tracking
+  --metrics-port N          # Prometheus port (default 8086)
+  --probe-info-endpoint     # Active HTTP probe of --serve-info
+  --extended-metrics        # Extra monitors (lz4, logs, RocksDB, etc.)
+  --skip-version-check      # For containerized deployments
+  --skip-update-check       # For containerized deployments
   --otlp                    # Enable OTLP export (requires --alias and --otlp-endpoint)
   --alias "validator-name"  # Node alias for OTLP
   --otlp-endpoint "url"     # OTLP endpoint URL
@@ -29,7 +34,7 @@ OPTIONS:
 Example: `./bin/hl_exporter start --chain mainnet --replica-metrics --evm-metrics`.
 
 By default, the exporter:
-- Exposes Prometheus metrics on `:8086/metrics`
+- Exposes Prometheus metrics on `:8086/metrics`, liveness on `/livez`, readiness on `/readyz`
 - Looks for log files in `$HOME/hl` and binaries in `$HOME/`
 - Uses `info` log level
 - Disables OTLP export
@@ -86,3 +91,5 @@ A Grafana dashboard is available at `grafana/dashboard.json`. Import it into you
 ## Documentation
 
 - [Metrics Reference](docs/metrics.md) - All metrics with descriptions and labels
+- [CHANGELOG](CHANGELOG.md)
+- [UPGRADING](UPGRADING.md) - v2 → v3 notes
