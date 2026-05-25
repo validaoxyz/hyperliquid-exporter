@@ -60,7 +60,7 @@ func StartValidatorIPMonitor(ctx context.Context, cfg config.Config, errCh chan<
 	// create ABCI reader with 8MB buffer
 	reader := abci.NewReader(8)
 
-	go func() {
+	goSafe("validator_ip", func() {
 		stateDir := filepath.Join(cfg.NodeHome, "data/periodic_abci_states")
 
 		// add directory check
@@ -74,7 +74,7 @@ func StartValidatorIPMonitor(ctx context.Context, cfg config.Config, errCh chan<
 		var lastAttempt time.Time
 
 		// start the ping monitoring in a separate goroutine
-		go monitorValidatorRTT(ctx, errCh)
+		goSafe("validator_ip", func() { monitorValidatorRTT(ctx, errCh) })
 
 		// initial attempt
 		if err := processLatestState(ctx, stateDir, &currentFile, reader); err != nil {
@@ -82,6 +82,9 @@ func StartValidatorIPMonitor(ctx context.Context, cfg config.Config, errCh chan<
 			errCh <- err
 		}
 		lastAttempt = time.Now()
+		// mark the first successful ABCI-state read as a tick so the
+		// monitor isn't permanently missing from the health table.
+		metrics.MarkMonitorTick("validator_ip")
 
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -101,9 +104,10 @@ func StartValidatorIPMonitor(ctx context.Context, cfg config.Config, errCh chan<
 					errCh <- err
 				}
 				lastAttempt = time.Now()
+				metrics.MarkMonitorTick("validator_ip")
 			}
 		}
-	}()
+	})
 }
 
 func processLatestState(ctx context.Context, stateDir string, currentFile *string, reader *abci.Reader) error {
@@ -179,6 +183,11 @@ func monitorValidatorRTT(ctx context.Context, errCh chan<- error) {
 					go measureRTT(ctx, validator, data.IP)
 				}
 			}
+			// The dispatch loop above runs every 5s whether or not any
+			// probes succeed. That cadence is the right "is this monitor
+			// alive" signal for the health table — the per-probe success
+			// shows up in the hl_consensus_validator_rtt series itself.
+			metrics.MarkMonitorTick("validator_ip")
 		}
 	}
 }
@@ -202,7 +211,8 @@ func measureRTT(ctx context.Context, validator, ip string) {
 
 		conn, err := net.DialTimeout("tcp", address, 2*time.Second)
 		if err == nil {
-			latency = float64(time.Since(start).Microseconds())
+			// latency is in milliseconds (microseconds / 1000) to match hl_consensus_validator_rtt
+			latency = float64(time.Since(start).Microseconds()) / 1000.0
 			success = true
 			conn.Close()
 			break

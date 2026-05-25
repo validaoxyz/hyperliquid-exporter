@@ -28,6 +28,33 @@ type Config struct {
 	MetricsAddr            string
 	LogLevel               string
 	LogFormat              string
+	// SkipVersionCheck disables the local hl-node --version probe. Set this
+	// when the exporter runs in a container that doesn't have the node
+	// binary on disk. Tracked in upstream issue #16.
+	SkipVersionCheck bool
+	// SkipUpdateCheck disables the periodic download of the latest hl-visor
+	// binary from binaries.hyperliquid.xyz. Useful for restricted
+	// environments and as a companion to SkipVersionCheck.
+	SkipUpdateCheck bool
+	// ProbeInfoEndpoint enables an active HTTP probe of the node's
+	// `--serve-info` endpoint as a liveness check. Off by default
+	// because some operators disallow outbound HTTP from the exporter
+	// process even to localhost.
+	ProbeInfoEndpoint bool
+	// InfoEndpointURL is the URL the info probe POSTs to; defaults to
+	// http://127.0.0.1:3001/info when empty.
+	InfoEndpointURL string
+	// EnableExtendedMetrics opts the exporter into the "extended" set
+	// of monitors: tcp_lz4, log line counters, public-IP heartbeat,
+	// Tokio task metrics, operator-config age, tmp-dir audit.
+	// Useful for deep operator dashboards; off by default to keep the
+	// scrape lean for the median user.
+	EnableExtendedMetrics bool
+	// EnablePerPeerMetrics adds hl_p2p_peer_last_seen_seconds{ip} and
+	// hl_p2p_peer_first_seen_seconds{ip} per known peer. Cardinality
+	// bounded by the peer set's LRU cap (256) + TTL (24h). Off by
+	// default for operators with tight per-target series limits.
+	EnablePerPeerMetrics bool
 }
 
 type Flags struct {
@@ -47,6 +74,12 @@ type Flags struct {
 	MetricsAddr           string
 	LogLevel              string
 	LogFormat             string
+	SkipVersionCheck      bool
+	SkipUpdateCheck       bool
+	ProbeInfoEndpoint     bool
+	InfoEndpointURL       string
+	EnableExtendedMetrics bool
+	EnablePerPeerMetrics  bool
 }
 
 // load env vars and returns a Config struct
@@ -97,6 +130,12 @@ func LoadConfig(flags *Flags) Config {
 		MetricsAddr:            flags.MetricsAddr,
 		LogLevel:               flags.LogLevel,
 		LogFormat:              flags.LogFormat,
+		SkipVersionCheck:       flags.SkipVersionCheck,
+		SkipUpdateCheck:        flags.SkipUpdateCheck,
+		ProbeInfoEndpoint:      flags.ProbeInfoEndpoint,
+		InfoEndpointURL:        flags.InfoEndpointURL,
+		EnableExtendedMetrics:  flags.EnableExtendedMetrics,
+		EnablePerPeerMetrics:   flags.EnablePerPeerMetrics,
 	}
 
 	// override with flags if they're provided

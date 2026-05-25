@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -21,6 +22,7 @@ func main() {
 		fmt.Println("Usage: hl_exporter <command> [options]")
 		fmt.Println("Commands:")
 		fmt.Println("  start    Start the Hyperliquid exporter")
+		fmt.Println("  version  Print build information and exit")
 		fmt.Println("\nOptions:")
 		fmt.Println("  --log-level        Set the logging level (default: \"debug\")")
 		fmt.Println("  --enable-prom      Enable Prometheus endpoint (default: true)")
@@ -35,12 +37,22 @@ func main() {
 		fmt.Println("  --evm              Enable EVM monitoring (default: false)")
 		fmt.Println("  --enable-contract-metrics Enable per-contract transaction metrics (default: false)")
 		fmt.Println("  --contract-metrics-limit Maximum number of individual contract labels to retain")
-		fmt.Println("  --evm-block-type-metrics Enable block type labels (standard/high) for EVM metrics (default: false)")
 		fmt.Println("  --enable-replica-metrics Enable replica commands transaction metrics (default: false)")
 		fmt.Println("  --replica-data-dir Directory containing replica_cmds files (default: $NODE_HOME/data/replica_cmds)")
 		fmt.Println("  --replica-buffer-size Buffer size in MB for parsing replica files (default: 8)")
 		fmt.Println("  --enable-validator-rtt Enable validator RTT monitoring (true/false/auto, default: auto)")
 		os.Exit(1)
+	}
+
+	if os.Args[1] == "version" || os.Args[1] == "--version" || os.Args[1] == "-v" {
+		fmt.Printf("hl_exporter %s (commit %s, %s)\n",
+			metrics.BuildVersion, metrics.BuildCommit, runtime.Version())
+		return
+	}
+
+	if os.Args[1] == "vals" {
+		runVals(os.Args[2:])
+		return
 	}
 
 	startCmd := flag.NewFlagSet("start", flag.ExitOnError)
@@ -57,6 +69,13 @@ func main() {
 	contractLimit := startCmd.Int("contract-metrics-limit", 20, "Maximum number of individual contract labels to retain")
 	enableReplicaMetrics := startCmd.Bool("replica-metrics", false, "Enable replica commands transaction metrics")
 	enableValidatorRTT := startCmd.Bool("validator-rtt", false, "Enable validator RTT monitoring")
+	skipVersionCheck := startCmd.Bool("skip-version-check", false, "Skip the local hl-node --version probe (use when running in a container without the binary)")
+	skipUpdateCheck := startCmd.Bool("skip-update-check", false, "Skip the periodic upstream binary download for the up-to-date check")
+	metricsPort := startCmd.Int("metrics-port", 8086, "Port to expose Prometheus metrics on")
+	probeInfoEndpoint := startCmd.Bool("probe-info-endpoint", false, "Actively HTTP-probe the node's --serve-info endpoint as a liveness check")
+	infoEndpointURL := startCmd.String("info-endpoint-url", "", "URL the info probe POSTs to (default http://127.0.0.1:3001/info)")
+	enableExtendedMetrics := startCmd.Bool("extended-metrics", false, "Enable the extended monitor set (tcp_lz4, log lines, public IP, Tokio runtime, operator config, tmp dir)")
+	enablePerPeerMetrics := startCmd.Bool("per-peer-metrics", false, "Emit hl_p2p_peer_{last,first}_seen_seconds{ip} per known peer (cardinality bounded by the peer set's LRU cap + 24h TTL)")
 
 	switch os.Args[1] {
 	case "start":
@@ -90,10 +109,16 @@ func main() {
 		EnableCoreTxMetrics:   false,
 		UseLiveState:          false,
 		EnableReplicaMetrics:  *enableReplicaMetrics,
-		ReplicaDataDir:        "", // Always use default
-		ReplicaBufferSize:     8,  // Always use default 8MB
-		EVMBlockTypeMetrics:   *enableEVM, // Always enable block type metrics when EVM is enabled
+		ReplicaDataDir:        "",                 // Always use default
+		ReplicaBufferSize:     8,                  // Always use default 8MB
+		EVMBlockTypeMetrics:   *enableEVM,         // Always enable block type metrics when EVM is enabled
 		EnableValidatorRTT:    enableValidatorRTT, // Use the bool pointer directly
+		SkipVersionCheck:      *skipVersionCheck,
+		SkipUpdateCheck:       *skipUpdateCheck,
+		ProbeInfoEndpoint:     *probeInfoEndpoint,
+		InfoEndpointURL:       *infoEndpointURL,
+		EnableExtendedMetrics: *enableExtendedMetrics,
+		EnablePerPeerMetrics:  *enablePerPeerMetrics,
 	}
 
 	cfg := config.LoadConfig(flags)
@@ -137,6 +162,7 @@ func main() {
 		ValidatorAddress: validatorAddress,
 		IsValidator:      isValidator,
 		EnableEVM:        *enableEVM,
+		PrometheusPort:   *metricsPort,
 	}
 
 	if err := metrics.InitMetrics(ctx, metricsConfig); err != nil {

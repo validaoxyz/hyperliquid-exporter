@@ -68,12 +68,12 @@ func StartEVMMonitor(ctx context.Context, cfg config.Config, errCh chan<- error)
 	}
 
 	// ensure resolver is cleaned up when context is cancelled
-	go func() {
+	goSafe("evm", func() {
 		<-ctx.Done()
 		if contractResolver != nil {
 			contractResolver.Shutdown()
 		}
-	}()
+	})
 
 	// wait for validator status to be determined
 	time.Sleep(60 * time.Second)
@@ -87,7 +87,7 @@ func StartEVMMonitor(ctx context.Context, cfg config.Config, errCh chan<- error)
 	evmDataDir := filepath.Join(cfg.NodeHome, "data/evm_block_and_receipts/hourly")
 	logger.InfoComponent("evm", "Starting unified EVM monitoring in directory: %s", evmDataDir)
 
-	go func() {
+	goSafe("evm", func() {
 		// check if directory exists
 		if _, err := os.Stat(evmDataDir); os.IsNotExist(err) {
 			logger.WarningComponent("evm", "EVM block and receipts directory does not exist: %s", evmDataDir)
@@ -165,7 +165,7 @@ func StartEVMMonitor(ctx context.Context, cfg config.Config, errCh chan<- error)
 				}
 			}
 		}
-	}()
+	})
 }
 
 func processEVMBlockAndReceiptsLine(line string) error {
@@ -266,6 +266,7 @@ func processBlockData(blockData interface{}, isoTimestamp time.Time) (string, er
 
 	// set block height metric
 	metrics.SetEVMBlockHeight(blockNumber)
+	metrics.MarkMonitorTick("evm")
 
 	// determine block type early so we can use it throughout
 	var blockType string
@@ -290,13 +291,20 @@ func processBlockData(blockData interface{}, isoTimestamp time.Time) (string, er
 			metrics.UpdateMaxGasLimit(gasLimit)
 
 			if blockTypeMetricsEnabled {
-				if gasLimit <= 2_000_000 {
+				// Hyperliquid produces blocks at several discrete gas-limit tiers
+				// (2M standard, 3M, 30M big, etc). The "other" bucket used to log
+				// a WARNING per block, which produced sustained log spam since
+				// the 3M tier is common in practice. Categorize known tiers and
+				// keep "other" silent (debug only).
+				switch {
+				case gasLimit <= 2_000_000:
 					blockType = "standard"
-				} else if gasLimit >= 30_000_000 {
+				case gasLimit == 3_000_000:
+					blockType = "small"
+				case gasLimit >= 30_000_000:
 					blockType = "high"
-				} else {
+				default:
 					blockType = "other"
-					logger.WarningComponent("evm", "Unexpected gas limit: %d", gasLimit)
 				}
 				logger.DebugComponent("evm", "Block %d: gasLimit=%d, blockType=%s", blockNumber, gasLimit, blockType)
 			}

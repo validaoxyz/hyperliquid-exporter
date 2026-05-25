@@ -32,7 +32,6 @@ var (
 	HLCoreLastProcessedTime    api.Int64ObservableGauge
 
 	// observable gauges, Metal (machine specific)
-	HLMetalApplyDurationGauge api.Float64ObservableGauge
 	HLMetalParseDurationGauge api.Float64ObservableGauge
 	HLMetalLastProcessedRound api.Int64ObservableGauge
 	HLMetalLastProcessedTime  api.Int64ObservableGauge
@@ -169,14 +168,6 @@ func createInstruments() error {
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create core block height gauge: %w", err)
-	}
-
-	HLMetalApplyDurationGauge, err = meter.Float64ObservableGauge(
-		"hl_metal_apply_duration",
-		api.WithDescription("Duration of block application"),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create metal apply duration gauge: %w", err)
 	}
 
 	HLConsensusValidatorJailedStatus, err = meter.Float64ObservableGauge(
@@ -396,10 +387,15 @@ func createInstruments() error {
 		return fmt.Errorf("failed to create core rounds processed counter: %w", err)
 	}
 
+	// count-oriented buckets for per-block transaction/operation counts
+	corePerBlockBuckets := []float64{
+		0, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000,
+	}
 	HLCoreTxPerBlockHistogram, err = meter.Float64Histogram(
 		"hl_core_tx_per_block",
 		api.WithDescription("Distribution of transactions per block in the Hyperliquid network"),
 		api.WithUnit("transactions"),
+		api.WithExplicitBucketBoundaries(corePerBlockBuckets...),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create core transactions per block histogram: %w", err)
@@ -409,6 +405,7 @@ func createInstruments() error {
 		"hl_core_operations_per_block",
 		api.WithDescription("Distribution of individual operations per block in the Hyperliquid network"),
 		api.WithUnit("operations"),
+		api.WithExplicitBucketBoundaries(corePerBlockBuckets...),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create core operations per block histogram: %w", err)
@@ -554,7 +551,7 @@ func createInstruments() error {
 	}
 
 	HLEVMMaxPriorityFeeGauge, err = meter.Float64ObservableGauge(
-		"hl_evm_max_priority_fee",
+		"hl_evm_max_priority_fee_gwei",
 		api.WithDescription("Maximum priority fee in EVM transactions"),
 	)
 	if err != nil {
@@ -657,7 +654,14 @@ func createInstruments() error {
 	HLConsensusHeartbeatDelayHist, err = meter.Float64Histogram(
 		"hl_consensus_heartbeat_ack_delay_ms",
 		api.WithDescription("Distribution of heartbeat acknowledgment delays (ms)"),
-		api.WithUnit("ms"),
+		// IMPORTANT: do not set api.WithUnit("ms"). The OTel→Prometheus bridge
+		// auto-appends "_milliseconds" when a unit is declared, which collides
+		// with the "_ms" suffix already in the metric name and produces
+		// hl_consensus_heartbeat_ack_delay_ms_milliseconds_bucket — a name no
+		// dashboard expects, so the panel sits empty even though the data is
+		// being recorded. The other ms histograms in this file (block_time,
+		// apply_duration, evm_block_time) embed "_milliseconds" in the name
+		// and don't double up; this one used the "_ms" abbreviation.
 		api.WithExplicitBucketBoundaries(
 			1, 2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100,
 			150, 200, 250, 300, 400, 500, 600, 700, 800, 900, 1000,
@@ -693,9 +697,12 @@ func createInstruments() error {
 	}
 
 	HLConsensusQCParticipationGauge, err = meter.Float64ObservableGauge(
-		"hl_consensus_qc_participation_rate",
+		"hl_consensus_qc_participation_percent",
 		api.WithDescription("QC signing participation rate per validator as percentage (validator nodes only)"),
-		api.WithUnit("%"),
+		// IMPORTANT: do not set api.WithUnit("%"). The OTel→Prometheus bridge
+		// auto-appends "_percent" when "%" is declared as the unit, which would
+		// double up with the "_percent" suffix now embedded in the metric name.
+		// Keep the percent suffix in the name as the source of truth instead.
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create consensus QC participation gauge: %w", err)

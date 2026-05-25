@@ -142,14 +142,15 @@ func IncrementProposerCounter(proposer string) {
 	defer metricsMutex.Unlock()
 
 	ctx := context.Background()
+	// always set the name label so the series shape stays stable; use the
+	// "unknown" sentinel (as getValidatorLabels does) when we have no moniker
+	if name == "" {
+		name = "unknown"
+	}
 	labels := []attribute.KeyValue{
 		attribute.String("validator", validator),
 		attribute.String("signer", signer),
-	}
-
-	// add name label if we found one
-	if name != "" {
-		labels = append(labels, attribute.String("name", name))
+		attribute.String("name", name),
 	}
 
 	HLConsensusProposerCounter.Add(ctx, 1, api.WithAttributes(labels...))
@@ -191,8 +192,6 @@ func RecordApplyDuration(duration float64) {
 	if HLMetalApplyDurationHistogram != nil {
 		HLMetalApplyDurationHistogram.Record(ctx, duration, api.WithAttributes(commonLabels...))
 	}
-
-	currentValues[HLMetalApplyDurationGauge] = duration
 }
 
 func RecordApplyDurationWithLabel(duration float64, stateType string) {
@@ -207,15 +206,6 @@ func RecordApplyDurationWithLabel(duration float64, stateType string) {
 	if HLMetalApplyDurationHistogram != nil {
 		HLMetalApplyDurationHistogram.Record(ctx, duration, api.WithAttributes(labels...))
 	}
-
-	// update gauge with label
-	if _, exists := labeledValues[HLMetalApplyDurationGauge]; !exists {
-		labeledValues[HLMetalApplyDurationGauge] = make(map[string]labeledValue)
-	}
-	labeledValues[HLMetalApplyDurationGauge][stateType] = labeledValue{
-		value:  duration,
-		labels: []attribute.KeyValue{attribute.String("state_type", stateType)},
-	}
 }
 
 func SetValidatorStake(address, signer, moniker string, stake float64) {
@@ -229,7 +219,7 @@ func SetValidatorStake(address, signer, moniker string, stake float64) {
 		labels: []attribute.KeyValue{
 			attribute.String("validator", address),
 			attribute.String("signer", signer),
-			attribute.String("moniker", moniker),
+			attribute.String("name", moniker),
 		},
 	}
 }
@@ -1121,6 +1111,46 @@ func SetValidatorLatencyEMA(validator string, ema float64) {
 		value:  ema,
 		labels: labels,
 	}
+}
+
+// ReplaceValidatorLatencyEMA reconciles the EMA gauge to a full snapshot.
+//
+// The EMA file's latest line is a complete snapshot of every validator at
+// that timestamp, so we REBUILD labeledValues[HLConsensusValidatorLatencyEMAGauge]
+// from scratch on each update rather than merging into the prior map. This is
+// the staleness fix: an OTel ObservableGauge re-emits whatever is in the map
+// every scrape, so a validator that drops out of the snapshot (or whose value
+// has become the no-data sentinel and was filtered upstream) would otherwise
+// keep its last value frozen forever. Rebuilding drops any validator absent
+// from the snapshot. Labels are resolved per validator exactly as
+// SetValidatorLatencyEMA does (getValidatorLabels + the "validator" label value
+// as the map key).
+func ReplaceValidatorLatencyEMA(emaByValidator map[string]float64) {
+	// resolve labels for every validator in the snapshot before taking the lock
+	rebuilt := make(map[string]labeledValue, len(emaByValidator))
+	for validator, ema := range emaByValidator {
+		labels := getValidatorLabels(validator)
+
+		// extract the actual validator address from the labels for map key
+		var validatorAddr string
+		for _, label := range labels {
+			if label.Key == "validator" {
+				validatorAddr = label.Value.AsString()
+				break
+			}
+		}
+
+		rebuilt[validatorAddr] = labeledValue{
+			value:  ema,
+			labels: labels,
+		}
+	}
+
+	metricsMutex.Lock()
+	defer metricsMutex.Unlock()
+
+	// replace the whole map so dropped-out / now-sentinel validators disappear
+	labeledValues[HLConsensusValidatorLatencyEMAGauge] = rebuilt
 }
 
 // P2P metric setters (non-validator peers)

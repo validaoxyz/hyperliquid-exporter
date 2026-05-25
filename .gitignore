@@ -12,3 +12,6 @@ hl-python-venv/
 
 # Ignore local Hyperliquid node data
 hl/
+
+# Grafana dashboard editor backups (the .json dashboards themselves are tracked)
+grafana/*.layout-bak

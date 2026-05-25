@@ -58,7 +58,7 @@ func NewReplicaMonitor(dataDir string, bufferSize int) *ReplicaMonitor {
 func (m *ReplicaMonitor) Start(ctx context.Context) error {
 	logger.InfoComponent("replica", "Starting streaming replica monitor, dataDir: %s", m.dataDir)
 
-	go m.streamLoop(ctx)
+	goSafe("replica", func() { m.streamLoop(ctx) })
 	return nil
 }
 
@@ -289,6 +289,7 @@ func (m *ReplicaMonitor) processBlock(block *replica.BlockMetrics) {
 	// also update implementation-specific metrics
 	metrics.SetReplicaLastProcessedRound(float64(block.Round))
 	metrics.SetReplicaLastProcessedTime(float64(block.Time.Unix()))
+	metrics.MarkMonitorTick("replica")
 }
 
 // returns current statistics

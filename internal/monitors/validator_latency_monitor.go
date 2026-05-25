@@ -64,8 +64,8 @@ func StartValidatorLatencyMonitor(ctx context.Context, cfg *config.Config, errCh
 	logger.InfoComponent("latency", "Starting validator latency monitor")
 
 	// start monitoring goroutines
-	go m.monitorLatencies(ctx, errCh)
-	go m.monitorEMA(ctx, errCh)
+	goSafe("validator_latency", func() { m.monitorLatencies(ctx, errCh) })
+	goSafe("validator_latency", func() { m.monitorEMA(ctx, errCh) })
 }
 
 // monitors individual validator latency files
@@ -91,9 +91,14 @@ func (m *ValidatorLatencyMonitor) monitorLatencies(ctx context.Context, errCh ch
 	}
 }
 
-// processes all validator latency files
+// processes all validator latency files.
+//
+// On hl-node versions shipped since mid-2025, each validator's directory
+// contains `hourly/<YYYYMMDD>/<H>` files (numeric hour with no leading
+// zero — same quirk as everywhere else). Older releases wrote a flat
+// `<YYYYMMDD>` file at the top of the validator dir; we keep a fallback
+// path for them.
 func (m *ValidatorLatencyMonitor) processLatencyFiles() error {
-	// list all validator directories
 	entries, err := os.ReadDir(m.latencyDir)
 	if err != nil {
 		return fmt.Errorf("failed to read latency directory: %w", err)
@@ -103,26 +108,39 @@ func (m *ValidatorLatencyMonitor) processLatencyFiles() error {
 		if !entry.IsDir() {
 			continue
 		}
-
 		validator := entry.Name()
 		if !strings.HasPrefix(validator, "0x") {
 			continue
 		}
 
-		// process today's file
-		today := time.Now().Format("20060102")
-		filePath := filepath.Join(m.latencyDir, validator, today)
+		hourlyRoot := filepath.Join(m.latencyDir, validator, "hourly")
+		var filePath string
+		if _, err := os.Stat(hourlyRoot); err == nil {
+			// nested-hourly layout — find the latest hour-file numerically.
+			path, err := latestHourlyFile(hourlyRoot)
+			if err != nil {
+				continue
+			}
+			filePath = path
+		} else {
+			// legacy flat layout fallback.
+			today := time.Now().Format("20060102")
+			filePath = filepath.Join(m.latencyDir, validator, today)
+		}
 
 		if err := m.processValidatorLatencyFile(validator, filePath); err != nil {
 			logger.DebugComponent("latency", "Error processing latency file for %s: %v", validator, err)
-			// continue with other validators
 		}
 	}
 
 	return nil
 }
 
-// processes a single validator's latency file
+// processes a single validator's latency file. On hl-node versions
+// shipped since mid-2025, the layout under data/validator_latency/<addr>/
+// is nested-hourly: hourly/<YYYYMMDD>/<H>, NOT a flat <YYYYMMDD> file
+// like the older releases used. We attempt nested-hourly first and
+// fall back to the legacy flat layout for backwards compatibility.
 func (m *ValidatorLatencyMonitor) processValidatorLatencyFile(validator, filePath string) error {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -134,19 +152,29 @@ func (m *ValidatorLatencyMonitor) processValidatorLatencyFile(validator, filePat
 	}
 	defer file.Close()
 
-	// get last processed position
-	lastPos, exists := m.lastProcessed[validator]
+	// stat-based offset reset: if the file shrank (rotation) or this is
+	// a new file we haven't tracked, restart at 0.
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat file: %w", err)
+	}
+
+	key := validator + "|" + filePath
+	lastPos, exists := m.lastProcessed[key]
+	if exists && lastPos > info.Size() {
+		// file rotated under us — start over
+		lastPos = 0
+	}
 	if exists && lastPos > 0 {
-		// seek to last position
 		if _, err := file.Seek(lastPos, 0); err != nil {
 			return fmt.Errorf("failed to seek: %w", err)
 		}
-		logger.DebugComponent("latency", "Continuing from position %d for validator %s", lastPos, validator)
-	} else {
-		logger.DebugComponent("latency", "First run: starting from beginning of file for validator %s", validator)
 	}
 
 	scanner := bufio.NewScanner(file)
+	// raise the scanner buffer cap: hourly latency files can carry one long
+	// line per round and the default 64 KiB token limit truncates them.
+	scanner.Buffer(make([]byte, 1<<20), 4<<20)
 	var latestEntry *LatencyEntry
 
 	for scanner.Scan() {
@@ -163,11 +191,9 @@ func (m *ValidatorLatencyMonitor) processValidatorLatencyFile(validator, filePat
 		return fmt.Errorf("scanner error: %w", err)
 	}
 
-	// update last processed position
-	pos, _ := file.Seek(0, 1) // get current position
-	m.lastProcessed[validator] = pos
+	pos, _ := file.Seek(0, 1)
+	m.lastProcessed[key] = pos
 
-	// update metrics with latest entry
 	if latestEntry != nil {
 		metrics.SetValidatorLatency(validator, latestEntry.Latency)
 		metrics.SetValidatorLatencyRound(validator, latestEntry.Round)
@@ -261,7 +287,16 @@ func (m *ValidatorLatencyMonitor) processEMAFile() error {
 		return fmt.Errorf("failed to parse latencies: %w", err)
 	}
 
-	// update metrics
+	// The latest EMA line is a FULL SNAPSHOT of every validator at this
+	// timestamp. Build a validator->ema map from it and reconcile the gauge
+	// to that snapshot in one call below, rather than setting per entry. This
+	// fixes stale frozen series: a validator that dropped out of the file (or
+	// whose value became the no-data sentinel and is filtered here) is absent
+	// from the snapshot and is therefore removed from the gauge. An all-
+	// sentinel line yields an empty snapshot, which correctly clears the
+	// series. We only reach this point after a successful parse, so replacing
+	// the whole map is safe.
+	snapshot := map[string]float64{}
 	for _, entry := range latencies {
 		if len(entry) != 2 {
 			continue
@@ -277,13 +312,23 @@ func (m *ValidatorLatencyMonitor) processEMAFile() error {
 			continue
 		}
 
-		// skip validators with default 0.4 value (indicates no data)
-		if emaValue >= 0.4 {
+		// hl-node seeds a validator's EMA with the no-data sentinel 0.4
+		// (seconds) until it has observed real heartbeat-ack latencies.
+		// Skip ONLY that exact sentinel — the previous `>= 0.4` filter
+		// also discarded genuine high latencies (anything at/above 400ms),
+		// which both froze this gauge near ~400ms on a slow network and
+		// disagreed with the unfiltered raw-latency path above. Use a tiny
+		// epsilon so floating-point representation of the literal 0.4 still
+		// matches; real EMAs above the sentinel are now reported.
+		const emaNoDataSentinel = 0.4
+		if emaValue >= emaNoDataSentinel-1e-9 && emaValue <= emaNoDataSentinel+1e-9 {
 			continue
 		}
 
-		metrics.SetValidatorLatencyEMA(validator, emaValue)
+		snapshot[validator] = emaValue
 	}
+
+	metrics.ReplaceValidatorLatencyEMA(snapshot)
 
 	return nil
 }
