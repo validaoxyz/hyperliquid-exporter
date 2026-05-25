@@ -235,6 +235,7 @@ func parseBlockTimeLine(ctx context.Context, line string, stateType string) erro
 
 	// record apply duration with state type label
 	metrics.RecordApplyDurationWithLabel(applyDurationMs, stateType)
+	metrics.MarkMonitorTick("block")
 
 	logger.DebugComponent("core", "Updated %s state metrics: height=%.0f, apply_duration=%.6f, block_time=%s UTC, begin_block_wall_time=%s",
 		stateType, height, applyDuration, parsedTime.Format(time.RFC3339), beginBlockWallTime)

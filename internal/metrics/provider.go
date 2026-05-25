@@ -21,7 +21,6 @@ func getAllObservables() []api.Observable {
 		HLCoreLastProcessedTime,
 
 		// Metal (machine specific) metrics
-		HLMetalApplyDurationGauge,
 		HLMetalParseDurationGauge,
 		HLMetalLastProcessedRound,
 		HLMetalLastProcessedTime,

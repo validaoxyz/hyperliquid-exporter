@@ -12,3 +12,6 @@ hl-python-venv/
 
 # Ignore local Hyperliquid node data
 hl/
+
+# Keep locally exported Grafana dashboard drafts out of the repository
+grafana/

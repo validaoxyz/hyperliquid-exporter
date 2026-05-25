@@ -10,45 +10,47 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
 )
 
+const scrapeTimeout = 30 * time.Second
+
 func StartPrometheusServer(ctx context.Context, port int) error {
 	mux := http.NewServeMux()
 
-	// middleware to log metrics requests with timeout
-	metricsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		logger.Debug("Metrics endpoint called from %s", r.RemoteAddr)
-
-		// create context with timeout to prevent indefinite hangs
-		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		defer cancel()
-
-		// create channel to signal completion
-		done := make(chan struct{})
-
-		go func() {
-			promhttp.Handler().ServeHTTP(w, r.WithContext(ctx))
-			close(done)
-		}()
-
-		select {
-		case <-done:
-			logger.Debug("Metrics endpoint response completed")
-		case <-ctx.Done():
-			logger.Error("Metrics endpoint timed out after 30 seconds")
-			http.Error(w, "Metrics collection timed out", http.StatusServiceUnavailable)
-		}
-	})
-
+	// http.TimeoutHandler buffers the response and writes a 503 if the inner
+	// handler exceeds the deadline. Unlike a hand-rolled goroutine+select, it
+	// never races with the inner handler on the ResponseWriter — which was the
+	// source of the "superfluous response.WriteHeader" log spam.
+	metricsHandler := http.TimeoutHandler(
+		promhttp.Handler(),
+		scrapeTimeout,
+		"Metrics collection timed out\n",
+	)
 	mux.Handle("/metrics", metricsHandler)
 
-	// health check endpoint for debugging
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK\n"))
+		_, _ = w.Write([]byte("OK\n"))
+	})
+
+	// /livez always 200s while the process is running. /readyz reports ready
+	// once every monitor has reported at least one successful tick.
+	mux.HandleFunc("/livez", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok\n"))
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if Ready() {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ready\n"))
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("not ready\n"))
 	})
 
 	server := &http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
-		Handler: mux,
+		Addr:              fmt.Sprintf(":%d", port),
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	go func() {
@@ -60,7 +62,9 @@ func StartPrometheusServer(ctx context.Context, port int) error {
 
 	go func() {
 		<-ctx.Done()
-		if err := server.Shutdown(context.Background()); err != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
 			logger.Error("Error shutting down Prometheus server: %v", err)
 		}
 	}()

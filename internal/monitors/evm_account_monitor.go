@@ -30,7 +30,7 @@ func StartEVMAccountMonitor(ctx context.Context, cfg config.Config, errCh chan<-
 
 	var lastModTime time.Time
 
-	go func() {
+	goSafe("evm_account", func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 
@@ -66,7 +66,7 @@ func StartEVMAccountMonitor(ctx context.Context, cfg config.Config, errCh chan<-
 				lastModTime = info.ModTime()
 			}
 		}
-	}()
+	})
 }
 
 // falls back to periodic snapshots if live state is unavailable
@@ -112,10 +112,13 @@ func processStateForAccounts(path string, reader *abci.Reader) error {
 		return fmt.Errorf("read ABCI state: %w", err)
 	}
 
-	if accountCount > 0 {
-		metrics.SetEVMAccountCount(accountCount)
-		logger.Debug("EVM account count: %d", accountCount)
-	}
-
+	// Always publish, even if zero. Two reasons:
+	//   1. Validators where the chain runs with evm_db = NoEvmDb genuinely
+	//      have zero in-memory accounts; the gauge should reflect that
+	//      instead of being absent (which a dashboard reads as 'no data').
+	//   2. A drop from a positive value back to 0 is itself a signal we
+	//      want to surface.
+	metrics.SetEVMAccountCount(accountCount)
+	logger.Debug("EVM account count: %d", accountCount)
 	return nil
 }

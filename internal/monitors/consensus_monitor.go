@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/validaoxyz/hyperliquid-exporter/internal/cache"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
@@ -32,12 +33,28 @@ type heartbeatInfo struct {
 	timestamp time.Time
 }
 
+// Bounds on consensus-monitor maps. These are validator-keyed so the
+// practical population is at most the active validator set (~25), but
+// stale signers can accumulate across validator-set changes. A 1h
+// last-seen TTL is plenty for the QC participation logic, which only
+// cares about the recent sliding window.
+const (
+	consensusValidatorTTL = time.Hour
+	validatorCacheSize    = 1024
+	validatorCacheTTL     = 24 * time.Hour
+)
+
 // monitors consensus-related logs and metrics
 type ConsensusMonitor struct {
-	config         *config.Config
-	qcSignatures   map[string]int64  // Track QC signatures per signer
-	tcVotes        map[string]int64  // Track TC votes per signer
-	validatorCache map[string]string // Map signer address to validator address
+	config       *config.Config
+	mapsMu       sync.Mutex
+	qcSignatures map[string]int64     // Track QC signatures per signer
+	qcLastSeen   map[string]time.Time // last-seen timestamp per signer
+	tcVotes      map[string]int64     // Track TC votes per signer
+	tcLastSeen   map[string]time.Time
+	// validatorCache is a bounded, thread-safe LRU. Capacity covers the
+	// active set comfortably and stale entries expire on their own.
+	validatorCache *cache.LRUCache // signer -> validator address
 
 	// sliding window tracking for participation rates
 	qcWindow       []qcWindowEntry
@@ -77,8 +94,10 @@ func NewConsensusMonitor(cfg *config.Config) *ConsensusMonitor {
 	return &ConsensusMonitor{
 		config:          cfg,
 		qcSignatures:    make(map[string]int64),
+		qcLastSeen:      make(map[string]time.Time),
 		tcVotes:         make(map[string]int64),
-		validatorCache:  make(map[string]string),
+		tcLastSeen:      make(map[string]time.Time),
+		validatorCache:  cache.NewLRUCache(validatorCacheSize, validatorCacheTTL),
 		qcWindow:        make([]qcWindowEntry, 0),
 		windowSize:      100,       // keep last 100 blocks for participation calculation
 		windowDuration:  time.Hour, // or calculate based on last hour
@@ -87,12 +106,43 @@ func NewConsensusMonitor(cfg *config.Config) *ConsensusMonitor {
 	}
 }
 
+// trimStaleValidators drops qcSignatures / tcVotes entries that haven't been
+// seen in consensusValidatorTTL. Called periodically by the monitor's
+// housekeeping loop so the maps don't grow without bound as the validator
+// set churns over time.
+func (m *ConsensusMonitor) trimStaleValidators() {
+	cutoff := time.Now().Add(-consensusValidatorTTL)
+	m.mapsMu.Lock()
+	defer m.mapsMu.Unlock()
+	for v, t := range m.qcLastSeen {
+		if t.Before(cutoff) {
+			delete(m.qcLastSeen, v)
+			delete(m.qcSignatures, v)
+		}
+	}
+	for v, t := range m.tcLastSeen {
+		if t.Before(cutoff) {
+			delete(m.tcLastSeen, v)
+			delete(m.tcVotes, v)
+		}
+	}
+}
+
 // core message types for consensus - using dedicated structures to match log format
 
+// ConsensusVoteMessage matches the inner Vote payload in consensus logs.
+//
+// Wire formats:
+//
+//	outgoing: ["out", {"Vote": {"vote": {"validator": "0x...", "round": ..., "block_hash": "..."}, "destination": "0x..."}}]
+//	incoming: ["in",  {"source": "0x...", "msg": {"Vote": {"validator": "0x...", "round": ..., "block_hash": "..."}}}]
+//
+// Old hl-node releases (pre-2026) used a `signer_id` field at this level; we
+// keep that field as a fallback so the parser works against both schemas.
 type ConsensusVoteMessage struct {
-	// only used for tracking TC votes
-	Round    uint64 `json:"round"`
-	SignerId string `json:"signer_id"`
+	Round     uint64 `json:"round"`
+	Validator string `json:"validator"`
+	SignerId  string `json:"signer_id"`
 }
 
 type ConsensusBlockMessage struct {
@@ -106,6 +156,7 @@ type ConsensusBlockMessage struct {
 }
 
 type QCEvidence struct {
+	Round   uint64   `json:"round"`
 	Signers []string `json:"signers"`
 }
 
@@ -142,10 +193,26 @@ func StartConsensusMonitor(ctx context.Context, cfg *config.Config, errCh chan<-
 	}
 
 	// start monitoring consensus logs
-	go m.monitorConsensusLogs(ctx, errCh)
+	goSafe("consensus", func() { m.monitorConsensusLogs(ctx, errCh) })
 
 	// start monitoring status logs
-	go m.monitorStatusLogs(ctx, errCh)
+	goSafe("consensus", func() { m.monitorStatusLogs(ctx, errCh) })
+
+	// periodic housekeeping: trim validator maps every 10 min. Drops entries
+	// that haven't been seen in consensusValidatorTTL.
+	goSafe("consensus", func() {
+		t := time.NewTicker(10 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				m.trimStaleValidators()
+				m.validatorCache.CleanupExpired()
+			}
+		}
+	})
 }
 
 // monitors the consensus log files
@@ -326,6 +393,23 @@ func (m *ConsensusMonitor) processConsensusLine(line string) error {
 		if err := json.Unmarshal(msgData, &msg); err == nil && len(msg.Vote) > 0 {
 			var voteMsg ConsensusVoteMessage
 			if err := json.Unmarshal(msg.Vote, &voteMsg); err == nil {
+				// Outgoing votes wrap the payload one level deeper under
+				// `vote`. If we got nothing useful at the top level, peel
+				// one more layer and re-decode.
+				if voteMsg.Validator == "" && voteMsg.SignerId == "" {
+					var outer struct {
+						Vote json.RawMessage `json:"vote"`
+					}
+					if json.Unmarshal(msg.Vote, &outer) == nil && len(outer.Vote) > 0 {
+						_ = json.Unmarshal(outer.Vote, &voteMsg)
+					}
+				}
+				// For incoming votes the validator who SENT the vote is the
+				// outer "source"; fall back to that if the payload itself
+				// didn't name them.
+				if voteMsg.Validator == "" && voteMsg.SignerId == "" && wrapper.Source != "" {
+					voteMsg.Validator = wrapper.Source
+				}
 				return m.processVoteStruct(&voteMsg, parsedTime)
 			}
 		}
@@ -364,20 +448,23 @@ func (m *ConsensusMonitor) processConsensusLine(line string) error {
 
 // processes a vote message
 func (m *ConsensusMonitor) processVoteStruct(vote *ConsensusVoteMessage, timestamp time.Time) error {
-	// get val addr for the signer
-	validator := m.getValidatorForSigner(vote.SignerId)
+	// hl-node 2026+ exposes `validator` directly. Old releases used a
+	// `signer_id` that we'd then look up. Try the explicit field first;
+	// fall back to the signer mapping for backward compatibility.
+	validator := vote.Validator
+	if validator == "" && vote.SignerId != "" {
+		validator = m.getValidatorForSigner(vote.SignerId)
+	}
 	if validator == "" {
 		return nil
 	}
 
 	formattedValidator := m.formatValidatorAddress(validator)
 
-	// update vote round tracking
 	if vote.Round > 0 {
 		metrics.SetValidatorLastVoteRound(formattedValidator, int64(vote.Round))
 	}
 
-	// update vote time difference
 	timeDiff := time.Since(timestamp).Seconds()
 	metrics.SetValidatorVoteTimeDiff(formattedValidator, timeDiff)
 
@@ -439,8 +526,11 @@ func (m *ConsensusMonitor) processBlockRaw(blockData json.RawMessage) error {
 
 				formattedValidator := m.formatValidatorAddress(validator)
 
-				// track QC signatures
+				// track QC signatures (bounded by trimStaleValidators)
+				m.mapsMu.Lock()
 				m.qcSignatures[validator]++
+				m.qcLastSeen[validator] = time.Now()
+				m.mapsMu.Unlock()
 
 				metrics.IncrementQCSignatures(formattedValidator)
 			}
@@ -482,8 +572,11 @@ func (m *ConsensusMonitor) processBlockRaw(blockData json.RawMessage) error {
 					// just format it directly
 					formattedValidator := m.formatValidatorAddress(timeout.Validator)
 
-					// track TC votes
+					// track TC votes (bounded by trimStaleValidators)
+					m.mapsMu.Lock()
 					m.tcVotes[timeout.Validator]++
+					m.tcLastSeen[timeout.Validator] = time.Now()
+					m.mapsMu.Unlock()
 					metrics.IncrementTCParticipation(formattedValidator)
 				}
 			}
@@ -501,21 +594,30 @@ func (m *ConsensusMonitor) processBlockRaw(blockData json.RawMessage) error {
 	// count block payloads if present
 	// payload counting is handled by replica monitor
 
-	// QC round lag would need QC round information which isn't in the current log format
+	// QC round lag: block.Round - QC.Round. A healthy HotStuff chain
+	// runs at lag=1 (the current block's QC certifies the previous round).
+	// Higher = network was slow / view-changes happened between rounds.
+	if block.QC != nil && block.QC.Round > 0 && block.Round > 0 {
+		lag := int64(block.Round) - int64(block.QC.Round)
+		if lag >= 0 {
+			metrics.SetQCRoundLag(float64(lag))
+		}
+	}
 	return nil
 }
 
 // returns the validator address for a given signer
 func (m *ConsensusMonitor) getValidatorForSigner(signer string) string {
-	// first check cache
-	if validator, ok := m.validatorCache[signer]; ok {
-		return validator
+	if v, ok := m.validatorCache.Get(signer); ok {
+		if validator, ok2 := v.(string); ok2 {
+			return validator
+		}
 	}
 
 	// try to get from metrics package (which maintains a global mapping)
 	validator, exists := metrics.GetValidatorForSigner(signer)
 	if exists && validator != "" {
-		m.validatorCache[signer] = validator
+		m.validatorCache.Set(signer, validator)
 		return validator
 	}
 
@@ -660,7 +762,13 @@ func (m *ConsensusMonitor) updateQCParticipationRates() {
 	}
 
 	// set rate to 0 for validators who haven't participated
-	for validator := range m.qcSignatures {
+	m.mapsMu.Lock()
+	knownValidators := make([]string, 0, len(m.qcSignatures))
+	for v := range m.qcSignatures {
+		knownValidators = append(knownValidators, v)
+	}
+	m.mapsMu.Unlock()
+	for _, validator := range knownValidators {
 		if _, exists := participationCount[validator]; !exists {
 			formattedValidator := m.formatValidatorAddress(validator)
 			metrics.SetQCParticipationRate(formattedValidator, 0)

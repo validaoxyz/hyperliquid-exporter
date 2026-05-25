@@ -32,7 +32,7 @@ var (
 )
 
 func StartValidatorStatusMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
-	go func() {
+	goSafe("validator_status", func() {
 		// initial status check to set up logging context
 		statusDir := filepath.Join(cfg.NodeHome, "data/node_logs/status/hourly")
 		if _, err := os.Stat(statusDir); os.IsNotExist(err) {
@@ -56,7 +56,7 @@ func StartValidatorStatusMonitor(ctx context.Context, cfg config.Config, errCh c
 				}
 			}
 		}
-	}()
+	})
 }
 
 func readValidatorStatus(nodeHome string) error {

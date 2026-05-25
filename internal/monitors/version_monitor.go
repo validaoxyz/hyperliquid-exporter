@@ -17,8 +17,26 @@ import (
 
 var currentCommitHash string
 
+// NodeBinaryReady reports whether the configured hl-node binary is present
+// and looks executable. The exporter calls this at startup to decide
+// whether to launch the version monitor; if the binary isn't there we
+// no-op rather than spam errors every 30 minutes. Returns nil if ready.
+func NodeBinaryReady(cfg config.Config) (string, error) {
+	info, err := os.Stat(cfg.NodeBinary)
+	if err != nil {
+		return cfg.NodeBinary, fmt.Errorf("hl-node binary not found at %s: %w", cfg.NodeBinary, err)
+	}
+	if info.IsDir() {
+		return cfg.NodeBinary, fmt.Errorf("hl-node path is a directory: %s", cfg.NodeBinary)
+	}
+	if info.Mode()&0111 == 0 {
+		return cfg.NodeBinary, fmt.Errorf("hl-node at %s is not executable", cfg.NodeBinary)
+	}
+	return cfg.NodeBinary, nil
+}
+
 func StartVersionMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
-	go func() {
+	goSafe("version", func() {
 		// run immediately on startup
 		if err := updateVersionInfo(ctx, cfg); err != nil {
 			errCh <- fmt.Errorf("version monitor error: %w", err)
@@ -37,7 +55,7 @@ func StartVersionMonitor(ctx context.Context, cfg config.Config, errCh chan<- er
 				}
 			}
 		}
-	}()
+	})
 }
 
 func updateVersionInfo(ctx context.Context, cfg config.Config) error {

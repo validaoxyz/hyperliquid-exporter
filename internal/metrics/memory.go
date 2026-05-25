@@ -30,24 +30,24 @@ func InitMemoryMetrics(meter metric.Meter) error {
 	}
 
 	HLGoHeapInuseMB, err = meter.Float64ObservableGauge(
-		"hl_go_heap_inuse_mb",
-		metric.WithDescription("Heap memory in use in MB"),
+		"hl_go_heap_inuse_bytes",
+		metric.WithDescription("Heap memory in use in bytes"),
 	)
 	if err != nil {
 		return err
 	}
 
 	HLGoHeapIdleMB, err = meter.Float64ObservableGauge(
-		"hl_go_heap_idle_mb",
-		metric.WithDescription("Heap memory idle in MB"),
+		"hl_go_heap_idle_bytes",
+		metric.WithDescription("Heap memory idle in bytes"),
 	)
 	if err != nil {
 		return err
 	}
 
 	HLGoSysMB, err = meter.Float64ObservableGauge(
-		"hl_go_sys_mb",
-		metric.WithDescription("Total memory obtained from OS in MB"),
+		"hl_go_sys_bytes",
+		metric.WithDescription("Total memory obtained from OS in bytes"),
 	)
 	if err != nil {
 		return err
@@ -74,10 +74,10 @@ func collectMemoryStats(ctx context.Context, observer metric.Observer) error {
 	// record heap objects
 	observer.ObserveInt64(HLGoHeapObjects, int64(m.HeapObjects))
 
-	// convert bytes->MB for readability
-	observer.ObserveFloat64(HLGoHeapInuseMB, float64(m.HeapInuse)/(1024*1024))
-	observer.ObserveFloat64(HLGoHeapIdleMB, float64(m.HeapIdle)/(1024*1024))
-	observer.ObserveFloat64(HLGoSysMB, float64(m.Sys)/(1024*1024))
+	// emit raw bytes; Grafana's "bytes" unit auto-scales for display
+	observer.ObserveFloat64(HLGoHeapInuseMB, float64(m.HeapInuse))
+	observer.ObserveFloat64(HLGoHeapIdleMB, float64(m.HeapIdle))
+	observer.ObserveFloat64(HLGoSysMB, float64(m.Sys))
 
 	// record number of goroutines
 	observer.ObserveInt64(HLGoNumGoroutines, int64(runtime.NumGoroutine()))
