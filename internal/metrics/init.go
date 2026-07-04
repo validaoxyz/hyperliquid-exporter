@@ -36,7 +36,7 @@ func InitMetrics(ctx context.Context, cfg MetricsConfig) error {
 		if port == 0 {
 			port = 8086
 		}
-		if err := StartPrometheusServer(ctx, port); err != nil {
+		if err := StartPrometheusServer(ctx, port, cfg.EnablePprof); err != nil {
 			return fmt.Errorf("failed to start Prometheus server: %w", err)
 		}
 	}

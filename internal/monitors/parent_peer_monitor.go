@@ -13,12 +13,22 @@ import (
 // new to look at until the source monitor publishes a fresh snapshot.
 const parentPeerPollInterval = 30 * time.Second
 
-// parentPeerAmbiguityThreshold is the fraction of the top peer's bytes the
-// runner-up must exceed before we log a warning about an ambiguous parent.
-// 0.1 = "runner-up is within 10× ratio of the top". A healthy parent
-// relationship has a clear winner (often 100x the runner-up); ambiguity
-// usually means the node has lost its primary or is bridging two.
-const parentPeerAmbiguityThreshold = 0.1
+// Per-peer traffic values oscillate wildly between 30s windows (a peer can
+// drop from ~1.0 to ~1e-6 just by not delivering a block that window), so
+// parent selection runs on an EWMA of the samples rather than the latest
+// one, and the incumbent only loses to a challenger that is clearly ahead
+// on the smoothed value. This kills both the flapping switches and the
+// once-per-30s "ambiguous parent" log spam of the single-sample design.
+const (
+	// parentPeerEWMAAlpha weights the newest sample; ~0.3 makes the EWMA
+	// settle over roughly the last 5 samples (2.5 minutes).
+	parentPeerEWMAAlpha = 0.3
+	// parentPeerSwitchRatio is how far ahead (on EWMA) a challenger must be
+	// before it takes the parent role from the incumbent.
+	parentPeerSwitchRatio = 1.2
+	// parentPeerPruneBelow drops decayed-out peers from the EWMA map.
+	parentPeerPruneBelow = 1e-9
+)
 
 // StartParentPeerMonitor identifies which inbound peer is delivering the
 // most bytes — for a non-validator, that's the node's effective upstream
@@ -34,6 +44,8 @@ func StartParentPeerMonitor(ctx context.Context, cfg config.Config, errCh chan<-
 
 	var currentParent string
 	var parentSince time.Time
+	ewma := map[string]float64{}
+	var lastSample time.Time
 
 	ticker := time.NewTicker(parentPeerPollInterval)
 	defer ticker.Stop()
@@ -44,39 +56,63 @@ func StartParentPeerMonitor(ctx context.Context, cfg config.Config, errCh chan<-
 		metrics.MarkMonitorTick("parent_peer")
 
 		ts, in, _ := LatestTCPTrafficSnapshot()
-		if ts.IsZero() || len(in) == 0 {
+		if ts.IsZero() || len(in) == 0 || !ts.After(lastSample) {
+			return
+		}
+		lastSample = ts
+
+		// fold the fresh snapshot into the EWMA; peers absent from the
+		// snapshot decay toward zero and eventually drop out
+		seen := make(map[string]bool, len(in))
+		latest := make(map[string]float64, len(in))
+		for _, p := range in {
+			seen[p.ip] = true
+			latest[p.ip] = p.value
+			ewma[p.ip] = parentPeerEWMAAlpha*p.value + (1-parentPeerEWMAAlpha)*ewma[p.ip]
+		}
+		for ip, v := range ewma {
+			if !seen[ip] {
+				v *= 1 - parentPeerEWMAAlpha
+				if v < parentPeerPruneBelow {
+					delete(ewma, ip)
+					continue
+				}
+				ewma[ip] = v
+			}
+		}
+
+		var best string
+		var bestVal float64
+		for ip, v := range ewma {
+			if v > bestVal {
+				best, bestVal = ip, v
+			}
+		}
+		if best == "" {
 			return
 		}
 
-		top := in[0]
-		var runner peerSample
-		if len(in) > 1 {
-			runner = in[1]
-		}
-
-		if top.value > 0 && runner.value > top.value*parentPeerAmbiguityThreshold {
-			logger.WarningComponent("parent_peer",
-				"ambiguous parent peer: top=%s (%.4g) runner-up=%s (%.4g)",
-				top.ip, top.value, runner.ip, runner.value)
-		}
-
 		now := time.Now()
-		if top.ip != currentParent {
-			if currentParent != "" {
+		switch {
+		case currentParent == "":
+			currentParent = best
+			parentSince = now
+			logger.InfoComponent("parent_peer", "initial parent peer: %s", best)
+		case best != currentParent:
+			// hysteresis: the incumbent keeps the role until the challenger
+			// is clearly ahead on the smoothed value
+			if bestVal > ewma[currentParent]*parentPeerSwitchRatio {
 				metrics.HLNodeParentPeerInfo.DeleteLabelValues(currentParent)
 				metrics.HLNodeParentPeerSwitches.Inc()
-				logger.InfoComponent("parent_peer", "parent peer changed: %s -> %s", currentParent, top.ip)
-			} else {
-				logger.InfoComponent("parent_peer", "initial parent peer: %s", top.ip)
+				logger.InfoComponent("parent_peer", "parent peer changed: %s -> %s", currentParent, best)
+				currentParent = best
+				parentSince = now
 			}
-			currentParent = top.ip
-			parentSince = now
 		}
 
-		metrics.HLNodeParentPeerInfo.WithLabelValues(top.ip).Set(1)
-		metrics.HLNodeParentPeerTraffic.Set(top.value)
+		metrics.HLNodeParentPeerInfo.WithLabelValues(currentParent).Set(1)
+		metrics.HLNodeParentPeerTraffic.Set(latest[currentParent])
 		metrics.HLNodeParentPeerTenureSeconds.Set(now.Sub(parentSince).Seconds())
-		metrics.MarkMonitorTick("parent_peer")
 	}
 
 	// Wait briefly for the tcp_traffic monitor to publish its first sample

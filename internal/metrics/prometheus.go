@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/pprof"
+	"os"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -12,7 +14,7 @@ import (
 
 const scrapeTimeout = 30 * time.Second
 
-func StartPrometheusServer(ctx context.Context, port int) error {
+func StartPrometheusServer(ctx context.Context, port int, enablePprof bool) error {
 	mux := http.NewServeMux()
 
 	// http.TimeoutHandler buffers the response and writes a 503 if the inner
@@ -47,6 +49,17 @@ func StartPrometheusServer(ctx context.Context, port int) error {
 		_, _ = w.Write([]byte("not ready\n"))
 	})
 
+	if enablePprof {
+		// profiling endpoints, opt-in via --pprof: the next CPU question
+		// should take a `go tool pprof` minute, not a code audit
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		logger.Info("pprof endpoints enabled on /debug/pprof/")
+	}
+
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
 		Handler:           mux,
@@ -56,7 +69,12 @@ func StartPrometheusServer(ctx context.Context, port int) error {
 	go func() {
 		logger.Info("Starting Prometheus metrics server on port %d", port)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("Prometheus server error: %v", err)
+			// an exporter that cannot serve metrics is worse than a dead
+			// one: it looks alive while every scrape fails (seen live with
+			// a port collision). Die loudly so systemd restarts us and the
+			// failure is visible.
+			logger.Error("Prometheus server failed (exiting): %v", err)
+			os.Exit(1)
 		}
 	}()
 

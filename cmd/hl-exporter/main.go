@@ -42,6 +42,7 @@ func main() {
 		fmt.Println("  --skip-version-check      Skip the local hl-node --version probe")
 		fmt.Println("  --skip-update-check       Skip the upstream hl-visor up-to-date check")
 		fmt.Println("  --otlp                    Enable OTLP export (with --otlp-endpoint, --otlp-insecure, --alias)")
+		fmt.Println("  --pprof                   Expose /debug/pprof/ on the metrics listener")
 		os.Exit(1)
 	}
 
@@ -77,6 +78,7 @@ func main() {
 	infoEndpointURL := startCmd.String("info-endpoint-url", "", "URL the info probe POSTs to (default http://127.0.0.1:3001/info)")
 	enableExtendedMetrics := startCmd.Bool("extended-metrics", false, "Enable the extended monitor set (tcp_lz4, log lines, public IP, Tokio runtime, operator config, tmp dir)")
 	enablePerPeerMetrics := startCmd.Bool("per-peer-metrics", false, "Emit hl_p2p_peer_{last,first}_seen_seconds{ip} per known peer (cardinality bounded by the peer set's LRU cap + 24h TTL)")
+	enablePprof := startCmd.Bool("pprof", false, "Expose Go profiling endpoints under /debug/pprof/ on the metrics listener")
 
 	switch os.Args[1] {
 	case "start":
@@ -120,6 +122,7 @@ func main() {
 		InfoEndpointURL:       *infoEndpointURL,
 		EnableExtendedMetrics: *enableExtendedMetrics,
 		EnablePerPeerMetrics:  *enablePerPeerMetrics,
+		EnablePprof:           *enablePprof,
 	}
 
 	cfg := config.LoadConfig(flags)
@@ -164,6 +167,7 @@ func main() {
 		IsValidator:      isValidator,
 		EnableEVM:        *enableEVM,
 		PrometheusPort:   *metricsPort,
+		EnablePprof:      *enablePprof,
 	}
 
 	if err := metrics.InitMetrics(ctx, metricsConfig); err != nil {

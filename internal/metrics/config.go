@@ -14,4 +14,6 @@ type MetricsConfig struct {
 	// PrometheusPort overrides the default 8086 listener. Useful for
 	// side-by-side test runs and for sites with port conflicts.
 	PrometheusPort int
+	// EnablePprof exposes /debug/pprof/ on the metrics listener.
+	EnablePprof bool
 }

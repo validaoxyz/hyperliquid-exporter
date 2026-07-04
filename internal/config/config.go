@@ -55,6 +55,9 @@ type Config struct {
 	// bounded by the peer set's LRU cap (2048) + TTL (24h). Off by
 	// default for operators with tight per-target series limits.
 	EnablePerPeerMetrics bool
+	// EnablePprof exposes Go profiling endpoints under /debug/pprof/ on
+	// the metrics listener. Off by default.
+	EnablePprof bool
 }
 
 type Flags struct {
@@ -80,6 +83,7 @@ type Flags struct {
 	InfoEndpointURL       string
 	EnableExtendedMetrics bool
 	EnablePerPeerMetrics  bool
+	EnablePprof           bool
 }
 
 // load env vars and returns a Config struct
@@ -137,6 +141,7 @@ func LoadConfig(flags *Flags) Config {
 		InfoEndpointURL:        flags.InfoEndpointURL,
 		EnableExtendedMetrics:  flags.EnableExtendedMetrics,
 		EnablePerPeerMetrics:   flags.EnablePerPeerMetrics,
+		EnablePprof:            flags.EnablePprof,
 	}
 
 	// override with flags if they're provided
