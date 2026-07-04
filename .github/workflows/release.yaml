@@ -19,7 +19,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
-          go-version: '1.22'
+          go-version-file: 'go.mod'
 
       - name: Build binaries
         run: |
@@ -33,7 +33,9 @@ jobs:
               OUTPUT_NAME+=".exe"
             fi
             echo "Building $OUTPUT_NAME..."
-            GOOS=$OS GOARCH=$ARCH go build -o bin/${OUTPUT_NAME} ./cmd/hl-exporter
+            GOOS=$OS GOARCH=$ARCH CGO_ENABLED=0 go build \
+              -ldflags "-X github.com/validaoxyz/hyperliquid-exporter/internal/metrics.BuildVersion=${GITHUB_REF_NAME} -X github.com/validaoxyz/hyperliquid-exporter/internal/metrics.BuildCommit=${GITHUB_SHA:0:7}" \
+              -o bin/${OUTPUT_NAME} ./cmd/hl-exporter
           done
 
       - name: Compress binaries
