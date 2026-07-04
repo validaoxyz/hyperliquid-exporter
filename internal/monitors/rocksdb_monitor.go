@@ -2,6 +2,7 @@ package monitors
 
 import (
 	"context"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -143,7 +144,7 @@ func readRocksDBStats(path string) (rocksDBStats, bool) {
 		return stats, false
 	}
 	buf := make([]byte, info.Size()-start)
-	if _, err := f.Read(buf); err != nil {
+	if _, err := io.ReadFull(f, buf); err != nil {
 		return stats, false
 	}
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"time"
 
@@ -63,39 +64,44 @@ func tickSnapshotStatus(root string) {
 	if err != nil {
 		return
 	}
-	var latestDate string
+	dates := []string{}
 	for _, e := range dateEntries {
-		if !e.IsDir() {
-			continue
-		}
-		if e.Name() > latestDate {
-			latestDate = e.Name()
+		if e.IsDir() {
+			dates = append(dates, e.Name())
 		}
 	}
-	if latestDate == "" {
+	if len(dates) == 0 {
 		return
 	}
-	dateDir := filepath.Join(root, latestDate)
+	sort.Strings(dates)
+	// count across the two newest date dirs: the retention window spans
+	// UTC midnight, so counting only today made the gauge sawtooth to
+	// near zero right after rollover
+	if len(dates) > 2 {
+		dates = dates[len(dates)-2:]
+	}
 
-	hgtEntries, err := os.ReadDir(dateDir)
-	if err != nil {
-		return
-	}
 	var maxHeight int64
 	var maxMtime time.Time
 	count := 0
-	for _, e := range hgtEntries {
-		h, err := strconv.ParseInt(e.Name(), 10, 64)
+	for _, d := range dates {
+		hgtEntries, err := os.ReadDir(filepath.Join(root, d))
 		if err != nil {
 			continue
 		}
-		count++
-		if h > maxHeight {
-			maxHeight = h
-		}
-		if info, err := e.Info(); err == nil {
-			if mt := info.ModTime(); mt.After(maxMtime) {
-				maxMtime = mt
+		for _, e := range hgtEntries {
+			h, err := strconv.ParseInt(e.Name(), 10, 64)
+			if err != nil {
+				continue
+			}
+			count++
+			if h > maxHeight {
+				maxHeight = h
+			}
+			if info, err := e.Info(); err == nil {
+				if mt := info.ModTime(); mt.After(maxMtime) {
+					maxMtime = mt
+				}
 			}
 		}
 	}

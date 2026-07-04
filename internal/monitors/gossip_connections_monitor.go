@@ -119,19 +119,19 @@ func readGossipConnectionEvents(path string, offset int64) (int64, int, error) {
 	processed := 0
 	for {
 		line, err := reader.ReadBytes('\n')
-		if len(line) > 0 {
-			if event, ok := parseGossipConnectionLine(line); ok {
-				metrics.HLP2PGossipEventsTotal.WithLabelValues(event).Inc()
-				processed++
-			}
-			offset += int64(len(line))
-		}
 		if err != nil {
 			if err == io.EOF {
+				// a partial trailing line stays unconsumed so a torn write
+				// is re-read complete on the next tick, never half-parsed
 				break
 			}
 			return offset, processed, err
 		}
+		if event, ok := parseGossipConnectionLine(line); ok {
+			metrics.HLP2PGossipEventsTotal.WithLabelValues(event).Inc()
+			processed++
+		}
+		offset += int64(len(line))
 	}
 	return offset, processed, nil
 }

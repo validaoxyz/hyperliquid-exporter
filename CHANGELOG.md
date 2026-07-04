@@ -17,6 +17,8 @@
 - Torn trailing lines are no longer half-consumed by the streaming monitors (mempool lost one event per file boundary; the shared tail reader now reassembles partials).
 - `validator_latency` date-file selection uses UTC; on non-UTC hosts it read a nonexistent path around midnight.
 - The gossip_rpc scanner survives >64 KiB peer-list lines.
+- `hl_core_operations_total` / `hl_core_operations_per_block` were inflated 2-6x: the fast-path element counter only tracked array depth, so every comma inside an order/cancel object counted as a separator (one order = 6 "operations"). Elements are counted properly now. `hl_core_orders_total` counts order actions (documented); individual orders live in `hl_core_operations_total{type="order"}`.
+- The contract resolver no longer closes its fetch queue on shutdown while the EVM stream can still enqueue (a send on a closed channel panics even under select/default, tripping panic alerts on routine restarts). Per-peer first/last-seen series are reconciled against the live peer set, so LRU-evicted peers can't leak series on nodes with more distinct peers than the cap. hl_node_snapshot_known_count counts the two newest date dirs (it sawtoothed at UTC midnight). gossip_connections no longer consumes torn trailing lines.
 
 ### Performance
 

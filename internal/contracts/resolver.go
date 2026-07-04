@@ -449,8 +449,10 @@ func (r *Resolver) fetchWorker() {
 // gracefully shuts down resolver
 func (r *Resolver) Shutdown() {
 	logger.InfoComponent("contracts", "Shutting down contract resolver...")
+	// do NOT close(fetchQueue): GetContractInfo sends to it from the EVM
+	// stream goroutine and a send on a closed channel panics even inside
+	// select/default. Workers exit via ctx cancellation alone.
 	r.cancel()
-	close(r.fetchQueue)
 	r.wg.Wait()
 	logger.InfoComponent("contracts", "Contract resolver shutdown complete")
 }

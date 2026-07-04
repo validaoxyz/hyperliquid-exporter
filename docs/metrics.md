@@ -15,7 +15,7 @@
 | `hl_core_operations_per_block` | Histogram | - | Distribution of operations per block | `--replica-metrics` |
 | `hl_core_operations_total` | Counter | `type`, `category` | Total individual operations by type and category | `--replica-metrics` |
 | `hl_core_orders_per_block` | Histogram | - | Distribution of orders per block | `--replica-metrics` |
-| `hl_core_orders_total` | Counter | - | Total orders placed | `--replica-metrics` |
+| `hl_core_orders_total` | Counter | - | Order ACTIONS placed (a batched action counts once). For individual orders use `hl_core_operations_total{type="order"}`. | `--replica-metrics` |
 | `hl_core_tx_per_block` | Histogram | - | Distribution of transactions per block | `--replica-metrics` |
 | `hl_core_tx_total` | Counter | `type` | Total transactions/actions by type | `--replica-metrics` |
 | `hl_core_round_advance` | Histogram | - | round - parent_round per block. 1 on a healthy chain; bucket counts above 1 are timed-out/skipped rounds. | `--replica-metrics` |

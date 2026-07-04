@@ -159,46 +159,18 @@ func (p *Parser) parseActionBundles(bundlesJSON json.RawMessage, actionCounts, o
 	return nil
 }
 
-// counts elements in a JSON array without full parsing
+// countJSONArrayElements returns the number of top-level elements in a
+// JSON array. The previous comma-counting fast path only tracked [ ]
+// depth, so every comma INSIDE an element object counted as a separator:
+// a single order (6 fields) counted as 6 operations, a cancel as 2. The
+// operation counters were inflated 2-6x on trading chains. RawMessage
+// decoding measures elements without materializing their contents.
 func countJSONArrayElements(data json.RawMessage) int {
-	// quick counting by looking for commas
-	// this is approximate but much faster than parsing
-	count := 1
-	inString := false
-	escaped := false
-	depth := 0
-
-	for _, b := range data {
-		if escaped {
-			escaped = false
-			continue
-		}
-
-		switch b {
-		case '"':
-			if !escaped {
-				inString = !inString
-			}
-		case '\\':
-			if inString {
-				escaped = true
-			}
-		case '[':
-			if !inString {
-				depth++
-			}
-		case ']':
-			if !inString {
-				depth--
-			}
-		case ',':
-			if !inString && depth == 1 {
-				count++
-			}
-		}
+	var elems []json.RawMessage
+	if err := json.Unmarshal(data, &elems); err != nil {
+		return 1 // malformed: count the action itself, as before
 	}
-
-	return count
+	return len(elems)
 }
 
 // counts the number of operations within an action

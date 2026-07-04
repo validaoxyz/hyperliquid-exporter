@@ -73,12 +73,20 @@ func tickPeerSet(emitPerPeer bool) {
 	set := peerset.Default()
 	now := time.Now()
 
-	// Evict TTL-expired peers and drop their per-IP series if any.
-	evicted := set.EvictExpired(now)
-	if emitPerPeer && len(evicted) > 0 {
+	// Evict TTL-expired peers, then reconcile the published per-IP series
+	// against the live set. Reconciling (rather than only deleting what
+	// EvictExpired returned) also drops series for peers the LRU evicted
+	// inside Register at capacity, which previously leaked forever on
+	// nodes seeing more than the cap's worth of distinct peers.
+	set.EvictExpired(now)
+	if emitPerPeer {
+		alive := map[string]bool{}
+		for _, p := range set.Snapshot() {
+			alive[p.IP] = true
+		}
 		perPeerLabelsMu.Lock()
-		for _, ip := range evicted {
-			if _, ok := perPeerLabels[ip]; ok {
+		for ip := range perPeerLabels {
+			if !alive[ip] {
 				metrics.HLP2PPeerLastSeenSeconds.DeleteLabelValues(ip)
 				metrics.HLP2PPeerFirstSeenSeconds.DeleteLabelValues(ip)
 				delete(perPeerLabels, ip)
