@@ -166,7 +166,9 @@ func reconcileValidatorExtras(summaries []hyperliquidapi.ValidatorSummary) {
 	}
 
 	for validator, labels := range prevExtraLabels {
-		if _, ok := current[validator]; ok {
+		// drop old series when the validator left OR its label set changed
+		// (a renamed moniker would otherwise leak the old-name series)
+		if cur, ok := current[validator]; ok && cur == labels {
 			continue
 		}
 		metrics.HLConsensusValidatorRecentBlocks.DeleteLabelValues(labels[0], labels[1], labels[2])
@@ -177,7 +179,7 @@ func reconcileValidatorExtras(summaries []hyperliquidapi.ValidatorSummary) {
 		}
 	}
 	for validator, labels := range prevUnjailable {
-		if _, ok := currentJailed[validator]; !ok {
+		if cur, ok := currentJailed[validator]; !ok || cur != labels {
 			metrics.HLConsensusValidatorUnjailableAfter.DeleteLabelValues(labels[0], labels[1], labels[2])
 		}
 	}

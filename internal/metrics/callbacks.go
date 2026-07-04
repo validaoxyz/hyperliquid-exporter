@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	api "go.opentelemetry.io/otel/metric"
 )
 
@@ -40,7 +42,12 @@ func RegisterCallbacks() error {
 					if voteAge {
 						val = now - v.value
 					}
-					allLabels := append(v.labels, commonLabels...)
+					// never append into v.labels' backing array: concurrent
+					// scrapes share it (RLock admits several readers)
+					allLabels := v.labels
+					if len(commonLabels) > 0 {
+						allLabels = append(append([]attribute.KeyValue{}, v.labels...), commonLabels...)
+					}
 					switch obs := instrument.(type) {
 					case api.Float64Observable:
 						o.ObserveFloat64(obs, val, api.WithAttributes(allLabels...))

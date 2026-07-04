@@ -106,7 +106,13 @@ func StartEVMMonitor(ctx context.Context, cfg config.Config, errCh chan<- error)
 			eofSleep:    250 * time.Millisecond,
 			onLine: func(line string) {
 				if err := processEVMBlockAndReceiptsLine(line); err != nil {
-					errCh <- fmt.Errorf("error processing EVM data line: %w", err)
+					logger.DebugComponent("evm", "EVM line parse: %v", err)
+					// non-blocking: a schema drift makes EVERY line error and
+					// a blocking send would backpressure the whole stream
+					select {
+					case errCh <- fmt.Errorf("error processing EVM data line: %w", err):
+					default:
+					}
 				}
 			},
 		})

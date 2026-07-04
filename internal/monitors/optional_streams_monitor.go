@@ -39,13 +39,9 @@ func StartOptionalStreamsMonitor(ctx context.Context, cfg config.Config) {
 			present = append(present, stream)
 		}
 	}
-	if len(present) == 0 {
-		logger.InfoComponent("optional_streams", "no opt-in data streams present; monitor idle")
-		<-ctx.Done()
-		return
-	}
-
-	logger.InfoComponent("optional_streams", "watching opt-in streams: %v", present)
+	// keep ticking even when none are present: the tick is four stats a
+	// minute and a stream can appear when the operator flips a node flag
+	logger.InfoComponent("optional_streams", "watching opt-in streams (present now: %v)", present)
 
 	ticker := time.NewTicker(optionalStreamsPollInterval)
 	defer ticker.Stop()

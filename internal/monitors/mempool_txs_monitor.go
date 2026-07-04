@@ -171,14 +171,13 @@ func StartMempoolTxsMonitor(ctx context.Context, cfg config.Config, errCh chan<-
 			return
 		}
 		currentOffset = newOffset
-		if n > 0 {
-			// refresh the age every tick so it keeps climbing when the
-			// stream goes quiet instead of freezing at the last record
-			if !mempoolTxsLastRecord.IsZero() {
-				metrics.HLMempoolTxsSampleAgeSeconds.Set(time.Since(mempoolTxsLastRecord).Seconds())
-			}
-			metrics.MarkMonitorTick("mempool_txs")
+		_ = n
+		// refresh the age unconditionally: a quiet or dead stream must show
+		// a climbing age, which is the whole point of the gauge
+		if !mempoolTxsLastRecord.IsZero() {
+			metrics.HLMempoolTxsSampleAgeSeconds.Set(time.Since(mempoolTxsLastRecord).Seconds())
 		}
+		metrics.MarkMonitorTick("mempool_txs")
 	}
 
 	ticker := time.NewTicker(mempoolTxsPollInterval)

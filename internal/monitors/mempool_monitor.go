@@ -79,13 +79,22 @@ func StartMempoolMonitor(ctx context.Context, cfg config.Config, errCh chan<- er
 			return
 		}
 		if latest != currentFile {
-			info, err := os.Stat(latest)
-			if err != nil {
-				return
+			if currentFile == "" {
+				// no-replay rule applies only to history that predates the
+				// exporter; seek to EOF of the file found at startup
+				info, err := os.Stat(latest)
+				if err != nil {
+					return
+				}
+				logger.InfoComponent("mempool", "switched to %s (starting at EOF=%d)", latest, info.Size())
+				currentOffset = info.Size()
+			} else {
+				// an hour rollover creates a brand-new file whose whole
+				// content is post-startup; starting at EOF dropped the head
+				logger.InfoComponent("mempool", "switched to %s (starting at 0)", latest)
+				currentOffset = 0
 			}
-			logger.InfoComponent("mempool", "switched to %s (starting at EOF=%d)", latest, info.Size())
 			currentFile = latest
-			currentOffset = info.Size()
 			return
 		}
 		newOffset, n, err := readMempoolEvents(currentFile, currentOffset)

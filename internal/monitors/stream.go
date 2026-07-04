@@ -87,7 +87,10 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 					continue
 				}
 				// keep draining the file we already have
-			case latest != current:
+			case latest != current || reader == nil:
+				// reader == nil covers a failed open of a since-vanished
+				// newer file: without it, latest == current would skip the
+				// reopen forever
 				if file != nil {
 					file.Close()
 					file, reader = nil, nil

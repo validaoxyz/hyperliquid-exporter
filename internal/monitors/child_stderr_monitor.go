@@ -3,6 +3,7 @@ package monitors
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -123,22 +124,27 @@ func tickChildStderr(root string, seen map[string]*childStderrState) {
 				}
 				path := filepath.Join(dir, f.Name())
 				live[path] = true
-				if _, ok := seen[path]; ok {
-					continue // write-once files; classified already
+				if st, ok := seen[path]; ok && st.reason != "" {
+					continue // crash content is write-once; classified already
 				}
 				info, err := f.Info()
 				if err != nil {
 					continue
 				}
-				st := &childStderrState{modTime: info.ModTime()}
+				st := seen[path]
+				if st == nil {
+					st = &childStderrState{modTime: info.ModTime()}
+					seen[path] = st
+				}
+				// the newest file belongs to the RUNNING child and is empty
+				// until that child dies, so empty files must be re-checked
+				// every tick: the crash output appears later in place
 				if info.Size() > 0 {
 					if head, err := readHead(path, childStderrHeadBytes); err == nil {
 						st.reason = classifyChildStderr(head)
-					} else {
-						continue // retry next tick
+						st.modTime = info.ModTime()
 					}
 				}
-				seen[path] = st
 			}
 		}
 	}
@@ -181,7 +187,9 @@ func readHead(path string, n int) ([]byte, error) {
 	}
 	defer f.Close()
 	buf := make([]byte, n)
-	read, err := f.Read(buf)
+	// read the full head, not just the first chunk: a single short Read
+	// mid-crash-write could misclassify the reason
+	read, err := io.ReadFull(f, buf)
 	if read > 0 {
 		return buf[:read], nil
 	}
