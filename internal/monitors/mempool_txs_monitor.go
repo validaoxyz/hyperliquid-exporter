@@ -165,13 +165,12 @@ func StartMempoolTxsMonitor(ctx context.Context, cfg config.Config, errCh chan<-
 			currentOffset = 0
 		}
 
-		newOffset, n, err := readMempoolTxsEvents(currentFile, currentOffset)
+		newOffset, _, err := readMempoolTxsEvents(currentFile, currentOffset)
 		if err != nil {
 			logger.DebugComponent("mempool_txs", "read %s: %v", currentFile, err)
 			return
 		}
 		currentOffset = newOffset
-		_ = n
 		// refresh the age unconditionally: a quiet or dead stream must show
 		// a climbing age, which is the whole point of the gauge
 		if !mempoolTxsLastRecord.IsZero() {

@@ -91,6 +91,7 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 				// reader == nil covers a failed open of a since-vanished
 				// newer file: without it, latest == current would skip the
 				// reopen forever
+				reopenSame := latest == current
 				if file != nil {
 					file.Close()
 					file, reader = nil, nil
@@ -103,6 +104,17 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 						return
 					}
 					continue
+				}
+				if reopenSame && !firstRun {
+					// re-opening the file we already consumed: resume at the
+					// end rather than re-emitting it from byte 0
+					if _, err := f.Seek(0, io.SeekEnd); err != nil {
+						f.Close()
+						if !sleepCtx(ctx, time.Second) {
+							return
+						}
+						continue
+					}
 				}
 				if firstRun {
 					if _, err := f.Seek(0, io.SeekEnd); err != nil {
