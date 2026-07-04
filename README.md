@@ -25,6 +25,8 @@ OPTIONS:
   --probe-info-endpoint     # Active HTTP probe of --serve-info
   --extended-metrics        # Extra monitors (lz4, logs, RocksDB, etc.)
   --per-peer-metrics        # Per-IP peer first/last-seen gauges (LRU 2048, 24h TTL)
+  --validator-rtt           # Outbound TCP RTT probes of validator IPs
+  --pprof                   # Go profiling endpoints on /debug/pprof/
   --skip-version-check      # For containerized deployments
   --skip-update-check       # For containerized deployments
   --otlp                    # Enable OTLP export (requires --alias and --otlp-endpoint)

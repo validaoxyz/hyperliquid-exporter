@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] - v3.1 correctness and cost pass
+## [v3.1.0] - 2026-07-04
 
 ### Fixed
 
@@ -41,6 +41,13 @@ The exporter burned ~195% CPU on a live validator; the causes are removed:
 - `hl_node_rate_limited_files{stream}`: abuse tripwire from `data/rate_limited_ips`.
 - `hl_node_crit_location_ignored{file,line}`, `hl_p2p_non_val_connections`, `hl_node_subsystem_latency_lifetime_mean_seconds`.
 - `hl_node_stream_age_seconds{stream}`: freshness of opt-in data streams (fills, TWAP statuses, misc events, system/core writer actions). These exist to feed downstream consumers; nothing else notices when one silently stalls. `node_gossip_priority_config.json` joined the operator-config mtime allowlist.
+- `--pprof` exposes /debug/pprof/ on the metrics listener (opt-in) so CPU questions get a profile instead of a guess.
+
+### Changed
+
+- Parent-peer selection runs on an EWMA of per-peer traffic with 1.2x switch hysteresis. The single-sample design flapped (peer values swing between ~1.0 and ~1e-6 across 30s windows) and logged an ambiguous-parent warning every 30 seconds.
+- A failed metrics listener now exits the process instead of leaving the exporter running blind while every scrape fails.
+- The mempool monitor starts new hour files at offset 0 (only the file found at startup seeks to EOF), so the head of each hour is no longer dropped. mempool_txs refreshes its sample-age gauge every tick so a dead stream shows a climbing age.
 
 ### Changed (BREAKING)
 
@@ -50,7 +57,7 @@ The exporter burned ~195% CPU on a live validator; the causes are removed:
 - The info-probe family registers only when `--probe-info-endpoint` is on: `hl_info_endpoint_up` is now absent instead of a false-alarm 0 on nodes without the probe.
 - `--contract-metrics-limit` now hard-caps `hl_evm_contract_tx_total` series (first N addresses keep their own series, the rest roll into `contract_address="other"`). Previously it only bounded a lookup cache while series grew without limit (observed: 7,140 series).
 
-## [Unreleased] - breaking metrics cleanup
+## [v3.0.0] - 2026-06-02
 
 ### Removed
 

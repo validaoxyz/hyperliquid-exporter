@@ -1,6 +1,6 @@
 # UPGRADING
 
-## v3.1 (unreleased)
+## v3.1.0
 
 > **BREAKING.** Removed and retyped metrics below; historical series do not carry over.
 
@@ -27,6 +27,7 @@
 | `hl_evm_contract_tx_total` | `--contract-metrics-limit` now caps series: first N addresses keep their own series, the rest roll into `contract_address="other"` | raise the limit if you track specific contracts beyond the default 20 |
 | `hl_tokio_task_*` | withdrawn (absent) when the source feed is older than 15m; `hl_tokio_sample_age_seconds` keeps climbing instead | dashboards should treat absence + high sample age as "feed stale", not "tasks gone" |
 | per-validator gauges (stake/jailed/active, raw latency/round, vote round/age) | reconcile to the latest snapshot; validators leaving the set disappear instead of freezing | `absent()`-style alerts fire correctly for departed validators now |
+| `hl_node_parent_peer_*` | selection smoothed (EWMA + hysteresis); switches_total will tick far less often | rapid-switch alerts can use tighter thresholds |
 
 ## Breaking metrics cleanup (post-v3)
 

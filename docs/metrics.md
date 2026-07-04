@@ -183,7 +183,7 @@ These expose node-precomputed per-node quantiles as gauges with no `_bucket` ser
 | `hl_p2p_total_traffic` | Gauge | `direction` | Raw hl-node tcp_traffic value (comparative only, not bytes; ~0..1 observed), summed across peers | - |
 | `hl_p2p_peer_count` | Gauge | `direction` | Distinct peers in sample | - |
 | `hl_p2p_sample_age_seconds` | Gauge | - | Age of latest tcp_traffic sample | - |
-| `hl_node_parent_peer_info` | Gauge | `ip` | 1 for current parent peer | - |
+| `hl_node_parent_peer_info` | Gauge | `ip` | 1 for current parent peer. Selection runs on an EWMA of per-peer traffic with switch hysteresis (raw per-window values oscillate wildly), so short traffic dips don't flap the parent. | - |
 | `hl_node_parent_peer_traffic` | Gauge | - | Inbound raw hl-node tcp_traffic value from parent (comparative only, not bytes; ~0..1 observed) | - |
 | `hl_node_parent_peer_tenure_seconds` | Gauge | - | Time current parent has held role | - |
 | `hl_node_parent_peer_switches_total` | Counter | - | Cumulative parent changes | - |
