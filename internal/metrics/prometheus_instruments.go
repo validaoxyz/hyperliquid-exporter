@@ -955,3 +955,25 @@ var HLNodeRateLimitedFiles = promauto.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "hl_node_rate_limited_files",
 	Help: "Non-empty rate_limited_ips files in the newest date dir, per stream (abci_stream, gossip_rpc_blocks, gossip_rpc_requests). Non-zero = the node is actively rate-limiting peers.",
 }, []string{"stream"})
+
+// Restart/crash taxonomy from data/visor_child_stderr: hl-visor drops one
+// file per hl-node child start, empty on a clean start and holding the
+// dying output otherwise. This is where app-hash mismatches (consensus
+// divergence) and rejected configs surface; crit_msg_stats never sees
+// them because the process is already dead. Counts reflect the files
+// still retained on disk (hl-node prunes old ones), so alert on
+// last_crash recency, not on rate().
+var (
+	HLNodeChildStarts = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "hl_node_child_starts",
+		Help: "hl-node child starts retained in visor_child_stderr (clean starts + crashes). Retained-history count; prune-aware, do not rate().",
+	})
+	HLNodeChildCrashes = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hl_node_child_crashes",
+		Help: "Retained hl-node child crashes by reason (app_hash_mismatch, hardfork_upgrade, sync_overflow, config_error, network, panic). app_hash_mismatch is page-immediately severity.",
+	}, []string{"reason"})
+	HLNodeChildLastCrashSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hl_node_child_last_crash_seconds",
+		Help: "Unix timestamp of the newest retained crash per reason; time() - value < threshold is the alert shape.",
+	}, []string{"reason"})
+)

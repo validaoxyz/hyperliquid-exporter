@@ -159,6 +159,10 @@ func Start(ctx context.Context, cfg config.Config) {
 	logger.InfoComponent("rate_limited", "Initializing rate-limited-ips monitor...")
 	runMonitor("rate_limited", func() { monitors.StartRateLimitedMonitor(monitorCtx, cfg) })
 
+	// hl-node child restart/crash taxonomy from visor_child_stderr
+	logger.InfoComponent("child_stderr", "Initializing child-stderr monitor...")
+	runMonitor("child_stderr", func() { monitors.StartChildStderrMonitor(monitorCtx, cfg) })
+
 	// validator-only consensus accumulator (committed_blocks, dropped_txs,
 	// round_qc/tc, rpc_requests…). Silently idles on non-validators.
 	logger.InfoComponent("accumulator_consensus", "Initializing consensus accumulator monitor...")
