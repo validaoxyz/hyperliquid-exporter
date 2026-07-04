@@ -977,3 +977,13 @@ var (
 		Help: "Unix timestamp of the newest retained crash per reason; time() - value < threshold is the alert shape.",
 	}, []string{"reason"})
 )
+
+// Freshness of opt-in hl-node data streams (--write-fills,
+// --write-misc-events, TWAP streaming, system_and_core_writer_actions).
+// The content is bulk data and out of metric scope, but these streams
+// exist to feed downstream consumers and nothing else notices when one
+// silently stops writing.
+var HLNodeStreamAgeSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "hl_node_stream_age_seconds",
+	Help: "Age of the newest file in each present opt-in data stream (node_fills_streaming, node_twap_statuses_streaming, misc_events, system_and_core_writer_actions). Climbing while the node runs = the stream (and whatever consumes it) is stalled.",
+}, []string{"stream"})

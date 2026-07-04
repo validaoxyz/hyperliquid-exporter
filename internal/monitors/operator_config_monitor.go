@@ -26,6 +26,8 @@ var operatorConfigFiles = []string{
 	// validator-only: controls whether the node auto-jails peers by
 	// latency EMA. dry_run=true means it logs but doesn't act.
 	"heartbeat_jailing_config.json",
+	// gossip-auction ordering toggle (2026-04 hl-node addition)
+	"node_gossip_priority_config.json",
 }
 
 // StartOperatorConfigMonitor publishes the mtime age of each file under

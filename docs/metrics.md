@@ -274,6 +274,7 @@ These expose node-precomputed per-node quantiles as gauges with no `_bucket` ser
 | `hl_node_child_crashes` | Gauge | `reason` | Retained crashes by reason: app_hash_mismatch (consensus divergence, page immediately), hardfork_upgrade, sync_overflow, config_error, network, panic | - |
 | `hl_node_child_last_crash_seconds` | Gauge | `reason` | Unix time of the newest retained crash per reason. Alert shape: `time() - value < window`. | - |
 | `hl_node_rate_limited_files` | Gauge | `stream` | Non-empty rate_limited_ips files in the newest date dir (abci_stream / gossip_rpc_blocks / gossip_rpc_requests). Zero on a healthy node; non-zero = actively rate-limiting peers. | - |
+| `hl_node_stream_age_seconds` | Gauge | `stream` | Age of the newest file per present opt-in data stream (node_fills_streaming, node_twap_statuses_streaming, misc_events, system_and_core_writer_actions). Climbing while the node runs = the stream feeding downstream consumers is stalled. Absent when the stream is not enabled. | node flag per stream |
 
 ## Extended: Tokio Runtime
 

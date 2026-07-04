@@ -40,6 +40,7 @@ The exporter burned ~195% CPU on a live validator; the causes are removed:
 - `hl_tokio_task_scheduled_total`, `_scheduled_seconds_total`, `_fast_polls_total`, `_short_delays_total`.
 - `hl_node_rate_limited_files{stream}`: abuse tripwire from `data/rate_limited_ips`.
 - `hl_node_crit_location_ignored{file,line}`, `hl_p2p_non_val_connections`, `hl_node_subsystem_latency_lifetime_mean_seconds`.
+- `hl_node_stream_age_seconds{stream}`: freshness of opt-in data streams (fills, TWAP statuses, misc events, system/core writer actions). These exist to feed downstream consumers; nothing else notices when one silently stalls. `node_gossip_priority_config.json` joined the operator-config mtime allowlist.
 
 ### Changed (BREAKING)
 

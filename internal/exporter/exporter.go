@@ -163,6 +163,10 @@ func Start(ctx context.Context, cfg config.Config) {
 	logger.InfoComponent("child_stderr", "Initializing child-stderr monitor...")
 	runMonitor("child_stderr", func() { monitors.StartChildStderrMonitor(monitorCtx, cfg) })
 
+	// freshness of opt-in data streams (fills, twap, misc events)
+	logger.InfoComponent("optional_streams", "Initializing optional-streams monitor...")
+	runMonitor("optional_streams", func() { monitors.StartOptionalStreamsMonitor(monitorCtx, cfg) })
+
 	// validator-only consensus accumulator (committed_blocks, dropped_txs,
 	// round_qc/tc, rpc_requests…). Silently idles on non-validators.
 	logger.InfoComponent("accumulator_consensus", "Initializing consensus accumulator monitor...")
