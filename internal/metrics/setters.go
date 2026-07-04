@@ -571,10 +571,6 @@ func IncCoreBlocksProcessed() {
 	HLCoreBlocksProcessedCounter.Add(sharedCtx, 1)
 }
 
-func IncCoreRoundsProcessed() {
-	HLCoreRoundsProcessedCounter.Add(sharedCtx, 1)
-}
-
 func ObserveCoreTxPerBlock(count float64) {
 	if HLCoreTxPerBlockHistogram != nil {
 		HLCoreTxPerBlockHistogram.Record(sharedCtx, count)
@@ -599,51 +595,6 @@ func SetReplicaParseDuration(duration float64) {
 	metricsMutex.Lock()
 	defer metricsMutex.Unlock()
 	currentValues[HLMetalParseDurationGauge] = duration
-}
-
-func SetReplicaLastProcessedRound(round float64) {
-	metricsMutex.Lock()
-	defer metricsMutex.Unlock()
-	currentValues[HLMetalLastProcessedRound] = int64(round)
-}
-
-func SetReplicaLastProcessedTime(timestamp float64) {
-	metricsMutex.Lock()
-	defer metricsMutex.Unlock()
-	currentValues[HLMetalLastProcessedTime] = int64(timestamp)
-}
-
-// high gas limit block tracking setters
-
-func IncrementHighGasLimitBlocks(threshold string) {
-	ctx := context.Background()
-	HLEVMHighGasLimitBlocksCounter.Add(ctx, 1, api.WithAttributes(attribute.String("threshold", threshold)))
-}
-
-func RecordGasLimitDistribution(gasLimit float64) {
-	ctx := context.Background()
-	if HLEVMGasLimitHistogram != nil {
-		HLEVMGasLimitHistogram.Record(ctx, gasLimit)
-	}
-}
-
-func SetLastHighGasBlock(height, limit, used int64, timestamp time.Time) {
-	metricsMutex.Lock()
-	defer metricsMutex.Unlock()
-	currentValues[HLEVMLastHighGasBlockHeight] = height
-	currentValues[HLEVMLastHighGasBlockLimit] = limit
-	currentValues[HLEVMLastHighGasBlockUsed] = used
-	currentValues[HLEVMLastHighGasBlockTime] = timestamp.Unix()
-}
-
-func UpdateMaxGasLimit(gasLimit int64) {
-	metricsMutex.Lock()
-	defer metricsMutex.Unlock()
-
-	// update max if this is higher than what we've seen
-	if current, exists := currentValues[HLEVMMaxGasLimitSeen]; !exists || gasLimit > current.(int64) {
-		currentValues[HLEVMMaxGasLimitSeen] = gasLimit
-	}
 }
 
 // consensus monitoring setters
@@ -778,21 +729,14 @@ func IncrementHeartbeatsSent(validator string) {
 	HLConsensusHeartbeatSentCounter.Add(ctx, 1, api.WithAttributes(labels...))
 }
 
-func IncrementHeartbeatAcksReceived(fromValidator, toValidator string) {
-	// get proper labels for both validators
-	fromLabels := getValidatorLabels(fromValidator)
+// IncrementHeartbeatAcksReceived counts heartbeat acks per acking peer.
+// Only outgoing heartbeats are processed, so the origin is always the
+// local validator; the old from_validator/from_name labels were constants
+// and have been dropped.
+func IncrementHeartbeatAcksReceived(toValidator string) {
 	toLabels := getValidatorLabels(toValidator)
 
-	// extract the actual validator addresses from the labels
-	var fromValidatorAddr, toValidatorAddr string
-	var fromName, toName string
-	for _, label := range fromLabels {
-		if label.Key == "validator" {
-			fromValidatorAddr = label.Value.AsString()
-		} else if label.Key == "name" {
-			fromName = label.Value.AsString()
-		}
-	}
+	var toValidatorAddr, toName string
 	for _, label := range toLabels {
 		if label.Key == "validator" {
 			toValidatorAddr = label.Value.AsString()
@@ -801,13 +745,15 @@ func IncrementHeartbeatAcksReceived(fromValidator, toValidator string) {
 		}
 	}
 
+	metricsMutex.Lock()
+	defer metricsMutex.Unlock()
+
 	ctx := context.Background()
-	HLConsensusHeartbeatAckCounter.Add(ctx, 1, api.WithAttributes(
-		attribute.String("from_validator", fromValidatorAddr),
+	labels := []attribute.KeyValue{
 		attribute.String("to_validator", toValidatorAddr),
-		attribute.String("from_name", fromName),
 		attribute.String("to_name", toName),
-	))
+	}
+	HLConsensusHeartbeatAckCounter.Add(ctx, 1, api.WithAttributes(labels...))
 }
 
 func RecordHeartbeatAckDelay(fromValidator, toValidator string, delayMs float64) {

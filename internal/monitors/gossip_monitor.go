@@ -33,10 +33,6 @@ type GossipMonitor struct {
 	lastSize int64
 }
 
-type PeerInfo struct {
-	IP string `json:"Ip"`
-}
-
 type PeerStatus struct {
 	Verified        bool `json:"verified"`
 	ConnectionCount int  `json:"connection_count"`

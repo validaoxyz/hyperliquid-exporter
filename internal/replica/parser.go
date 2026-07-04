@@ -1,11 +1,8 @@
 package replica
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
-	"io"
-	"os"
 	"sync"
 	"time"
 )
@@ -37,50 +34,7 @@ func (p *Parser) getBlock() *ReplicaBlock {
 }
 
 // parses a replica_cmds file and returns block metrics
-func (p *Parser) ParseFile(filePath string) ([]*BlockMetrics, error) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("open file: %w", err)
-	}
-	defer file.Close()
-
-	reader := bufio.NewReaderSize(file, p.bufferSize)
-	return p.parseBlocks(reader)
-}
-
 // parses blocks from a reader
-func (p *Parser) parseBlocks(reader io.Reader) ([]*BlockMetrics, error) {
-	decoder := json.NewDecoder(reader)
-	var blocks []*BlockMetrics
-
-	for {
-		// get block from pool
-		block := p.getBlock()
-
-		if err := decoder.Decode(block); err != nil {
-			p.blockPool.Put(block) // Return to pool on error
-			if err == io.EOF {
-				break
-			}
-			return blocks, fmt.Errorf("decode block: %w", err)
-		}
-
-		metrics, err := p.ExtractMetrics(block)
-
-		// return block to pool after extracting metrics
-		p.blockPool.Put(block)
-
-		if err != nil {
-			// log error but continue processing
-			continue
-		}
-
-		blocks = append(blocks, metrics)
-	}
-
-	return blocks, nil
-}
-
 // extracts metrics from a replica block
 func (p *Parser) ExtractMetrics(block *ReplicaBlock) (*BlockMetrics, error) {
 	start := time.Now()
@@ -248,80 +202,7 @@ func countJSONArrayElements(data json.RawMessage) int {
 }
 
 // counts the number of operations within an action
-func (p *Parser) countOperations(actionType string, actionData map[string]interface{}) int {
-	switch actionType {
-	case ActionTypeOrder, ActionTypeTwapOrder:
-		// count individual orders
-		if orders, ok := actionData["orders"].([]interface{}); ok {
-			return len(orders)
-		}
-		return 1
-
-	case ActionTypeCancel, ActionTypeCancelByCloid:
-		// count individual cancellations
-		if cancels, ok := actionData["cancels"].([]interface{}); ok {
-			return len(cancels)
-		}
-		return 1
-
-	case ActionTypeBatchModify:
-		// count individual modifications
-		if modifies, ok := actionData["modifies"].([]interface{}); ok {
-			return len(modifies)
-		}
-		return 1
-
-	default:
-		// for all other action types, count as 1 operation
-		return 1
-	}
-}
-
 // streams a replica_cmds file and calls the callback for each block
-func (p *Parser) StreamFile(filePath string, callback func(*BlockMetrics) error) error {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return fmt.Errorf("open file: %w", err)
-	}
-	defer file.Close()
-
-	reader := bufio.NewReaderSize(file, p.bufferSize)
-	decoder := json.NewDecoder(reader)
-
-	blockCount := 0
-	for {
-		// get block from pool
-		block := p.getBlock()
-
-		if err := decoder.Decode(block); err != nil {
-			p.blockPool.Put(block) // return to pool on error
-			if err == io.EOF {
-				break
-			}
-			return fmt.Errorf("decode block: %w", err)
-		}
-
-		blockCount++
-
-		metrics, err := p.ExtractMetrics(block)
-		if err != nil {
-			// return block to pool and continue
-			p.blockPool.Put(block)
-			// log error but continue processing
-			continue
-		}
-
-		// return block to pool after extracting metrics
-		p.blockPool.Put(block)
-
-		if err := callback(metrics); err != nil {
-			return fmt.Errorf("callback error: %w", err)
-		}
-	}
-
-	return nil
-}
-
 // parses a single line into a ReplicaBlock using the pool
 func (p *Parser) ParseBlockFromLine(line []byte) (*ReplicaBlock, error) {
 	block := p.getBlock()

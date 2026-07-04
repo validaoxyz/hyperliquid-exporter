@@ -143,7 +143,6 @@ func (m *ReplicaMonitor) processBlock(block *replica.BlockMetrics) {
 
 	// update counters
 	metrics.IncCoreBlocksProcessed()
-	metrics.IncCoreRoundsProcessed()
 
 	// per-block round advance: 1 on a healthy chain, >1 means skipped
 	// (timed-out) rounds between this block and its parent
@@ -199,10 +198,6 @@ func (m *ReplicaMonitor) processBlock(block *replica.BlockMetrics) {
 	// update last processed metrics
 	metrics.SetCoreLastProcessedRound(float64(block.Round))
 	metrics.SetCoreLastProcessedTime(float64(block.Time.Unix()))
-
-	// also update implementation-specific metrics
-	metrics.SetReplicaLastProcessedRound(float64(block.Round))
-	metrics.SetReplicaLastProcessedTime(float64(block.Time.Unix()))
 	metrics.MarkMonitorTick("replica")
 }
 

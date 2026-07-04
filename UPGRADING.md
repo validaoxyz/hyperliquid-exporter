@@ -1,5 +1,33 @@
 # UPGRADING
 
+## v3.1 (unreleased)
+
+> **BREAKING.** Removed and retyped metrics below; historical series do not carry over.
+
+### Removed metrics
+
+| metric | replacement |
+|---|---|
+| `hl_core_rounds_processed_total` | `hl_core_blocks_processed_total` (values were identical) |
+| `hl_metal_last_processed_round` / `hl_metal_last_processed_time` | `hl_core_last_processed_round` / `hl_core_last_processed_time` (same producer, same value) |
+| `hl_evm_gas_limit_distribution` | `hl_evm_gas_limit` / `hl_evm_tx_type_total{block_type}` (the histogram had two buckets and no signal) |
+| `hl_evm_max_gas_limit_seen`, `hl_evm_last_high_gas_block_{height,time,limit,used}`, `hl_evm_high_gas_limit_blocks_total` | `hl_evm_gas_limit{block_type}` and `hl_evm_tx_type_total{block_type="high"}` cover the tier |
+| `hl_evm_account_count` | none. It read `EvmDb::InMemory`, which current chain versions do not use; the gauge was a constant 0 costing a 480MB decode per state write |
+| `hl_timeout_rounds_total` | `hl_core_round_advance` bucket counts above 1, or `hl_consensus_round_tc`. The metric was documented but its producer was never wired, so it never emitted |
+
+### Semantic changes (name unchanged)
+
+| metric | change | what to update |
+|---|---|---|
+| `hl_consensus_committed_blocks/_txs/_tx_bytes`, `hl_consensus_dropped_txs`, `hl_consensus_round_qc/_tc/_catchup`, `hl_consensus_rpc_requests_*` | were publishing the wrong field (all nine tracked the per-window event count, so committed_txs == committed_blocks). Now true Counters accumulating the on-disk deltas since exporter start | use `rate()`/`increase()`; drop `deriv()` workarounds and absolute-value alerts |
+| `hl_consensus_vote_time_diff_seconds` | now the age of the last observed vote, climbing while a validator is silent (was a frozen parse-time diff, ~0 forever) | stall alerts of the form `> N` now work; series trimmed after 24h without votes |
+| `hl_consensus_heartbeat_ack_received_total` | dropped constant `from_validator`/`from_name` labels (always the local node) | remove those labels from queries; `to_*` labels unchanged |
+| `hl_software_up_to_date` | compares local hl-visor vs latest CDN hl-visor (was CDN hl-visor vs local hl-node, guaranteed to drift mid-release) | the false permanent 0 goes away; set `BINARY_HOME` if hl-visor is not in `$HOME` |
+| `hl_info_endpoint_*` | registered only when `--probe-info-endpoint` is on | alerts must treat the family as absent (not 0) when probing is off; `absent()` is the right shape |
+| `hl_evm_contract_tx_total` | `--contract-metrics-limit` now caps series: first N addresses keep their own series, the rest roll into `contract_address="other"` | raise the limit if you track specific contracts beyond the default 20 |
+| `hl_tokio_task_*` | withdrawn (absent) when the source feed is older than 15m; `hl_tokio_sample_age_seconds` keeps climbing instead | dashboards should treat absence + high sample age as "feed stale", not "tasks gone" |
+| per-validator gauges (stake/jailed/active, raw latency/round, vote round/age) | reconcile to the latest snapshot; validators leaving the set disappear instead of freezing | `absent()`-style alerts fire correctly for departed validators now |
+
 ## Breaking metrics cleanup (post-v3)
 
 > **These changes are BREAKING.** Metrics are renamed, retyped, dropped, and relabeled. Prometheus treats a renamed/retyped metric as a brand-new series, so **historical data does NOT carry over** - old series stop at the upgrade and the new series start fresh. There is no automatic bridge. Update every dashboard panel, alerting rule, and recording rule that references the old names/labels before (or immediately after) upgrading.

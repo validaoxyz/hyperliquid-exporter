@@ -9,12 +9,12 @@ import (
 func TestClassifyChildStderr(t *testing.T) {
 	cases := map[string]string{
 		`computed app hash 0xabc does not match quorum value QuorumAppHash{...}. Saved to /tmp/abci_state_bad_app_hash.rmp`: "app_hash_mismatch",
-		`observed qc for newer hardfork, crashing. current=(1180,616516191)`:                                               "hardfork_upgrade",
-		`thread 'main' panicked: too many blocks to request in gossip forward_client_blocks`:                               "sync_overflow",
-		`CONFIGURATION ERROR: validator is not in node_ips: [...]`:                                                         "config_error",
-		`could not read /home/ubuntu/hl/override_public_ip_address`:                                                        "config_error",
-		`upstream connect error or disconnect/reset before headers`:                                                        "network",
-		`thread 'main' panicked at 'attempt to add with overflow'`:                                                         "panic",
+		`observed qc for newer hardfork, crashing. current=(1180,616516191)`:                                                "hardfork_upgrade",
+		`thread 'main' panicked: too many blocks to request in gossip forward_client_blocks`:                                "sync_overflow",
+		`CONFIGURATION ERROR: validator is not in node_ips: [...]`:                                                          "config_error",
+		`could not read /home/ubuntu/hl/override_public_ip_address`:                                                         "config_error",
+		`upstream connect error or disconnect/reset before headers`:                                                         "network",
+		`thread 'main' panicked at 'attempt to add with overflow'`:                                                          "panic",
 	}
 	for input, want := range cases {
 		if got := classifyChildStderr([]byte(input)); got != want {

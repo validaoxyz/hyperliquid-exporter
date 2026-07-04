@@ -679,7 +679,7 @@ func (m *ConsensusMonitor) processHeartbeatAck(ack *HeartbeatAckMessage, source 
 	toValidator := m.formatValidatorAddress(source)
 
 	// update metrics
-	metrics.IncrementHeartbeatAcksReceived(fromValidator, toValidator)
+	metrics.IncrementHeartbeatAcksReceived(toValidator)
 	metrics.RecordHeartbeatAckDelay(fromValidator, toValidator, float64(delay.Milliseconds()))
 
 	logger.DebugComponent("consensus", "Heartbeat ack from %s to %s, delay: %v", toValidator, fromValidator, delay)

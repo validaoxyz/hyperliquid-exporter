@@ -224,22 +224,6 @@ func processBlockData(blockData interface{}, isoTimestamp time.Time) (string, er
 	if gasLimitHex, ok := header["gasLimit"].(string); ok {
 		gasLimit, err = strconv.ParseInt(strings.TrimPrefix(gasLimitHex, "0x"), 16, 64)
 		if err == nil {
-			// gas limit distribution
-			metrics.RecordGasLimitDistribution(float64(gasLimit))
-
-			// track high gas limit blocks
-			if gasLimit >= 30_000_000 {
-				metrics.IncrementHighGasLimitBlocks("30m")
-				// extract gas used for high gas block tracking
-				var gasUsed int64
-				if gasUsedHex, ok := header["gasUsed"].(string); ok {
-					gasUsed, _ = strconv.ParseInt(strings.TrimPrefix(gasUsedHex, "0x"), 16, 64)
-				}
-				metrics.SetLastHighGasBlock(blockNumber, gasLimit, gasUsed, isoTimestamp)
-			}
-
-			metrics.UpdateMaxGasLimit(gasLimit)
-
 			if blockTypeMetricsEnabled {
 				// Hyperliquid produces blocks at several discrete gas-limit tiers
 				// (2M standard, 3M, 30M big, etc). The "other" bucket used to log

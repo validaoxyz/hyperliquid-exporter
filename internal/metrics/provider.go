@@ -1,8 +1,6 @@
 package metrics
 
 import (
-	"fmt"
-
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	api "go.opentelemetry.io/otel/metric"
@@ -22,8 +20,6 @@ func getAllObservables() []api.Observable {
 
 		// Metal (machine specific) metrics
 		HLMetalParseDurationGauge,
-		HLMetalLastProcessedRound,
-		HLMetalLastProcessedTime,
 
 		// Consensus metrics
 		HLConsensusValidatorJailedStatus,
@@ -68,11 +64,6 @@ func getAllObservables() []api.Observable {
 		HLEVMGasLimitGauge,
 		HLEVMSGasUtilGauge,
 		HLEVMMaxPriorityFeeGauge,
-		HLEVMLastHighGasBlockHeight,
-		HLEVMLastHighGasBlockLimit,
-		HLEVMLastHighGasBlockUsed,
-		HLEVMLastHighGasBlockTime,
-		HLEVMMaxGasLimitSeen,
 
 		// memory metrics
 		HLGoHeapObjects,
@@ -84,15 +75,6 @@ func getAllObservables() []api.Observable {
 		// monitor health metrics
 		HLConsensusMonitorLastProcessedGauge,
 	}
-}
-
-func initInstruments() error {
-	if err := createInstruments(); err != nil {
-		return fmt.Errorf("failed to create instruments: %w", err)
-	}
-
-	// Callback registration is now handled in RegisterCallbacks() in callbacks.go
-	return nil
 }
 
 // TODO

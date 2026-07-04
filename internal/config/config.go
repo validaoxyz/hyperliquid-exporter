@@ -52,7 +52,7 @@ type Config struct {
 	EnableExtendedMetrics bool
 	// EnablePerPeerMetrics adds hl_p2p_peer_last_seen_seconds{ip} and
 	// hl_p2p_peer_first_seen_seconds{ip} per known peer. Cardinality
-	// bounded by the peer set's LRU cap (256) + TTL (24h). Off by
+	// bounded by the peer set's LRU cap (2048) + TTL (24h). Off by
 	// default for operators with tight per-target series limits.
 	EnablePerPeerMetrics bool
 }

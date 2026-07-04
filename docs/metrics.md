@@ -1,6 +1,6 @@
 # Hyperliquid Exporter Metrics Reference
 
-> **Legend - `_total` on Gauge-typed metrics:** Gauge-typed metrics whose names end in `_total` are cumulative-since-source-restart snapshots (or current counts), NOT Prometheus counters: they reset to 0 when the source process (hl-node/hl-visor) or the exporter restarts, and some are point-in-time counts that can DECREASE. Do not apply `rate()`/`increase()` to them; use the raw value, or `delta()`/`changes()` with awareness of resets. True counters (correctly consumed with `rate()`) are: `hl_info_endpoint_failures_total`, `hl_node_parent_peer_switches_total`, `hl_p2p_gossip_events_total`, `hl_node_public_ip_changes_total`, `hl_mempool_events_total`, `hl_mempool_txs_seen_total`, `hl_mempool_txs_bytes_total`, `hl_mempool_txs_signed_actions_total`, `hl_mempool_txs_operations_total`, `hl_mempool_txs_order_operations_total`.
+> **Legend - counters vs gauge-typed `_total`:** every metric typed Counter in the tables below is a real Prometheus counter and `rate()`/`increase()` are valid (OTel-path and promauto-path alike). The exceptions are the Gauge-typed families whose names end in `_total`: `hl_tokio_task_*_total`, `hl_p2p_lz4_*_total`, `hl_node_subsystem_samples_total`, `hl_rocksdb_write_stalls_total`, and `hl_node_process_cpu_seconds_total` mirror cumulative-since-source-restart values (reset when hl-node/hl-visor restarts; use `delta()`/`deriv()`), while `hl_node_observed_runs`, `hl_p2p_peers` and `hl_node_replay_events` are point-in-time counts that can decrease.
 
 ## HyperCore Metrics
 
@@ -16,9 +16,10 @@
 | `hl_core_operations_total` | Counter | `type`, `category` | Total individual operations by type and category | `--replica-metrics` |
 | `hl_core_orders_per_block` | Histogram | - | Distribution of orders per block | `--replica-metrics` |
 | `hl_core_orders_total` | Counter | - | Total orders placed | `--replica-metrics` |
-| `hl_core_rounds_processed_total` | Counter | - | Total consensus rounds processed. Equals `hl_core_blocks_processed_total` (incremented once per block; does not separately count timeout/QC rounds). | `--replica-metrics` |
 | `hl_core_tx_per_block` | Histogram | - | Distribution of transactions per block | `--replica-metrics` |
 | `hl_core_tx_total` | Counter | `type` | Total transactions/actions by type | `--replica-metrics` |
+| `hl_core_round_advance` | Histogram | - | round - parent_round per block. 1 on a healthy chain; bucket counts above 1 are timed-out/skipped rounds. | `--replica-metrics` |
+| `hl_core_hardfork_version` | Gauge | - | Hardfork version stamped on the latest block; steps up when a hardfork activates. | `--replica-metrics` |
 
 Metrics marked with `--replica-metrics` also require hl-node to be running with `--replica-cmds-style actions-and-responses`.
 
@@ -26,24 +27,16 @@ Metrics marked with `--replica-metrics` also require hl-node to be running with 
 
 | Metric | Type | Labels | Description | Requirements |
 |--------|------|--------|-------------|--------------|
-| `hl_evm_account_count` | Gauge | - | Total number of EVM accounts | - |
 | `hl_evm_base_fee_gwei` | Gauge | `block_type` | Current base fee in Gwei | - |
 | `hl_evm_base_fee_gwei_distribution` | Histogram | `block_type` | Distribution of base fees (0-1000+ Gwei buckets) | - |
 | `hl_evm_block_height` | Gauge | - | Current EVM block height | - |
 | `hl_evm_block_time_milliseconds` | Histogram | - | Time between EVM blocks | - |
 | `hl_evm_contract_create_total` | Counter | `block_type` | Total contract creations | - |
-| `hl_evm_contract_tx_total` | Counter | `contract_address`, `contract_name`, `is_token`, `type`, `symbol`, `block_type` | Contract interactions by address. `contract_address` is high-cardinality (`--contract-metrics-limit` bounds the resolver cache, NOT the number of series); `symbol` is present only for tokens. | `--contract-metrics` |
+| `hl_evm_contract_tx_total` | Counter | `contract_address`, `contract_name`, `is_token`, `type`, `symbol`, `block_type` | Contract interactions by address. `--contract-metrics-limit` hard-caps the series: the first N distinct addresses keep their own series, later ones share `contract_address="other"`. `symbol` is present only for tokens. | `--contract-metrics` |
 | `hl_evm_gas_limit` | Gauge | `block_type` | Gas limit per block | - |
-| `hl_evm_gas_limit_distribution` | Histogram | - | Distribution of gas limits across blocks | - |
 | `hl_evm_gas_used` | Gauge | `block_type` | Gas used per block | - |
 | `hl_evm_gas_util` | Gauge | `block_type` | Gas utilization fraction (0-1, gasUsed/gasLimit) | - |
-| `hl_evm_high_gas_limit_blocks_total` | Counter | `threshold` | Count of high gas limit blocks by threshold | - |
-| `hl_evm_last_high_gas_block_height` | Gauge | - | Height of last high gas block | - |
-| `hl_evm_last_high_gas_block_limit` | Gauge | - | Gas limit of last high gas block | - |
-| `hl_evm_last_high_gas_block_time` | Gauge | - | Unix timestamp of last high gas block | - |
-| `hl_evm_last_high_gas_block_used` | Gauge | - | Gas used in last high gas block | - |
 | `hl_evm_latest_block_time` | Gauge | - | Unix timestamp of latest EVM block | - |
-| `hl_evm_max_gas_limit_seen` | Gauge | - | Maximum gas limit observed | - |
 | `hl_evm_max_priority_fee_gwei` | Gauge | `block_type` | Current maximum priority fee (Gwei) | - |
 | `hl_evm_max_priority_fee_gwei_distribution` | Histogram | `block_type` | Distribution of priority fees (0-1000+ Gwei buckets) | - |
 | `hl_evm_tx_per_block` | Histogram | `block_type` | Distribution of transactions per block | - |
@@ -55,8 +48,6 @@ Metrics marked with `--replica-metrics` also require hl-node to be running with 
 | Metric | Type | Labels | Description | Requirements |
 |--------|------|--------|-------------|--------------|
 | `hl_metal_apply_duration_milliseconds` | Histogram | `state_type` | Distribution of block application durations | - |
-| `hl_metal_last_processed_round` | Gauge | - | Last round processed by replica monitor. Alias of `hl_core_last_processed_round` (same producer, same value). | `--replica-metrics` |
-| `hl_metal_last_processed_time` | Gauge | - | Unix timestamp of last processing by replica monitor. Alias of `hl_core_last_processed_time` (same producer, same value). | `--replica-metrics` |
 | `hl_metal_parse_duration` | Gauge | - | Duration of replica transaction parsing in seconds | `--replica-metrics` |
 
 ## P2P Network Metrics
@@ -65,6 +56,7 @@ Metrics marked with `--replica-metrics` also require hl-node to be running with 
 |--------|------|--------|-------------|--------------|
 | `hl_p2p_non_val_peer_connections` | Gauge | `verified` | Number of non-validator peer connections by verification status | gossip_rpc logs |
 | `hl_p2p_non_val_peers_total` | Gauge | - | Total number of connected non-validator peers | gossip_rpc logs |
+| `hl_p2p_non_val_connections` | Gauge | - | Sum of per-peer connection counts (a peer can hold several links) | gossip_rpc logs |
 
 P2P metrics track non-validator peer connections only
 
@@ -72,7 +64,7 @@ P2P metrics track non-validator peer connections only
 
 | Metric | Type | Labels | Description | Requirements |
 |--------|------|--------|-------------|--------------|
-| `hl_software_up_to_date` | Gauge | - | Whether software is up to date (0=outdated, 1=current). UNSET (absent, not 0) until both the local version probe and the upstream binary check have succeeded at least once. | - |
+| `hl_software_up_to_date` | Gauge | - | 1 if the local hl-visor build matches the latest hl-visor on the CDN (set `BINARY_HOME` if the visor is not in `$HOME`). UNSET (absent, not 0) until both the local visor probe and the upstream ETag check have succeeded at least once. | - |
 | `hl_software_version` | Gauge | `date`, `commit` | Software version info (always 1, version in labels) | - |
 
 
@@ -91,8 +83,13 @@ P2P metrics track non-validator peer connections only
 | `hl_consensus_validator_active_status` | Gauge | `validator`, `signer`, `name` | Validator active status (0=inactive, 1=active) | - |
 | `hl_consensus_validator_count` | Gauge | - | Total number of validators | - |
 | `hl_consensus_validator_jailed_status` | Gauge | `validator`, `signer`, `name` | Validator jail status (0=not jailed, 1=jailed) | - |
-| `hl_consensus_validator_rtt` | Gauge | `validator`, `moniker`, `ip` | Validator response time in milliseconds | Requires RTT monitoring enabled (auto-enabled on validator nodes) |
+| `hl_consensus_validator_rtt` | Gauge | `validator`, `moniker`, `ip` | Validator response time in milliseconds. Note: the `ip` label exposes the validator IP map to anyone who can scrape `/metrics`. | `--validator-rtt` (plain opt-in flag; no auto-detection) |
 | `hl_consensus_validator_stake` | Gauge | `validator`, `signer`, `name` | Stake amount per validator | - |
+| `hl_consensus_validator_recent_blocks` | Gauge | `validator`, `signer`, `name` | nRecentBlocks from validatorSummaries; 0 on a jailed or stalled validator | - |
+| `hl_consensus_validator_commission_rate` | Gauge | `validator`, `signer`, `name` | Commission as a fraction (0.04 = 4%) | - |
+| `hl_consensus_validator_unjailable_after_seconds` | Gauge | `validator`, `signer`, `name` | Unix time after which a jailed validator may unjailSelf; series exists only while jailed. Countdown = value - time(). | - |
+| `hl_consensus_validator_uptime_fraction` | Gauge | `validator`, `signer`, `name`, `period` | uptimeFraction per period (day/week/month) | - |
+| `hl_consensus_validator_predicted_apr` | Gauge | `validator`, `signer`, `name`, `period` | predictedApr per period, as a fraction | - |
 
 The above are available to all node types. Note that the stake/status series (`hl_consensus_*_stake`, `hl_consensus_total_stake`, `hl_consensus_validator_stake`, `hl_consensus_validator_count`, `hl_consensus_validator_active_status`, `hl_consensus_validator_jailed_status`, `hl_consensus_proposer_count_total`) are **network-wide**, fetched from `api.hyperliquid.xyz` (`validatorSummaries`) - so they are identical on every node and not node-local. The below metrics require access to consensus (running a validator).
 
@@ -100,23 +97,24 @@ The above are available to all node types. Note that the stake/status series (`h
 |--------|------|--------|-------------|--------------|
 | `hl_consensus_current_round` | Gauge | - | Current consensus round from block messages | Validator node |
 | `hl_consensus_heartbeat_ack_delay_ms` | Histogram | - | heartbeat acknowledgement delays | Validator node |
-| `hl_consensus_heartbeat_ack_received_total` | Counter | `from_validator`, `to_validator`, `from_name`, `to_name` | Heartbeat acknowledgments between validator pairs | Validator node |
+| `hl_consensus_heartbeat_ack_received_total` | Counter | `to_validator`, `to_name` | Heartbeat acks per acking peer. Only outgoing heartbeats are observed, so the origin is always the local validator (the old from_* labels were constants and were dropped). | Validator node |
 | `hl_consensus_heartbeat_sent_total` | Counter | `validator`, `signer`, `name` | Total heartbeats sent by validators | Validator node |
 | `hl_consensus_heartbeat_status` | Gauge | `validator`, `signer`, `name`, `status_type` | Heartbeat health metrics (status_type: since_last_success, last_ack_duration) | Validator node |
 | `hl_consensus_validator_connectivity` | Gauge | `validator`, `peer`, `validator_name`, `peer_name` | 0 (or series present) = pair currently disconnected; the series is removed when the pair reconnects (value 1 is never emitted). Alert on `==0` / presence, not `==1`. | Validator node |
 | `hl_consensus_vote_round` | Gauge | `validator`, `signer`, `name` | Last voting round for each validator | Validator node |
-| `hl_consensus_vote_time_diff_seconds` | Gauge | `validator`, `signer`, `name` | Parse-time age of the LAST OBSERVED vote, computed once and frozen. It does NOT climb while a validator is silent, so it cannot by itself detect a stalled validator. | Validator node |
+| `hl_consensus_vote_time_diff_seconds` | Gauge | `validator`, `signer`, `name` | Age of the last observed vote, computed at scrape time. Climbs while a validator is silent, so `> N` is a usable stall alert. Series are removed after 24h without votes. | Validator node |
 | `hl_consensus_qc_participation_percent` | Gauge | `validator`, `signer`, `name` | Percentage of recent blocks where validator signed QC (100 blocks sliding) | Validator node |
 | `hl_consensus_qc_signatures_total` | Counter | `validator`, `signer`, `name` | Cumulative QC signatures by each validator | Validator node |
 | `hl_consensus_qc_size` | Histogram | - | Distribution of QC signer counts per block | Validator node |
-| `hl_consensus_rounds_per_block` | Gauge | - | Round advance for the most recent block (single sample, ~1 on a healthy chain), not a moving average | Validator node |
-| `hl_consensus_qc_round_lag` | Gauge | - | Average difference between block round and QC round | Validator node |
-| `hl_consensus_tc_blocks_total` | Counter | `proposer`, `signer`, `name` | Total blocks proposed containing timeout certificates | Validator node |
+| `hl_consensus_rounds_per_block` | Gauge | - | Round advance for the most recent block (single sample, ~1 on a healthy chain), not a moving average. Prefer `hl_core_round_advance` (histogram, replica-sourced) for rates. | Validator node |
+| `hl_consensus_qc_round_lag` | Gauge | - | block round - QC round of the most recent block (single sample, 1 on a healthy chain; not an average) | Validator node |
+| `hl_consensus_tc_blocks_total` | Counter | `validator`, `signer`, `name` | Total blocks proposed containing timeout certificates (`validator` is the proposer) | Validator node |
 | `hl_consensus_tc_participation_total` | Counter | `validator`, `signer`, `name` | Total timeout votes sent by each validator | Validator node |
 | `hl_consensus_tc_size` | Histogram | - | Distribution of timeout vote counts in TC blocks | Validator node |
-| `hl_consensus_validator_latency_seconds` | Gauge | `validator`, `signer`, `name` | Per-validator raw latency (latest sample). Same `hl_consensus_*` family as the EMA panel; populated by the validator_latency monitor. | Validator node with latency files |
+| `hl_consensus_validator_latency_seconds` | Gauge | `validator`, `signer`, `name` | Per-validator raw latency (latest sample). Reconciled per tick: validators whose latency files go stale (>2h) drop out instead of freezing. | Validator node with latency files |
 | `hl_consensus_validator_latency_round` | Gauge | `validator`, `signer`, `name` | Consensus round when latency was last measured | Validator node with latency monitoring |
-| `hl_consensus_validator_latency_ema_seconds` | Gauge | `validator`, `signer`, `name` | Exponential moving average of validator latency | Validator node with latency monitoring |
+| `hl_consensus_validator_latency_ema_seconds` | Gauge | `validator`, `signer`, `name` | Exponential moving average of heartbeat-ack latency, the quantity jail votes use. Headroom recipe: `hl_consensus_validator_latency_ema_seconds / on() group_left hl_node_jailing_threshold_seconds` (jail risk approaches 1.0). | Validator node with latency monitoring |
+| `hl_consensus_validator_jailed_local` | Gauge | `validator` | 1 per validator the local node currently reports jailed (status stream, ~2min cadence, no API dependency); series removed on unjail | Validator node |
 
 ## Visor / Sync
 
@@ -166,6 +164,7 @@ These expose node-precomputed per-node quantiles as gauges with no `_bucket` ser
 | `hl_node_subsystem_latency_stddev_seconds` | Gauge | `subsystem` | Std dev | - |
 | `hl_node_subsystem_work_fraction` | Gauge | `subsystem` | Fraction of wall-clock doing work | - |
 | `hl_node_subsystem_samples_total` | Gauge | `subsystem` | Cumulative samples | - |
+| `hl_node_subsystem_latency_lifetime_mean_seconds` | Gauge | `subsystem` | Mean since source start; windowed mean drifting above it = degradation | - |
 
 ## Critical Messages
 
@@ -225,6 +224,9 @@ These expose node-precomputed per-node quantiles as gauges with no `_bucket` ser
 | `hl_info_endpoint_latency_seconds` | Histogram | - | Probe latency | `--probe-info-endpoint` |
 | `hl_info_endpoint_last_success_seconds` | Gauge | - | Last successful probe | `--probe-info-endpoint` |
 | `hl_info_endpoint_failures_total` | Counter | - | Cumulative probe failures | `--probe-info-endpoint` |
+| `hl_info_exchange_status_delta_seconds` | Gauge | - | local_wall_clock - exchangeStatus.time from the node's own info endpoint. Sustained growth = the node serves stale exchange state. Registered on first successful parse. | `--probe-info-endpoint` |
+
+The whole info-probe family registers only when `--probe-info-endpoint` is on: with the probe off the metrics are ABSENT, not 0.
 
 ## Extended: LZ4
 
@@ -261,6 +263,17 @@ These expose node-precomputed per-node quantiles as gauges with no `_bucket` ser
 | `hl_node_tmp_bytes` | Gauge | - | `$NODE_HOME/tmp` bytes | `--extended-metrics` |
 | `hl_node_tmp_stale_files` | Gauge | - | tmp files older than 24h | `--extended-metrics` |
 | `hl_node_shell_exec_pending` | Gauge | - | shell_rs_out file count | `--extended-metrics` |
+| `hl_node_jailing_threshold_seconds` | Gauge | - | latency_ema_jail_threshold from heartbeat_jailing_config.json: the EMA above which this node votes to jail a peer. Registered on first successful read (validator-only file). | `--extended-metrics`, validator |
+| `hl_node_jailing_dry_run` | Gauge | - | 1 if jail decisions are logged but not enforced (dry_run), 0 if live | `--extended-metrics`, validator |
+
+## Node Lifecycle
+
+| Metric | Type | Labels | Description | Requirements |
+|--------|------|--------|-------------|--------------|
+| `hl_node_child_starts` | Gauge | - | hl-node child starts retained in visor_child_stderr (clean + crashed). Retained-history count; do not rate(). | - |
+| `hl_node_child_crashes` | Gauge | `reason` | Retained crashes by reason: app_hash_mismatch (consensus divergence, page immediately), hardfork_upgrade, sync_overflow, config_error, network, panic | - |
+| `hl_node_child_last_crash_seconds` | Gauge | `reason` | Unix time of the newest retained crash per reason. Alert shape: `time() - value < window`. | - |
+| `hl_node_rate_limited_files` | Gauge | `stream` | Non-empty rate_limited_ips files in the newest date dir (abci_stream / gossip_rpc_blocks / gossip_rpc_requests). Zero on a healthy node; non-zero = actively rate-limiting peers. | - |
 
 ## Extended: Tokio Runtime
 
@@ -272,6 +285,11 @@ These expose node-precomputed per-node quantiles as gauges with no `_bucket` ser
 | `hl_tokio_task_long_delays_total` | Gauge | `task` | Cumulative long delays | `--extended-metrics` |
 | `hl_tokio_task_idle_seconds_total` | Gauge | `task` | Cumulative idle time | `--extended-metrics` |
 | `hl_tokio_task_dropped_total` | Gauge | `task` | Cumulative dropped tasks | `--extended-metrics` |
+| `hl_tokio_task_scheduled_total` | Gauge | `task` | Cumulative schedules (wakes) | `--extended-metrics` |
+| `hl_tokio_task_scheduled_seconds_total` | Gauge | `task` | Cumulative scheduled-but-not-polled time; rising faster than poll time = runtime starvation | `--extended-metrics` |
+| `hl_tokio_task_fast_polls_total` | Gauge | `task` | Cumulative fast polls | `--extended-metrics` |
+| `hl_tokio_task_short_delays_total` | Gauge | `task` | Cumulative short scheduling delays | `--extended-metrics` |
+| `hl_tokio_sample_age_seconds` | Gauge | - | Age of the newest tokio sample. When it passes ~15m the per-task gauges above are withdrawn (the feed has been observed to die for a day while the node ran); alert on the age, not on task absence. | `--extended-metrics` |
 
 ## Extended: Crit Locations
 
@@ -279,6 +297,7 @@ These expose node-precomputed per-node quantiles as gauges with no `_bucket` ser
 |--------|------|--------|-------------|--------------|
 | `hl_node_crit_location` | Gauge | `file`, `line` | Per-site crit count, capped at 32 | `--extended-metrics` |
 | `hl_node_crit_location_last_seen_seconds` | Gauge | `file`, `line` | Last activation timestamp | `--extended-metrics` |
+| `hl_node_crit_location_ignored` | Gauge | `file`, `line` | 1 if the location is operator-suppressed via crit_msg_ignore.json; exclude these from alerts | `--extended-metrics` |
 
 ## Extended: RocksDB
 
@@ -294,15 +313,15 @@ These auto-detect via filesystem: each monitor checks for its source directory a
 
 | Metric | Type | Labels | Description | Requirements |
 |--------|------|--------|-------------|--------------|
-| `hl_consensus_committed_blocks` | Gauge | - | Cumulative blocks committed since hl-node start. Resets to 0 on restart. | Validator node |
-| `hl_consensus_committed_txs` | Gauge | - | Cumulative transactions committed since hl-node start. | Validator node |
-| `hl_consensus_committed_tx_bytes` | Gauge | - | Cumulative bytes of committed transactions since hl-node start. | Validator node |
-| `hl_consensus_dropped_txs` | Gauge | - | Cumulative dropped txs (mempool/consensus shedding load). Non-zero rate is operator-actionable. | Validator node |
-| `hl_consensus_round_qc` | Gauge | - | QC-decided rounds since hl-node start. Tracks committed_blocks on a healthy network. | Validator node |
-| `hl_consensus_round_tc` | Gauge | - | Timeout-certificate rounds (view changes) since hl-node start. | Validator node |
-| `hl_consensus_round_catchup` | Gauge | - | Catch-up events (validator was behind and recovered) since hl-node start. | Validator node |
-| `hl_consensus_rpc_requests_registered` | Gauge | - | Validator-RPC requests this validator served. | Validator node |
-| `hl_consensus_rpc_requests_sent` | Gauge | - | Validator-RPC requests this validator initiated. | Validator node |
+| `hl_consensus_committed_blocks` | Counter | - | Blocks committed since the exporter started observing; rate() valid. | Validator node |
+| `hl_consensus_committed_txs` | Counter | - | Transactions committed since the exporter started observing. | Validator node |
+| `hl_consensus_committed_tx_bytes` | Counter | - | Bytes of committed transactions since the exporter started observing. | Validator node |
+| `hl_consensus_dropped_txs` | Counter | - | Dropped txs (mempool/consensus shedding load) since the exporter started observing. Any non-zero rate is operator-actionable. | Validator node |
+| `hl_consensus_round_qc` | Counter | - | QC-decided rounds. Tracks committed_blocks on a healthy network. | Validator node |
+| `hl_consensus_round_tc` | Counter | - | Timeout-certificate rounds (view changes). | Validator node |
+| `hl_consensus_round_catchup` | Counter | - | Catch-up events (validator was behind and recovered). | Validator node |
+| `hl_consensus_rpc_requests_registered` | Counter | - | Validator-RPC requests this validator served. | Validator node |
+| `hl_consensus_rpc_requests_sent` | Counter | - | Validator-RPC requests this validator initiated. | Validator node |
 | `hl_mempool_events_total` | Counter | `event_type`, `status` | Mempool log events by type (add_tx, verify_block, committed, dropping_blocks, size_stats, …). `status` carries the outcome for add_tx and verify_block; empty for others. | Validator node |
 | `hl_mempool_size` | Gauge | `component` | Mempool depth from "Size stats" events. components: committed_tx_hashes, uncommitted_txs, blocks, rpc_requests. | Validator node |
 | `hl_node_replay_events` | Gauge | - | Current count of retained replay-from-checkpoint dirs (decreases on pruning) under data/node_logs/replay/. Point-in-time count, so do not `rate()`/`increase()`. | Validator node |
@@ -324,7 +343,7 @@ These auto-detect `$NODE_HOME/data/mempool_txs/hourly/`, which appears when `spl
 | `hl_mempool_txs_signed_actions_per_record` | Histogram | - | Distribution of `signed_actions` array length per split-client mempool transaction record. | Node with `data/mempool_txs/hourly/` |
 | `hl_mempool_txs_operations_per_record` | Histogram | - | Distribution of individual operation count per split-client mempool transaction record. | Node with `data/mempool_txs/hourly/` |
 | `hl_mempool_txs_latest_time` | Gauge | - | Unix timestamp from the latest split-client mempool transaction record processed. | Node with `data/mempool_txs/hourly/` |
-| `hl_mempool_txs_sample_age_seconds` | Gauge | - | Wall-clock age of the latest split-client mempool transaction record processed. | Node with `data/mempool_txs/hourly/` |
+| `hl_mempool_txs_sample_age_seconds` | Gauge | - | Wall-clock age of the latest record, refreshed every tick (keeps climbing when the stream goes quiet). | Node with `data/mempool_txs/hourly/` |
 
 ## Validator (validator-only, --extended-metrics)
 
@@ -362,12 +381,11 @@ These expose node-precomputed per-node quantiles as gauges with no `_bucket` ser
 
 ### Consensus monitor health (OTLP-path)
 
-These four are emitted via the OTLP/observable-instrument path (not the client_golang registry), so they appear on the Prometheus `/metrics` endpoint through the OTel->Prometheus bridge. The names below are exactly as exposed: the three counters already carry `_total` (the bridge does not double-suffix), and `hl_consensus_monitor_last_processed` declares `WithUnit("timestamp")`, which is not in the bridge's unit-suffix table, so no `_seconds`/`_timestamp` suffix is appended.
+These are emitted via the OTLP/observable-instrument path (not the client_golang registry), so they appear on the Prometheus `/metrics` endpoint through the OTel->Prometheus bridge. The names below are exactly as exposed: the counters already carry `_total` (the bridge does not double-suffix), and `hl_consensus_monitor_last_processed` declares `WithUnit("timestamp")`, which is not in the bridge's unit-suffix table, so no `_seconds`/`_timestamp` suffix is appended.
 
 | Metric | Type | Labels | Description | Requirements |
 |--------|------|--------|-------------|--------------|
-| `hl_timeout_rounds_total` | Counter | `suspect` | Timeout rounds observed by the round-advance monitor, by suspected stalled validator | Validator node |
-| `hl_consensus_monitor_last_processed` | Gauge | `monitor_type` | Unix timestamp of the last line processed, per monitor (`monitor_type` ∈ `consensus`/`status`) | - |
+| `hl_consensus_monitor_last_processed` | Gauge | `monitor_type` | Unix timestamp of the last line processed, per monitor (`monitor_type` ∈ `consensus`/`status`), flushed once per EOF pause | - |
 | `hl_consensus_monitor_lines_processed_total` | Counter | `monitor_type` | Lines processed by the consensus/status monitor | - |
 | `hl_consensus_monitor_errors_total` | Counter | `monitor_type` | Errors encountered by the consensus/status monitor | - |
 
@@ -401,14 +419,14 @@ These four are emitted via the OTLP/observable-instrument path (not the client_g
 - `event_type`: gossip event tag
 - `tier`: `fast` / `slow`
 - `db`: RocksDB name
-- `reason`: write-stall reason
 - `task`: Tokio task name
 - `file`, `line`: source location
 - `monitor`: monitor name
 - `monitor_type`: consensus-monitor source stream (`consensus` / `status`)
-- `suspect`: suspected stalled validator (on `hl_timeout_rounds_total`)
 - `subdir`: tracked NODE_HOME subdir
-- `stream`, `level`: `infra`/`trade`/`visor`, `error`/`warn`
+- `stream`, `level`: `infra`/`trade`/`visor`, `error`/`warn` (log lines); `stream` on `hl_node_rate_limited_files` is the rate-limiter stream
+- `reason`: write-stall reason (RocksDB) or crash reason (`hl_node_child_crashes`)
+- `period`: validatorSummaries stats window (`day`/`week`/`month`)
 - `event_type`, `status`: mempool event tag + per-event outcome (add_tx/verify_block carry status)
 - `component`: mempool capacity bucket - committed_tx_hashes / uncommitted_txs / blocks / rpc_requests
 - `side`: split-client mempool order side (`buy`, `sell`, `unknown`)
@@ -419,8 +437,8 @@ These four are emitted via the OTLP/observable-instrument path (not the client_g
 ### Replica Metrics (`--replica-metrics`)
 Require the flag AND hl-node running with `--replica-cmds-style actions-and-responses`:
 - All `hl_core_tx_*`, `hl_core_operations_*`, `hl_core_orders_total`, `hl_core_orders_per_block`
-- `hl_core_*_processed_*`
-- `hl_metal_parse_duration`, `hl_metal_last_processed_*`
+- `hl_core_blocks_processed_total`, `hl_core_last_processed_*`, `hl_core_round_advance`, `hl_core_hardfork_version`
+- `hl_metal_parse_duration`
 
 ### Validator Node Metrics
 Validator node with consensus/status logs:
@@ -437,4 +455,4 @@ Bundle: LZ4, per-step latency (bucket_guard + tcp_lz4, plus validator-only conse
 - `hl_p2p_tcp_connections`
 
 ### Flag-gated metric default values
-Metrics gated by `--probe-info-endpoint` or `--extended-metrics` still appear at zero when the flag is off (standard `promauto` behavior). See [UPGRADING.md](../UPGRADING.md).
+The info-probe family (`hl_info_*`) registers only when `--probe-info-endpoint` is on and is ABSENT otherwise; alert with `absent()` semantics, not `== 0`. Plain gauges gated by `--extended-metrics` still appear at zero when the flag is off (standard `promauto` behavior); label vectors carry no series until populated. See [UPGRADING.md](../UPGRADING.md).

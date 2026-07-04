@@ -172,6 +172,11 @@ func StartMempoolTxsMonitor(ctx context.Context, cfg config.Config, errCh chan<-
 		}
 		currentOffset = newOffset
 		if n > 0 {
+			// refresh the age every tick so it keeps climbing when the
+			// stream goes quiet instead of freezing at the last record
+			if !mempoolTxsLastRecord.IsZero() {
+				metrics.HLMempoolTxsSampleAgeSeconds.Set(time.Since(mempoolTxsLastRecord).Seconds())
+			}
 			metrics.MarkMonitorTick("mempool_txs")
 		}
 	}
@@ -291,10 +296,13 @@ func publishMempoolTxsLine(stats mempoolTxParsedLine) {
 	}
 
 	if !stats.timestamp.IsZero() {
+		mempoolTxsLastRecord = stats.timestamp
 		metrics.HLMempoolTxsLatestTime.Set(float64(stats.timestamp.Unix()))
-		metrics.HLMempoolTxsSampleAgeSeconds.Set(time.Since(stats.timestamp).Seconds())
 	}
 }
+
+// mempoolTxsLastRecord backs the sample-age gauge; single-goroutine access.
+var mempoolTxsLastRecord time.Time
 
 func mempoolTxActionTypeLabel(actionType string) string {
 	if actionType == "" {

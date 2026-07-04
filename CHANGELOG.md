@@ -1,5 +1,54 @@
 # Changelog
 
+## [Unreleased] - v3.1 correctness and cost pass
+
+### Fixed
+
+- Consensus accumulator metrics published the wrong field. The on-disk lines are per-window samples: `delta` is the quantity, `n` is the event count in the window (they only coincide for CommittedBlocks). All nine `hl_consensus_committed_*` / `hl_consensus_round_*` / `hl_consensus_rpc_requests_*` metrics now sum deltas into real Prometheus counters. Values are cumulative since exporter start and `rate()` is valid. Previously `committed_tx_bytes` equaled `committed_blocks` and `dropped_txs` was unreliable.
+- The status stream parser accepts the 2026-07 hl-node schema for `current_stakes` (`{"validator_to_stake": [...]}`) in addition to the legacy row array. New builds broke the parser on every status line.
+- Status lines larger than 64 KiB no longer fail the last-line reader (buffer raised to 8 MiB; lines carry whole-validator-set maps).
+- Removed the 30s metrics-registry sweep that truncated any labeled family to 100 series in map order. On networks with more than 100 validators it randomly dropped per-validator stake/jailed/latency series every 30 seconds.
+- Removed the forced `runtime.GC()` every 30s and moved `ReadMemStats` (stop-the-world) off the scrape path onto a 30s cache.
+- Startup no longer fails when `api.ipify.org` is unreachable. The public IP comes from `NODE_HOME/last_known_public_ip.json` first; ipify is a 5s-timeout fallback and failure only logs.
+- `hl_software_up_to_date` compares the local hl-visor build against the latest published hl-visor. It used to compare the CDN visor against the local hl-node, which the visor swaps mid-release, pinning the metric at 0. The remote check now uses ETag conditional requests instead of downloading the full binary every 30 minutes, and the curl dependency is gone.
+- `hl_consensus_proposer_count_total` resolved every moniker to "unknown" through a stubbed lookup.
+- Per-validator gauges from validatorSummaries (stake, jailed, active) and the raw latency family reconcile as snapshots: validators leaving the set are removed instead of freezing at their last value.
+- `hl_consensus_vote_time_diff_seconds` now emits the age of the last observed vote (climbs while a validator is silent). It used to store the exporter's parse lag once per vote, which sat near 0 forever. Vote series are trimmed after 24h without votes.
+- Torn trailing lines are no longer half-consumed by the streaming monitors (mempool lost one event per file boundary; the shared tail reader now reassembles partials).
+- `validator_latency` date-file selection uses UTC; on non-UTC hosts it read a nonexistent path around midnight.
+- The gossip_rpc scanner survives >64 KiB peer-list lines.
+
+### Performance
+
+The exporter burned ~195% CPU on a live validator; the causes are removed:
+
+- Streaming monitors shared a loop that re-ran a full recursive directory walk on every 10ms EOF pause (the status goroutine walked a ~7,000-file tree ~100x/second to tail 31 lines/hour). All of them now use a shared tail-streamer with cheap directory-listing resolvers, 2-5s rescan gating, and proper file-handle rotation.
+- Consensus per-line metric updates batch once per EOF pause instead of taking the global mutex several times per line; QC participation recalculation is gated to once per 2s instead of every block.
+- The disk monitor walks NODE_HOME once (previously up to three overlapping walks) every 120s.
+- EVM receipts are never decoded (nothing read them); gossip_rpc re-reads only the file tail instead of the whole hour.
+- The version/update checkers stopped copying and downloading whole binaries every 30 minutes.
+
+### Added
+
+- `hl_node_jailing_threshold_seconds` and `hl_node_jailing_dry_run` from `heartbeat_jailing_config.json`: the number that decides jail votes. Headroom recipe: `hl_consensus_validator_latency_ema_seconds / on() group_left hl_node_jailing_threshold_seconds`.
+- `hl_consensus_validator_jailed_local` from the status stream: node-local jailed set, ~2min cadence, no API dependency.
+- `hl_consensus_validator_unjailable_after_seconds`, `_recent_blocks`, `_commission_rate`, `_uptime_fraction{period}`, `_predicted_apr{period}` from validatorSummaries fields that were previously discarded.
+- `hl_node_child_starts`, `hl_node_child_crashes{reason}`, `hl_node_child_last_crash_seconds{reason}` from `visor_child_stderr`: crash taxonomy including `app_hash_mismatch` (consensus divergence) and `config_error`, which no other metric can see.
+- `hl_core_round_advance` histogram (round - parent_round per block; >1 = timed-out rounds) and `hl_core_hardfork_version` from the replica stream.
+- `hl_info_exchange_status_delta_seconds`: local clock minus the node's exchangeStatus time (staleness check the node README recommends).
+- `hl_tokio_sample_age_seconds` plus withdrawal of `hl_tokio_task_*` when the source feed is stale (observed dead for 26h while the node ran).
+- `hl_tokio_task_scheduled_total`, `_scheduled_seconds_total`, `_fast_polls_total`, `_short_delays_total`.
+- `hl_node_rate_limited_files{stream}`: abuse tripwire from `data/rate_limited_ips`.
+- `hl_node_crit_location_ignored{file,line}`, `hl_p2p_non_val_connections`, `hl_node_subsystem_latency_lifetime_mean_seconds`.
+
+### Changed (BREAKING)
+
+- Removed duplicates and dead weight: `hl_core_rounds_processed_total` (equal to `hl_core_blocks_processed_total`), `hl_metal_last_processed_round`/`_time` (aliases of `hl_core_last_processed_*`), `hl_evm_gas_limit_distribution` (two-bucket histogram), `hl_evm_max_gas_limit_seen`, `hl_evm_last_high_gas_block_{height,time,limit,used}`, `hl_evm_high_gas_limit_blocks_total`, `hl_evm_account_count` (constant 0 on current chain versions; EVM state lives in RethDB), `hl_timeout_rounds_total` (documented but never wired; use `hl_core_round_advance` buckets and `hl_consensus_round_tc`).
+- `hl_consensus_heartbeat_ack_received_total` dropped the constant `from_validator`/`from_name` labels (always the local node).
+- `hl_consensus_committed_*` family is typed Counter with since-exporter-start semantics (see Fixed).
+- The info-probe family registers only when `--probe-info-endpoint` is on: `hl_info_endpoint_up` is now absent instead of a false-alarm 0 on nodes without the probe.
+- `--contract-metrics-limit` now hard-caps `hl_evm_contract_tx_total` series (first N addresses keep their own series, the rest roll into `contract_address="other"`). Previously it only bounded a lookup cache while series grew without limit (observed: 7,140 series).
+
 ## [Unreleased] - breaking metrics cleanup
 
 ### Removed

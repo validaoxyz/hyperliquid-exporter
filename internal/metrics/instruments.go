@@ -16,13 +16,11 @@ var (
 	HLCoreOrdersCounter          api.Int64Counter
 	HLCoreOperationsCounter      api.Int64Counter
 	HLCoreBlocksProcessedCounter api.Int64Counter
-	HLCoreRoundsProcessedCounter api.Int64Counter
 
 	// counters EVM
-	HLEVMTxTypeCounter             api.Int64Counter
-	HLEVMContractCreateCounter     api.Int64Counter
-	HLEVMContractTxCounter         api.Int64Counter
-	HLEVMHighGasLimitBlocksCounter api.Int64Counter
+	HLEVMTxTypeCounter         api.Int64Counter
+	HLEVMContractCreateCounter api.Int64Counter
+	HLEVMContractTxCounter     api.Int64Counter
 
 	// observable gauges, Core
 	HLCoreBlockHeightGauge     api.Int64ObservableGauge
@@ -32,8 +30,6 @@ var (
 
 	// observable gauges, Metal (machine specific)
 	HLMetalParseDurationGauge api.Float64ObservableGauge
-	HLMetalLastProcessedRound api.Int64ObservableGauge
-	HLMetalLastProcessedTime  api.Int64ObservableGauge
 
 	// observable gauges, Consensus
 	HLConsensusValidatorJailedStatus api.Float64ObservableGauge
@@ -52,18 +48,13 @@ var (
 	HLSoftwareUpToDate    api.Int64ObservableGauge
 
 	// observable gauges, EVM
-	HLEVMBlockHeightGauge       api.Int64ObservableGauge
-	HLEVMLatestBlockTimeGauge   api.Int64ObservableGauge
-	HLEVMBaseFeeGauge           api.Float64ObservableGauge
-	HLEVMGasUsedGauge           api.Float64ObservableGauge
-	HLEVMGasLimitGauge          api.Float64ObservableGauge
-	HLEVMSGasUtilGauge          api.Float64ObservableGauge
-	HLEVMMaxPriorityFeeGauge    api.Float64ObservableGauge
-	HLEVMLastHighGasBlockHeight api.Int64ObservableGauge
-	HLEVMLastHighGasBlockLimit  api.Int64ObservableGauge
-	HLEVMLastHighGasBlockUsed   api.Int64ObservableGauge
-	HLEVMLastHighGasBlockTime   api.Int64ObservableGauge
-	HLEVMMaxGasLimitSeen        api.Int64ObservableGauge
+	HLEVMBlockHeightGauge     api.Int64ObservableGauge
+	HLEVMLatestBlockTimeGauge api.Int64ObservableGauge
+	HLEVMBaseFeeGauge         api.Float64ObservableGauge
+	HLEVMGasUsedGauge         api.Float64ObservableGauge
+	HLEVMGasLimitGauge        api.Float64ObservableGauge
+	HLEVMSGasUtilGauge        api.Float64ObservableGauge
+	HLEVMMaxPriorityFeeGauge  api.Float64ObservableGauge
 
 	// histograms, Core
 	HLCoreBlockTimeHistogram          api.Float64Histogram
@@ -75,7 +66,6 @@ var (
 	// histograms, EVM
 	HLEVMBlockTimeHistogram  api.Float64Histogram
 	HLEVMTxPerBlockHistogram api.Float64Histogram
-	HLEVMGasLimitHistogram   api.Float64Histogram
 
 	// histograms, EVM fees
 	HLEVMBaseFeeHistogram     api.Float64Histogram
@@ -273,71 +263,6 @@ func createInstruments() error {
 		return fmt.Errorf("failed to create EVM contract transaction counter: %w", err)
 	}
 
-	// high gas limit block tracking metrics
-	HLEVMHighGasLimitBlocksCounter, err = meter.Int64Counter(
-		"hl_evm_high_gas_limit_blocks_total",
-		api.WithDescription("Total number of blocks with gas limit at 30m"),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create high gas limit blocks counter: %w", err)
-	}
-
-	// gas limit histogram with buckets for distribution
-	gasLimitBuckets := []float64{
-		2_000_000,  // 2M (standard blocks)
-		30_000_000, // 30M (high gas blocks)
-	}
-	HLEVMGasLimitHistogram, err = meter.Float64Histogram(
-		"hl_evm_gas_limit_distribution",
-		api.WithDescription("Distribution of gas limits across all blocks (2M standard, 30M high)"),
-		api.WithUnit("gas"),
-		api.WithExplicitBucketBoundaries(gasLimitBuckets...),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create gas limit histogram: %w", err)
-	}
-
-	// last high gas block details
-	HLEVMLastHighGasBlockHeight, err = meter.Int64ObservableGauge(
-		"hl_evm_last_high_gas_block_height",
-		api.WithDescription("Block height of the last high gas limit block"),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create last high gas block height gauge: %w", err)
-	}
-
-	HLEVMLastHighGasBlockLimit, err = meter.Int64ObservableGauge(
-		"hl_evm_last_high_gas_block_limit",
-		api.WithDescription("Gas limit of the last high gas limit block"),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create last high gas block limit gauge: %w", err)
-	}
-
-	HLEVMLastHighGasBlockUsed, err = meter.Int64ObservableGauge(
-		"hl_evm_last_high_gas_block_used",
-		api.WithDescription("Gas used in the last high gas limit block"),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create last high gas block used gauge: %w", err)
-	}
-
-	HLEVMLastHighGasBlockTime, err = meter.Int64ObservableGauge(
-		"hl_evm_last_high_gas_block_time",
-		api.WithDescription("Timestamp of the last high gas limit block"),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create last high gas block time gauge: %w", err)
-	}
-
-	HLEVMMaxGasLimitSeen, err = meter.Int64ObservableGauge(
-		"hl_evm_max_gas_limit_seen",
-		api.WithDescription("Maximum gas limit seen across all blocks"),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create max gas limit seen gauge: %w", err)
-	}
-
 	HLCoreTxCounter, err = meter.Int64Counter(
 		"hl_core_tx_total",
 		api.WithDescription("Total number of transactions in the Hyperliquid network"),
@@ -368,14 +293,6 @@ func createInstruments() error {
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create core blocks processed counter: %w", err)
-	}
-
-	HLCoreRoundsProcessedCounter, err = meter.Int64Counter(
-		"hl_core_rounds_processed",
-		api.WithDescription("Total number of rounds processed in the Hyperliquid network"),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create core rounds processed counter: %w", err)
 	}
 
 	// count-oriented buckets for per-block core load. Operations can be
@@ -448,22 +365,6 @@ func createInstruments() error {
 	}
 
 	// replica commands metrics
-	HLMetalLastProcessedRound, err = meter.Int64ObservableGauge(
-		"hl_metal_last_processed_round",
-		api.WithDescription("Last processed round by the replica"),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create metal last processed round gauge: %w", err)
-	}
-
-	HLMetalLastProcessedTime, err = meter.Int64ObservableGauge(
-		"hl_metal_last_processed_time",
-		api.WithDescription("Last processed time by the replica"),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create metal last processed time gauge: %w", err)
-	}
-
 	HLConsensusActiveStakeGauge, err = meter.Float64ObservableGauge(
 		"hl_consensus_active_stake",
 		api.WithDescription("Total stake of active validators in the Hyperliquid network"),
@@ -752,7 +653,7 @@ func createInstruments() error {
 	// efficiency
 	HLConsensusRoundsPerBlockGauge, err = meter.Float64ObservableGauge(
 		"hl_consensus_rounds_per_block",
-		api.WithDescription("Average rounds needed to produce a block"),
+		api.WithDescription("Rounds consumed by the most recent block (single sample, ~1 on a healthy chain; not an average)"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create consensus rounds per block gauge: %w", err)
@@ -760,7 +661,7 @@ func createInstruments() error {
 
 	HLConsensusQCRoundLagGauge, err = meter.Float64ObservableGauge(
 		"hl_consensus_qc_round_lag",
-		api.WithDescription("Average difference between block round and QC round"),
+		api.WithDescription("Round lag (block round - QC round) of the most recent block; 1 on a healthy chain (not an average)"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create consensus QC round lag gauge: %w", err)

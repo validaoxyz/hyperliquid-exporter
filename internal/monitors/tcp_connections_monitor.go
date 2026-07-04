@@ -19,8 +19,8 @@ const tcpConnectionsPollInterval = 15 * time.Second
 //
 //	4001 — gossip
 //	4002 — gossip secondary
-//	3999 — --serve-info
-//	3001 — --serve-evm-rpc
+//	3001 — --serve-info (the HTTP-probeable one)
+//	3999 — --serve-evm-rpc (allowlist-filtered, rejects HTTP)
 //
 // We only report state counts for connections WHERE OUR SIDE IS ONE OF
 // THESE LISTENING PORTS, so the per-port label has bounded cardinality.

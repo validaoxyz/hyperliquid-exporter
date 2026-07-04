@@ -57,9 +57,3 @@ type StatusLogEntry struct {
 	DisconnectedValidators json.RawMessage `json:"disconnected_validators"`
 	HeartbeatStatuses      json.RawMessage `json:"heartbeat_statuses"`
 }
-
-// round advance event data
-type RoundAdvancePayload struct {
-	Reason  string `json:"reason"`
-	Suspect string `json:"suspect"`
-}
