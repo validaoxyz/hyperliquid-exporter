@@ -474,6 +474,13 @@ var (
 		Name: "hl_tokio_task_idle_seconds_total",
 		Help: "Cumulative idle time (task awaiting work) for the named Tokio task.",
 	}, []string{"task"})
+	// HLTokioSampleAgeSeconds ages the newest tokio sample. The feed can die
+	// while the node stays healthy (observed live: a 26h gap); when it does,
+	// the per-task gauges are withdrawn and only this age keeps climbing.
+	HLTokioSampleAgeSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "hl_tokio_sample_age_seconds",
+		Help: "Age of the newest tokio task sample. When this passes ~15m the hl_tokio_task_* gauges are withdrawn (stale source) until the feed resumes.",
+	})
 	HLTokioTaskDroppedTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_tokio_task_dropped_total",
 		Help: "Cumulative dropped (panicked or cancelled) task count.",

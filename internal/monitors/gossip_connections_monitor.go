@@ -27,11 +27,11 @@ import (
 //   - error_checking_connection: peer churn / unreliable peers
 //   - verified_gossip_rpc:       healthy handshake (counter rate = arrival rate)
 var gossipConnectionAllowlist = map[string]string{
-	"verified gossip rpc":                          "verified_gossip_rpc",
-	"handle_stream_connection":                     "handle_stream_connection",
-	"performing checks on stream":                  "performing_checks_on_stream",
-	"got tcp greeting":                             "got_tcp_greeting",
-	"error checking connection":                    "error_checking_connection",
+	"verified gossip rpc":                               "verified_gossip_rpc",
+	"handle_stream_connection":                          "handle_stream_connection",
+	"performing checks on stream":                       "performing_checks_on_stream",
+	"got tcp greeting":                                  "got_tcp_greeting",
+	"error checking connection":                         "error_checking_connection",
 	"rejecting gossip stream because max peers reached": "rejecting_gossip_stream_max_peers_reached",
 }
 
@@ -78,15 +78,15 @@ func StartGossipConnectionsMonitor(ctx context.Context, cfg config.Config, errCh
 			currentOffset = info.Size()
 			return
 		}
-		newOffset, n, err := readGossipConnectionEvents(currentFile, currentOffset)
+		newOffset, _, err := readGossipConnectionEvents(currentFile, currentOffset)
 		if err != nil {
 			logger.DebugComponent("gossip_connections", "read %s: %v", currentFile, err)
 			return
 		}
 		currentOffset = newOffset
-		if n > 0 {
-			metrics.MarkMonitorTick("gossip_connections")
-		}
+		// a cycle with zero new events is still a healthy cycle; gating the
+		// tick on n>0 made last_tick look stale on quiet nodes
+		metrics.MarkMonitorTick("gossip_connections")
 	}
 
 	ticker := time.NewTicker(gossipConnectionsPollInterval)

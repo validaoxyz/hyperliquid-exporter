@@ -16,6 +16,12 @@ import (
 
 const tokioRuntimePollInterval = 60 * time.Second
 
+// tokioStaleAfter is how old the newest sample may get before the per-task
+// gauges are withdrawn. The feed appends about once a minute while alive,
+// but has been observed to die for a day while the node kept running;
+// re-emitting day-old cumulative values silently misleads dashboards.
+const tokioStaleAfter = 15 * time.Minute
+
 // tokioTaskAllowlist bounds label cardinality. On a mainnet non-validator
 // peer the file contains 12 task names; on a validator we see 21 (the
 // extras are the consensus + tx_forwarder + mempool refresher families).
@@ -24,30 +30,30 @@ const tokioRuntimePollInterval = 60 * time.Second
 // subsystem_latency_monitor).
 var tokioTaskAllowlist = map[string]bool{
 	// shared by both node roles
-	"gossip rpc request handler":      true,
-	"gossip rpc status":               true,
-	"tokio_scheduled_observer_fast":   true,
-	"tokio_scheduled_observer_slow":   true,
-	"traffic_logger":                  true,
-	"lz4_stats":                       true,
-	"gossip connection listener":      true,
-	"validator connection listener":   true,
-	"node_disabler":                   true,
-	"node_evm_request_handler":        true,
+	"gossip rpc request handler":    true,
+	"gossip rpc status":             true,
+	"tokio_scheduled_observer_fast": true,
+	"tokio_scheduled_observer_slow": true,
+	"traffic_logger":                true,
+	"lz4_stats":                     true,
+	"gossip connection listener":    true,
+	"validator connection listener": true,
+	"node_disabler":                 true,
+	"node_evm_request_handler":      true,
 	// non-validator only
 	"nv_stream_forward_client_blocks": true,
 	"nv_stream_apply_execution_state": true,
 	// validator-only (observed on a live testnet validator, May 2026)
-	"client block or tx_forwarder":      true,
-	"consensus out_recver":              true,
-	"consensus rpc driver":              true,
-	"consensus rpc request handler":     true,
-	"consensus state":                   true,
-	"external_tx_forwarder":             true,
-	"external_tx_forwarder_forwarder":   true,
-	"external_tx_recver":                true,
-	"mempool refresher":                 true,
-	"node_ip_updater":                   true,
+	"client block or tx_forwarder":    true,
+	"consensus out_recver":            true,
+	"consensus rpc driver":            true,
+	"consensus rpc request handler":   true,
+	"consensus state":                 true,
+	"external_tx_forwarder":           true,
+	"external_tx_forwarder_forwarder": true,
+	"external_tx_recver":              true,
+	"mempool refresher":               true,
+	"node_ip_updater":                 true,
 	// rewritten label for the per-validator "listening for incoming
 	// connections home_validator=Validator(0x…)" task. We strip the
 	// embedded address in parseTokioLine so label cardinality stays at
@@ -112,11 +118,33 @@ func StartTokioRuntimeMonitor(ctx context.Context, cfg config.Config, errCh chan
 	}
 }
 
+// tokioPublishedTasks tracks the task labels currently exposed so they can
+// be withdrawn when the source feed goes stale. Single-goroutine access.
+var tokioPublishedTasks = map[string]bool{}
+
 func tickTokio(root string) {
 	path, err := latestHourlyFile(root)
 	if err != nil {
 		return
 	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+
+	age := time.Since(info.ModTime())
+	metrics.HLTokioSampleAgeSeconds.Set(age.Seconds())
+	if age > tokioStaleAfter {
+		// source feed died while the node runs on: withdraw the gauges so
+		// dashboards see absent (not frozen-but-alive) values; the age
+		// gauge above keeps climbing as the operator-visible signal
+		for task := range tokioPublishedTasks {
+			deleteTokioSeries(task)
+		}
+		tokioPublishedTasks = map[string]bool{}
+		return
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return
@@ -146,8 +174,18 @@ func tickTokio(root string) {
 			continue
 		}
 		publishTokioSample(s)
+		tokioPublishedTasks[s.TaskName] = true
 		seen[s.TaskName] = true
 	}
+}
+
+func deleteTokioSeries(task string) {
+	metrics.HLTokioTaskPollSecondsTotal.DeleteLabelValues(task)
+	metrics.HLTokioTaskPollsTotal.DeleteLabelValues(task)
+	metrics.HLTokioTaskSlowPollsTotal.DeleteLabelValues(task)
+	metrics.HLTokioTaskLongDelaysTotal.DeleteLabelValues(task)
+	metrics.HLTokioTaskIdleSecondsTotal.DeleteLabelValues(task)
+	metrics.HLTokioTaskDroppedTotal.DeleteLabelValues(task)
 }
 
 func parseTokioLine(line []byte) (tokioTaskSample, bool) {

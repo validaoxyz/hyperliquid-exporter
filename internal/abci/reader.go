@@ -90,63 +90,6 @@ func (r *Reader) ReadContext(filePath string) (*ContextInfo, error) {
 }
 
 // read context and EVM account count
-func (r *Reader) ReadContextWithAccounts(filePath string) (*ContextInfo, int64, error) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return nil, 0, fmt.Errorf("open file: %w", err)
-	}
-	defer file.Close()
-
-	reader := bufio.NewReaderSize(file, r.bufferSize)
-
-	// structure including EVM accounts
-	var data struct {
-		Exchange struct {
-			Context struct {
-				Height     int64  `msgpack:"height"`
-				TxIndex    int64  `msgpack:"tx_index"`
-				Time       string `msgpack:"time"`
-				NextOid    int64  `msgpack:"next_oid"`
-				NextLid    int64  `msgpack:"next_lid"`
-				NextTwapId int64  `msgpack:"next_twap_id"`
-				Hardfork   struct {
-					Version int64 `msgpack:"version"`
-				} `msgpack:"hardfork"`
-			} `msgpack:"context"`
-			HyperEvm struct {
-				State2 struct {
-					EvmDb struct {
-						InMemory struct {
-							Accounts []interface{} `msgpack:"accounts"`
-						} `msgpack:"InMemory"`
-					} `msgpack:"evm_db"`
-				} `msgpack:"state2"`
-			} `msgpack:"hyper_evm"`
-		} `msgpack:"exchange"`
-	}
-
-	decoder := msgpack.NewDecoder(reader)
-	decoder.SetCustomStructTag("msgpack")
-
-	if err := decoder.Decode(&data); err != nil {
-		return nil, 0, fmt.Errorf("decode: %w", err)
-	}
-
-	ctx := &ContextInfo{
-		Height:          data.Exchange.Context.Height,
-		TxIndex:         data.Exchange.Context.TxIndex,
-		Time:            data.Exchange.Context.Time,
-		NextOid:         data.Exchange.Context.NextOid,
-		NextLid:         data.Exchange.Context.NextLid,
-		NextTwapId:      data.Exchange.Context.NextTwapId,
-		HardforkVersion: data.Exchange.Context.Hardfork.Version,
-	}
-
-	accountCount := int64(len(data.Exchange.HyperEvm.State2.EvmDb.InMemory.Accounts))
-
-	return ctx, accountCount, nil
-}
-
 // reads validator profiles from ABCI state.
 //
 // Schema notes:

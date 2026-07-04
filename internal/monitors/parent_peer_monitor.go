@@ -39,6 +39,10 @@ func StartParentPeerMonitor(ctx context.Context, cfg config.Config, errCh chan<-
 	defer ticker.Stop()
 
 	tick := func() {
+		// mark liveness before the emptiness gate: an empty snapshot is a
+		// healthy outcome on an idle node, not a dead monitor
+		metrics.MarkMonitorTick("parent_peer")
+
 		ts, in, _ := LatestTCPTrafficSnapshot()
 		if ts.IsZero() || len(in) == 0 {
 			return

@@ -125,6 +125,10 @@ func (m *ConsensusMonitor) trimStaleValidators() {
 			delete(m.tcVotes, v)
 		}
 	}
+
+	// vote round/age series get a longer leash: the age is the stall
+	// signal and should stay visible for a while before the series goes
+	metrics.TrimVoteSeries(24 * time.Hour)
 }
 
 // core message types for consensus - using dedicated structures to match log format
@@ -246,6 +250,7 @@ func (m *ConsensusMonitor) monitorConsensusLogs(ctx context.Context, errCh chan<
 		// mutex several times per line at full consensus volume; flush once
 		// per EOF pause instead
 		onIdle: func() {
+			metrics.MarkMonitorTick("consensus")
 			if errLines > 0 {
 				metrics.AddConsensusMonitorErrors("consensus", errLines)
 				m.statsMutex.Lock()
@@ -406,8 +411,7 @@ func (m *ConsensusMonitor) processVoteStruct(vote *ConsensusVoteMessage, timesta
 		metrics.SetValidatorLastVoteRound(formattedValidator, int64(vote.Round))
 	}
 
-	timeDiff := time.Since(timestamp).Seconds()
-	metrics.SetValidatorVoteTimeDiff(formattedValidator, timeDiff)
+	metrics.SetValidatorLastVoteTime(formattedValidator, timestamp)
 
 	return nil
 }

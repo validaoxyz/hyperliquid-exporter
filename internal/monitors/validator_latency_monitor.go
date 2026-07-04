@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,12 +22,29 @@ const (
 
 // validator latency monitor
 type ValidatorLatencyMonitor struct {
-	config        *config.Config
-	latencyDir    string
-	emaDir        string
-	lastProcessed map[string]int64 // Track last processed position per validator
-	lastEMATime   time.Time
+	config      *config.Config
+	latencyDir  string
+	emaDir      string
+	rawState    map[string]*rawLatencyState // per-validator raw-file streaming state
+	lastEMATime time.Time
 }
+
+// rawLatencyState tracks one validator's raw latency stream: read position
+// plus the newest parsed sample, so each tick can publish a full reconciled
+// snapshot (validators with stale files drop out instead of freezing).
+type rawLatencyState struct {
+	path     string
+	offset   int64
+	latency  float64
+	round    int64
+	hasData  bool
+	fileTime time.Time
+}
+
+// rawLatencyStaleAfter is how old a validator's newest latency file may be
+// before its raw series are withdrawn. Live peers update these files
+// continuously; a stale file means the validator left the measured set.
+const rawLatencyStaleAfter = 2 * time.Hour
 
 // latency entry
 type LatencyEntry struct {
@@ -44,10 +62,10 @@ type EMAEntry struct {
 // new validator latency monitor
 func NewValidatorLatencyMonitor(cfg *config.Config) *ValidatorLatencyMonitor {
 	return &ValidatorLatencyMonitor{
-		config:        cfg,
-		latencyDir:    filepath.Join(cfg.NodeHome, "data", "validator_latency"),
-		emaDir:        filepath.Join(cfg.NodeHome, "data", "validator_latency_ema"),
-		lastProcessed: make(map[string]int64),
+		config:     cfg,
+		latencyDir: filepath.Join(cfg.NodeHome, "data", "validator_latency"),
+		emaDir:     filepath.Join(cfg.NodeHome, "data", "validator_latency_ema"),
+		rawState:   make(map[string]*rawLatencyState),
 	}
 }
 
@@ -104,6 +122,9 @@ func (m *ValidatorLatencyMonitor) processLatencyFiles() error {
 		return fmt.Errorf("failed to read latency directory: %w", err)
 	}
 
+	latencySnapshot := make(map[string]float64)
+	roundSnapshot := make(map[string]int64)
+
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -113,60 +134,88 @@ func (m *ValidatorLatencyMonitor) processLatencyFiles() error {
 			continue
 		}
 
+		st := m.rawState[validator]
+		if st == nil {
+			st = &rawLatencyState{}
+			m.rawState[validator] = st
+		}
+
 		hourlyRoot := filepath.Join(m.latencyDir, validator, "hourly")
 		var filePath string
 		if _, err := os.Stat(hourlyRoot); err == nil {
-			// nested-hourly layout — find the latest hour-file numerically.
+			// nested-hourly layout - find the latest hour-file numerically.
 			path, err := latestHourlyFile(hourlyRoot)
 			if err != nil {
 				continue
 			}
 			filePath = path
 		} else {
-			// legacy flat layout fallback.
-			today := time.Now().Format("20060102")
+			// legacy flat layout fallback. hl-node writes date files in
+			// UTC, so a host in another timezone must not pick "today"
+			// from local time.
+			today := time.Now().UTC().Format("20060102")
 			filePath = filepath.Join(m.latencyDir, validator, today)
 		}
 
-		if err := m.processValidatorLatencyFile(validator, filePath); err != nil {
+		if err := m.readValidatorLatency(st, filePath); err != nil {
 			logger.DebugComponent("latency", "Error processing latency file for %s: %v", validator, err)
 		}
+
+		// publish only validators whose files are still being written;
+		// a stale file belongs to a validator that left the measured set
+		if st.hasData && time.Since(st.fileTime) <= rawLatencyStaleAfter {
+			latencySnapshot[validator] = st.latency
+			roundSnapshot[validator] = st.round
+		}
 	}
+
+	// drop streaming state for validators gone long enough that keeping
+	// their offsets serves nothing
+	for v, st := range m.rawState {
+		if st.hasData && time.Since(st.fileTime) > 24*time.Hour {
+			delete(m.rawState, v)
+		}
+	}
+
+	metrics.ReplaceValidatorLatency(latencySnapshot)
+	metrics.ReplaceValidatorLatencyRound(roundSnapshot)
 
 	return nil
 }
 
-// processes a single validator's latency file. On hl-node versions
-// shipped since mid-2025, the layout under data/validator_latency/<addr>/
-// is nested-hourly: hourly/<YYYYMMDD>/<H>, NOT a flat <YYYYMMDD> file
-// like the older releases used. We attempt nested-hourly first and
-// fall back to the legacy flat layout for backwards compatibility.
-func (m *ValidatorLatencyMonitor) processValidatorLatencyFile(validator, filePath string) error {
-	file, err := os.Open(filePath)
+// readValidatorLatency drains new complete lines from filePath and keeps
+// the newest parsed sample in st. Offsets are tracked per validator and
+// reset when the stream rotates to a new file.
+func (m *ValidatorLatencyMonitor) readValidatorLatency(st *rawLatencyState, filePath string) error {
+	info, err := os.Stat(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// file doesn't exist yet for today, skip
 			return nil
 		}
+		return fmt.Errorf("stat file: %w", err)
+	}
+	st.fileTime = info.ModTime()
+
+	if filePath != st.path {
+		st.path, st.offset = filePath, 0
+	} else if st.offset > info.Size() {
+		// file rotated or was truncated under us - start over
+		st.offset = 0
+	}
+
+	if st.offset == info.Size() {
+		return nil
+	}
+
+	file, err := os.Open(filePath)
+	if err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
 	}
 	defer file.Close()
 
-	// stat-based offset reset: if the file shrank (rotation) or this is
-	// a new file we haven't tracked, restart at 0.
-	info, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("stat file: %w", err)
-	}
-
-	key := validator + "|" + filePath
-	lastPos, exists := m.lastProcessed[key]
-	if exists && lastPos > info.Size() {
-		// file rotated under us — start over
-		lastPos = 0
-	}
-	if exists && lastPos > 0 {
-		if _, err := file.Seek(lastPos, 0); err != nil {
+	if st.offset > 0 {
+		if _, err := file.Seek(st.offset, io.SeekStart); err != nil {
 			return fmt.Errorf("failed to seek: %w", err)
 		}
 	}
@@ -175,7 +224,7 @@ func (m *ValidatorLatencyMonitor) processValidatorLatencyFile(validator, filePat
 	// raise the scanner buffer cap: hourly latency files can carry one long
 	// line per round and the default 64 KiB token limit truncates them.
 	scanner.Buffer(make([]byte, 1<<20), 4<<20)
-	var latestEntry *LatencyEntry
+	var latest *LatencyEntry
 
 	for scanner.Scan() {
 		var entry LatencyEntry
@@ -183,22 +232,18 @@ func (m *ValidatorLatencyMonitor) processValidatorLatencyFile(validator, filePat
 			logger.DebugComponent("latency", "Failed to parse latency entry: %v", err)
 			continue
 		}
-
-		latestEntry = &entry
+		latest = &entry
 	}
-
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("scanner error: %w", err)
 	}
 
-	pos, _ := file.Seek(0, 1)
-	m.lastProcessed[key] = pos
+	pos, _ := file.Seek(0, io.SeekCurrent)
+	st.offset = pos
 
-	if latestEntry != nil {
-		metrics.SetValidatorLatency(validator, latestEntry.Latency)
-		metrics.SetValidatorLatencyRound(validator, latestEntry.Round)
+	if latest != nil {
+		st.latency, st.round, st.hasData = latest.Latency, latest.Round, true
 	}
-
 	return nil
 }
 
@@ -226,7 +271,9 @@ func (m *ValidatorLatencyMonitor) monitorEMA(ctx context.Context, errCh chan<- e
 
 // processes the exponential moving average file
 func (m *ValidatorLatencyMonitor) processEMAFile() error {
-	today := time.Now().Format("20060102")
+	// EMA date files are written in UTC; never derive "today" from the
+	// host's local timezone
+	today := time.Now().UTC().Format("20060102")
 	filePath := filepath.Join(m.emaDir, today)
 
 	file, err := os.Open(filePath)

@@ -126,6 +126,7 @@ func StartMemoryMonitoring(ctx context.Context) {
 			return
 		case <-ticker.C:
 			m := snapshotMemStats()
+			MarkMonitorTick("memory")
 
 			currentGoroutines := runtime.NumGoroutine()
 

@@ -68,7 +68,6 @@ func getAllObservables() []api.Observable {
 		HLEVMGasLimitGauge,
 		HLEVMSGasUtilGauge,
 		HLEVMMaxPriorityFeeGauge,
-		HLEVMAccountCountGauge,
 		HLEVMLastHighGasBlockHeight,
 		HLEVMLastHighGasBlockLimit,
 		HLEVMLastHighGasBlockUsed,

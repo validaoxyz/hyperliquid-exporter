@@ -74,6 +74,8 @@ func (m *GossipMonitor) monitorGossipLogs(ctx context.Context, errCh chan<- erro
 		logger.InfoComponent("gossip", "First run: processing gossip file %s", filePath)
 		if err := m.processGossipFile(filePath); err != nil {
 			logger.ErrorComponent("gossip", "Initial processing error: %v", err)
+		} else {
+			metrics.MarkMonitorTick("gossip")
 		}
 		lastProcessedFile = filePath
 	}
@@ -102,6 +104,8 @@ func (m *GossipMonitor) monitorGossipLogs(ctx context.Context, errCh chan<- erro
 				case <-ctx.Done():
 					return
 				}
+			} else {
+				metrics.MarkMonitorTick("gossip")
 			}
 		}
 	}

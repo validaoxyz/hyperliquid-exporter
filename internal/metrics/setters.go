@@ -208,40 +208,46 @@ func RecordApplyDurationWithLabel(duration float64, stateType string) {
 	}
 }
 
-func SetValidatorStake(address, signer, moniker string, stake float64) {
-	metricsMutex.Lock()
-	defer metricsMutex.Unlock()
-	if _, exists := labeledValues[HLConsensusValidatorStakeGauge]; !exists {
-		labeledValues[HLConsensusValidatorStakeGauge] = make(map[string]labeledValue)
-	}
-	labeledValues[HLConsensusValidatorStakeGauge][address] = labeledValue{
-		value: stake,
-		labels: []attribute.KeyValue{
-			attribute.String("validator", address),
-			attribute.String("signer", signer),
-			attribute.String("name", moniker),
-		},
-	}
+// ValidatorSummarySnapshot is one row of the validatorSummaries poll used
+// to reconcile the per-validator stake/status gauges.
+type ValidatorSummarySnapshot struct {
+	Validator, Signer, Name string
+	Stake                   float64
+	Jailed, Active          bool
 }
 
-func SetValidatorJailedStatus(validator, signer, name string, status float64) {
+// ReplaceValidatorSummaries reconciles the per-validator stake, jailed and
+// active gauges to the latest validatorSummaries response, replacing each
+// labeled map wholesale (same pattern as ReplaceValidatorLatencyEMA).
+// Validators that leave the set disappear from the gauges instead of
+// freezing at their last value forever.
+func ReplaceValidatorSummaries(snap []ValidatorSummarySnapshot) {
+	stake := make(map[string]labeledValue, len(snap))
+	jailed := make(map[string]labeledValue, len(snap))
+	active := make(map[string]labeledValue, len(snap))
+	for _, v := range snap {
+		labels := []attribute.KeyValue{
+			attribute.String("validator", v.Validator),
+			attribute.String("signer", v.Signer),
+			attribute.String("name", v.Name),
+		}
+		j, a := 0.0, 0.0
+		if v.Jailed {
+			j = 1
+		}
+		if v.Active {
+			a = 1
+		}
+		stake[v.Validator] = labeledValue{value: v.Stake, labels: labels}
+		jailed[v.Validator] = labeledValue{value: j, labels: labels}
+		active[v.Validator] = labeledValue{value: a, labels: labels}
+	}
+
 	metricsMutex.Lock()
 	defer metricsMutex.Unlock()
-
-	labels := append([]attribute.KeyValue{
-		attribute.String("validator", validator),
-		attribute.String("signer", signer),
-		attribute.String("name", name),
-	}, getCommonLabels()...)
-
-	if _, exists := labeledValues[HLConsensusValidatorJailedStatus]; !exists {
-		labeledValues[HLConsensusValidatorJailedStatus] = make(map[string]labeledValue)
-	}
-
-	labeledValues[HLConsensusValidatorJailedStatus][validator] = labeledValue{
-		value:  status,
-		labels: labels,
-	}
+	labeledValues[HLConsensusValidatorStakeGauge] = stake
+	labeledValues[HLConsensusValidatorJailedStatus] = jailed
+	labeledValues[HLConsensusValidatorActiveStatus] = active
 }
 
 func SetTotalStake(stake float64) {
@@ -327,26 +333,6 @@ func SetInactiveStake(stake float64) {
 	metricsMutex.Lock()
 	defer metricsMutex.Unlock()
 	currentValues[HLConsensusInactiveStakeGauge] = stake
-}
-
-func SetValidatorActiveStatus(validator, signer, name string, status float64) {
-	metricsMutex.Lock()
-	defer metricsMutex.Unlock()
-
-	labels := append([]attribute.KeyValue{
-		attribute.String("validator", validator),
-		attribute.String("signer", signer),
-		attribute.String("name", name),
-	}, getCommonLabels()...)
-
-	if _, exists := labeledValues[HLConsensusValidatorActiveStatus]; !exists {
-		labeledValues[HLConsensusValidatorActiveStatus] = make(map[string]labeledValue)
-	}
-
-	labeledValues[HLConsensusValidatorActiveStatus][validator] = labeledValue{
-		value:  status,
-		labels: labels,
-	}
 }
 
 func SetValidatorRTT(validator string, moniker string, ip string, latency float64) {
@@ -544,12 +530,6 @@ func IncrementEVMContractTx(address, name string, isToken bool, tokenType, symbo
 	HLEVMContractTxCounter.Add(ctx, 1, api.WithAttributes(labels...))
 }
 
-func SetEVMAccountCount(cnt int64) {
-	metricsMutex.Lock()
-	defer metricsMutex.Unlock()
-	currentValues[HLEVMAccountCountGauge] = cnt
-}
-
 // Core (l1) metrics setters (from replica data)
 
 func IncCoreTxTotal(actionType string, count int64) {
@@ -692,7 +672,12 @@ func SetValidatorLastVoteRound(validator string, round int64) {
 	}
 }
 
-func SetValidatorVoteTimeDiff(validator string, seconds float64) {
+// SetValidatorLastVoteTime records when a validator's vote was last
+// observed. The stored value is the vote's unix timestamp; the scrape
+// callback converts it to an age, so hl_consensus_vote_time_diff_seconds
+// climbs while a validator is silent (the previous implementation stored a
+// parse-time diff that froze at ~0 forever, useless for stall detection).
+func SetValidatorLastVoteTime(validator string, voteTime time.Time) {
 	labels := getValidatorLabels(validator)
 
 	// extract the actual validator address from the labels for map key
@@ -711,8 +696,25 @@ func SetValidatorVoteTimeDiff(validator string, seconds float64) {
 		labeledValues[HLConsensusVoteTimeDiffGauge] = make(map[string]labeledValue)
 	}
 	labeledValues[HLConsensusVoteTimeDiffGauge][validatorAddr] = labeledValue{
-		value:  seconds,
+		value:  float64(voteTime.Unix()),
 		labels: labels,
+	}
+}
+
+// TrimVoteSeries drops vote round/age series whose last observed vote is
+// older than maxAge. Departed validators otherwise keep a frozen round and
+// an ever-climbing age series forever.
+func TrimVoteSeries(maxAge time.Duration) {
+	cutoff := float64(time.Now().Add(-maxAge).Unix())
+	metricsMutex.Lock()
+	defer metricsMutex.Unlock()
+	ages := labeledValues[HLConsensusVoteTimeDiffGauge]
+	rounds := labeledValues[HLConsensusVoteRoundGauge]
+	for validator, v := range ages {
+		if v.value < cutoff {
+			delete(ages, validator)
+			delete(rounds, validator)
+		}
 	}
 }
 
@@ -1038,79 +1040,48 @@ func AddConsensusMonitorErrors(monitorType string, n int64) {
 
 // validator latency metric setters
 
-func SetValidatorLatency(validator string, latency float64) {
-	// use getValidatorLabels to get proper expanded addresses and signer/validator mapping
-	labels := getValidatorLabels(validator)
-
-	// extract the actual validator address from the labels for map key
-	var validatorAddr string
-	for _, label := range labels {
-		if label.Key == "validator" {
-			validatorAddr = label.Value.AsString()
-			break
+// ReplaceValidatorLatency reconciles the raw per-validator latency gauge to
+// a full snapshot; same staleness rationale as ReplaceValidatorLatencyEMA
+// (a validator whose latency files stop updating is dropped instead of
+// freezing at its last sample).
+func ReplaceValidatorLatency(latencyByValidator map[string]float64) {
+	rebuilt := make(map[string]labeledValue, len(latencyByValidator))
+	for validator, latency := range latencyByValidator {
+		labels := getValidatorLabels(validator)
+		var validatorAddr string
+		for _, label := range labels {
+			if label.Key == "validator" {
+				validatorAddr = label.Value.AsString()
+				break
+			}
 		}
+		rebuilt[validatorAddr] = labeledValue{value: latency, labels: labels}
 	}
 
 	metricsMutex.Lock()
 	defer metricsMutex.Unlock()
-
-	if _, exists := labeledValues[HLConsensusValidatorLatencyGauge]; !exists {
-		labeledValues[HLConsensusValidatorLatencyGauge] = make(map[string]labeledValue)
-	}
-	labeledValues[HLConsensusValidatorLatencyGauge][validatorAddr] = labeledValue{
-		value:  latency,
-		labels: labels,
-	}
+	labeledValues[HLConsensusValidatorLatencyGauge] = rebuilt
 }
 
-func SetValidatorLatencyRound(validator string, round int64) {
-	// use getValidatorLabels to get proper expanded addresses and signer/validator mapping
-	labels := getValidatorLabels(validator)
-
-	// extract the actual validator address from the labels for map key
-	var validatorAddr string
-	for _, label := range labels {
-		if label.Key == "validator" {
-			validatorAddr = label.Value.AsString()
-			break
+// ReplaceValidatorLatencyRound reconciles the latency-round gauge to a
+// full snapshot; see ReplaceValidatorLatency.
+func ReplaceValidatorLatencyRound(roundByValidator map[string]int64) {
+	rebuilt := make(map[string]labeledValue, len(roundByValidator))
+	for validator, round := range roundByValidator {
+		labels := getValidatorLabels(validator)
+		var validatorAddr string
+		for _, label := range labels {
+			if label.Key == "validator" {
+				validatorAddr = label.Value.AsString()
+				break
+			}
 		}
+		rebuilt[validatorAddr] = labeledValue{value: float64(round), labels: labels}
 	}
 
 	metricsMutex.Lock()
 	defer metricsMutex.Unlock()
-
-	if _, exists := labeledValues[HLConsensusValidatorLatencyRoundGauge]; !exists {
-		labeledValues[HLConsensusValidatorLatencyRoundGauge] = make(map[string]labeledValue)
-	}
-	labeledValues[HLConsensusValidatorLatencyRoundGauge][validatorAddr] = labeledValue{
-		value:  float64(round),
-		labels: labels,
-	}
-}
-
-func SetValidatorLatencyEMA(validator string, ema float64) {
-	// use getValidatorLabels to get proper expanded addresses and signer/validator mapping
-	labels := getValidatorLabels(validator)
-
-	// extract the actual validator address from the labels for map key
-	var validatorAddr string
-	for _, label := range labels {
-		if label.Key == "validator" {
-			validatorAddr = label.Value.AsString()
-			break
-		}
-	}
-
-	metricsMutex.Lock()
-	defer metricsMutex.Unlock()
-
-	if _, exists := labeledValues[HLConsensusValidatorLatencyEMAGauge]; !exists {
-		labeledValues[HLConsensusValidatorLatencyEMAGauge] = make(map[string]labeledValue)
-	}
-	labeledValues[HLConsensusValidatorLatencyEMAGauge][validatorAddr] = labeledValue{
-		value:  ema,
-		labels: labels,
-	}
+	labeledValues[HLConsensusValidatorLatencyRoundGauge] = rebuilt
 }
 
 // ReplaceValidatorLatencyEMA reconciles the EMA gauge to a full snapshot.

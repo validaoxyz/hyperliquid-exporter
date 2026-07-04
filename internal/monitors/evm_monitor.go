@@ -23,7 +23,14 @@ var (
 	lastEVMBlockTime time.Time
 
 	// contract tracking for per-contract metrics - using LRU cache
-	contractCache          *cache.LRUCache
+	contractCache *cache.LRUCache
+	// contractSeriesSeen enforces the hard series cap for
+	// hl_evm_contract_tx_total: the first N distinct contract addresses get
+	// their own series, later ones share the "other" bucket. The LRU
+	// resolver cache bounds lookup memory, but Prometheus series live for
+	// the process lifetime, so only a sticky first-N set bounds
+	// cardinality (observed live: 7,140 series = 75% of the scrape).
+	contractSeriesSeen     = map[string]bool{}
 	contractMetricsEnabled bool
 	contractLimit          int
 
@@ -142,6 +149,24 @@ func processEVMBlockAndReceiptsLine(line string) error {
 	}
 
 	return nil
+}
+
+// contractSeriesInfo returns the label set to publish for a contract,
+// rolling addresses beyond the configured limit into a shared "other"
+// series so hl_evm_contract_tx_total cardinality is hard-bounded.
+func contractSeriesInfo(info *contracts.ContractInfo) *contracts.ContractInfo {
+	limit := contractLimit
+	if limit <= 0 {
+		limit = 1000
+	}
+	if contractSeriesSeen[info.Address] {
+		return info
+	}
+	if len(contractSeriesSeen) < limit {
+		contractSeriesSeen[info.Address] = true
+		return info
+	}
+	return &contracts.ContractInfo{Address: "other", Name: "other", Type: "other"}
 }
 
 func processBlockData(blockData interface{}, isoTimestamp time.Time) (string, error) {
@@ -369,6 +394,8 @@ func processTransactions(body map[string]interface{}, blockType string) error {
 								// add to cache
 								contractCache.Set(addr, contractInfo)
 							}
+
+							contractInfo = contractSeriesInfo(contractInfo)
 
 							if blockTypeMetricsEnabled && blockType != "" {
 								metrics.IncrementEVMContractTx(

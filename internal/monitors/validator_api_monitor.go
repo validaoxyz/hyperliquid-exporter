@@ -53,12 +53,12 @@ func updateValidatorMetrics(ctx context.Context, cfg config.Config) error {
 	notJailedStake := 0.0
 	activeStake := 0.0
 	inactiveStake := 0.0
-	mappingCount := 0
+
+	snapshot := make([]metrics.ValidatorSummarySnapshot, 0, len(summaries))
 
 	for _, summary := range summaries {
 		// register signer->val mapping (lowercase for consistency)
 		metrics.RegisterSignerMapping(strings.ToLower(summary.Signer), strings.ToLower(summary.Validator))
-		mappingCount++
 
 		// register the full validator addr for expansion
 		metrics.RegisterFullAddress(strings.ToLower(summary.Validator))
@@ -68,34 +68,31 @@ func updateValidatorMetrics(ctx context.Context, cfg config.Config) error {
 		// register val info (signer and name) for consensus metrics
 		metrics.RegisterValidatorInfo(strings.ToLower(summary.Validator), strings.ToLower(summary.Signer), summary.Name)
 
-		metrics.SetValidatorStake(summary.Validator, summary.Signer, summary.Name, summary.Stake)
+		snapshot = append(snapshot, metrics.ValidatorSummarySnapshot{
+			Validator: summary.Validator,
+			Signer:    summary.Signer,
+			Name:      summary.Name,
+			Stake:     summary.Stake,
+			Jailed:    summary.IsJailed,
+			Active:    summary.IsActive,
+		})
 
-		// update val jailed status
-		jailedStatus := 0.0
 		if summary.IsJailed {
-			jailedStatus = 1.0
 			jailedStake += summary.Stake
 		} else {
 			notJailedStake += summary.Stake
 		}
-		metrics.SetValidatorJailedStatus(summary.Validator, summary.Signer, summary.Name, jailedStatus)
-
-		// update active/inactive stake
 		if summary.IsActive {
 			activeStake += summary.Stake
 		} else {
 			inactiveStake += summary.Stake
 		}
-
-		// set active status
-		activeStatus := 0.0
-		if summary.IsActive {
-			activeStatus = 1.0
-		}
-		metrics.SetValidatorActiveStatus(summary.Validator, summary.Signer, summary.Name, activeStatus)
-
 		totalStake += summary.Stake
 	}
+
+	// reconcile the per-validator gauges as one snapshot so validators that
+	// left the set are removed instead of freezing at their last value
+	metrics.ReplaceValidatorSummaries(snapshot)
 
 	// update aggregate metrics
 	metrics.SetTotalStake(totalStake)

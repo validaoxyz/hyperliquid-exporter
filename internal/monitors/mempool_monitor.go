@@ -130,17 +130,17 @@ func readMempoolEvents(path string, offset int64) (int64, int, error) {
 	processed := 0
 	for {
 		line, err := reader.ReadBytes('\n')
-		if len(line) > 0 {
-			processMempoolLine(line)
-			offset += int64(len(line))
-			processed++
-		}
 		if err != nil {
 			if err == io.EOF {
+				// a partial trailing line stays unconsumed so a torn write
+				// is re-read complete on the next tick, never half-parsed
 				break
 			}
 			return offset, processed, err
 		}
+		processMempoolLine(line)
+		offset += int64(len(line))
+		processed++
 	}
 	return offset, processed, nil
 }

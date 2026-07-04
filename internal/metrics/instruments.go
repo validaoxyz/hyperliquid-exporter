@@ -59,7 +59,6 @@ var (
 	HLEVMGasLimitGauge          api.Float64ObservableGauge
 	HLEVMSGasUtilGauge          api.Float64ObservableGauge
 	HLEVMMaxPriorityFeeGauge    api.Float64ObservableGauge
-	HLEVMAccountCountGauge      api.Int64ObservableGauge
 	HLEVMLastHighGasBlockHeight api.Int64ObservableGauge
 	HLEVMLastHighGasBlockLimit  api.Int64ObservableGauge
 	HLEVMLastHighGasBlockUsed   api.Int64ObservableGauge
@@ -272,14 +271,6 @@ func createInstruments() error {
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create EVM contract transaction counter: %w", err)
-	}
-
-	HLEVMAccountCountGauge, err = meter.Int64ObservableGauge(
-		"hl_evm_account_count",
-		api.WithDescription("Total number of EVM accounts"),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create EVM account count gauge: %w", err)
 	}
 
 	// high gas limit block tracking metrics

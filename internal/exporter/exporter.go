@@ -25,7 +25,6 @@ func Start(ctx context.Context, cfg config.Config) {
 	updateErrCh := make(chan error, 1)
 	evmErrCh := make(chan error, 1)
 	evmTxsErrCh := make(chan error, 1)
-	evmAccountErrCh := make(chan error, 1)
 	validatorStatusErrCh := make(chan error, 1)
 	validatorIPErrCh := make(chan error, 1)
 	coreTxErrCh := make(chan error, 1)
@@ -95,9 +94,6 @@ func Start(ctx context.Context, cfg config.Config) {
 	if cfg.EnableEVM {
 		logger.InfoComponent("evm", "Initializing EVM monitor (using evm_block_and_receipts)...")
 		runMonitor("evm", func() { monitors.StartEVMMonitor(monitorCtx, cfg, evmErrCh) })
-
-		logger.InfoComponent("evm", "Initializing EVM Account monitor...")
-		runMonitor("evm_account", func() { monitors.StartEVMAccountMonitor(monitorCtx, cfg, evmAccountErrCh) })
 	}
 
 	logger.InfoComponent("consensus", "Initializing Validator Status monitor...")
@@ -286,9 +282,6 @@ func Start(ctx context.Context, cfg config.Config) {
 		case err := <-evmTxsErrCh:
 			// This channel is no longer used but kept for compatibility
 			logger.ErrorComponent("evm", "Legacy EVM Transactions Monitor error (should not happen): %v", err)
-		case err := <-evmAccountErrCh:
-			metrics.IncMonitorError("evm_account")
-			logger.ErrorComponent("evm", "EVM Account Monitor error: %v", err)
 		case err := <-validatorStatusErrCh:
 			metrics.IncMonitorError("validator_status")
 			logger.ErrorComponent("consensus", "Validator Status Monitor error: %v", err)

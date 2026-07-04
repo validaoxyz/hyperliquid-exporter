@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"fmt"
+	"time"
 
 	api "go.opentelemetry.io/otel/metric"
 )
@@ -28,14 +29,23 @@ func RegisterCallbacks() error {
 			}
 
 			// labeled values
+			now := float64(time.Now().Unix())
 			for instrument, values := range labeledValues {
+				// vote series store the last-vote unix timestamp; expose it
+				// as an age so the value keeps climbing while a validator
+				// is silent
+				voteAge := instrument == api.Observable(HLConsensusVoteTimeDiffGauge)
 				for _, v := range values {
+					val := v.value
+					if voteAge {
+						val = now - v.value
+					}
 					allLabels := append(v.labels, commonLabels...)
 					switch obs := instrument.(type) {
 					case api.Float64Observable:
-						o.ObserveFloat64(obs, v.value, api.WithAttributes(allLabels...))
+						o.ObserveFloat64(obs, val, api.WithAttributes(allLabels...))
 					case api.Int64Observable:
-						o.ObserveInt64(obs, int64(v.value), api.WithAttributes(allLabels...))
+						o.ObserveInt64(obs, int64(val), api.WithAttributes(allLabels...))
 					}
 				}
 			}
