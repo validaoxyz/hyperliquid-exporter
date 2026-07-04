@@ -114,6 +114,7 @@ func LoadConfig(flags *Flags) Config {
 
 	config := Config{
 		NodeHome:               nodeHome,
+		BinaryHome:             binaryHome,
 		NodeBinary:             nodeBinary,
 		Chain:                  flags.Chain,
 		EnableEVM:              flags.EnableEVM,

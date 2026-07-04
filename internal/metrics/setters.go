@@ -550,17 +550,6 @@ func SetEVMAccountCount(cnt int64) {
 	currentValues[HLEVMAccountCountGauge] = cnt
 }
 
-func IncrementTimeoutRounds(suspect string) {
-	metricsMutex.Lock()
-	defer metricsMutex.Unlock()
-
-	ctx := context.Background()
-	labels := []attribute.KeyValue{
-		attribute.String("suspect", suspect),
-	}
-	HLTimeoutRoundsCounter.Add(ctx, 1, api.WithAttributes(labels...))
-}
-
 // Core (l1) metrics setters (from replica data)
 
 func IncCoreTxTotal(actionType string, count int64) {

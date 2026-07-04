@@ -1,12 +1,12 @@
 package monitors
 
 import (
-	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
-	"os/exec"
-	"strings"
+	"path/filepath"
 	"time"
 
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
@@ -14,27 +14,34 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
-const (
-	downloadInterval = 30 * time.Minute
-)
+const updateCheckInterval = 30 * time.Minute
 
 var (
-	lastDownloadTime time.Time
-	cachedLatestHash string
-	cacheExpiry      time.Time
+	cachedLatestHash   string
+	cachedETag         string
+	localVisorHash     string
+	localVisorMtime    time.Time
+	visorMissingLogged bool
 )
 
+// StartUpdateChecker compares the LOCAL hl-visor build against the latest
+// hl-visor published on the Hyperliquid CDN and drives
+// hl_software_up_to_date from that pair.
+//
+// hl-visor is the binary operators manage; it swaps its hl-node child on
+// its own, so comparing the CDN visor against the local hl-node commit
+// (what an earlier version did) flags "outdated" whenever the child has
+// been auto-updated mid-release. The remote side is fetched with a
+// conditional request: as long as the CDN object's ETag is unchanged we
+// skip the download entirely.
 func StartUpdateChecker(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	goSafe("update_checker", func() {
-		// wait a bit for version monitor to run first
-		time.Sleep(2 * time.Second)
-
-		// run immediately on startup
 		if err := checkSoftwareUpdate(ctx, cfg); err != nil {
 			errCh <- fmt.Errorf("update checker error: %w", err)
 		}
+		metrics.MarkMonitorTick("update_checker")
 
-		ticker := time.NewTicker(30 * time.Minute)
+		ticker := time.NewTicker(updateCheckInterval)
 		defer ticker.Stop()
 
 		for {
@@ -45,84 +52,106 @@ func StartUpdateChecker(ctx context.Context, cfg config.Config, errCh chan<- err
 				if err := checkSoftwareUpdate(ctx, cfg); err != nil {
 					errCh <- fmt.Errorf("update checker error: %w", err)
 				}
+				metrics.MarkMonitorTick("update_checker")
 			}
 		}
 	})
 }
 
 func checkSoftwareUpdate(ctx context.Context, cfg config.Config) error {
-	// use cached value if still valid
-	if time.Now().Before(cacheExpiry) && cachedLatestHash != "" {
-		updateUpToDateStatus()
+	visorPath := filepath.Join(cfg.BinaryHome, "hl-visor")
+	info, err := os.Stat(visorPath)
+	if err != nil {
+		if !visorMissingLogged {
+			logger.InfoComponent("system",
+				"No hl-visor at %s; update check disabled (hl_software_up_to_date stays unset). Set BINARY_HOME if the visor lives elsewhere.", visorPath)
+			visorMissingLogged = true
+		}
 		return nil
 	}
 
-	// determine binary URL based on chain
-	var binaryURL string
-	if cfg.Chain == "mainnet" {
-		binaryURL = "https://binaries.hyperliquid.xyz/Mainnet/hl-visor"
-	} else {
-		binaryURL = "https://binaries.hyperliquid-testnet.xyz/Testnet/hl-visor"
+	if localVisorHash == "" || info.ModTime().After(localVisorMtime) {
+		commit, _, err := binaryVersionViaCopy(ctx, visorPath)
+		if err != nil {
+			return fmt.Errorf("local hl-visor version: %w", err)
+		}
+		localVisorHash = commit
+		localVisorMtime = info.ModTime()
 	}
 
-	// create temporary file for download
+	if err := refreshLatestVisorHash(ctx, cfg.Chain); err != nil {
+		return err
+	}
+
+	updateUpToDateStatus()
+	return nil
+}
+
+// refreshLatestVisorHash resolves the commit hash of the newest hl-visor on
+// the CDN. A stored ETag turns the periodic check into a 304 round-trip;
+// the full download+exec only happens when the CDN object actually changed.
+func refreshLatestVisorHash(ctx context.Context, chain string) error {
+	binaryURL := "https://binaries.hyperliquid-testnet.xyz/Testnet/hl-visor"
+	if chain == "mainnet" {
+		binaryURL = "https://binaries.hyperliquid.xyz/Mainnet/hl-visor"
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, binaryURL, nil)
+	if err != nil {
+		return fmt.Errorf("error building update request: %w", err)
+	}
+	if cachedETag != "" && cachedLatestHash != "" {
+		req.Header.Set("If-None-Match", cachedETag)
+	}
+
+	client := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("error fetching latest binary: %w", err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusNotModified:
+		return nil
+	case http.StatusOK:
+	default:
+		return fmt.Errorf("unexpected status %s fetching %s", resp.Status, binaryURL)
+	}
+
 	tmpFile, err := os.CreateTemp("", "hl-visor-*.tmp")
 	if err != nil {
 		return fmt.Errorf("error creating temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
-	tmpFile.Close()
-
-	// ensure cleanup
 	defer os.Remove(tmpPath)
 
-	// download binary to temp file
-	downloadCmd := exec.CommandContext(ctx, "curl", "-sSL", "-o", tmpPath, binaryURL)
-	if err := downloadCmd.Run(); err != nil {
+	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
+		tmpFile.Close()
 		return fmt.Errorf("error downloading latest binary: %w", err)
 	}
+	tmpFile.Close()
 
-	if err := os.Chmod(tmpPath, 0755); err != nil {
-		return fmt.Errorf("error changing permissions: %w", err)
+	commit, _, err := binaryVersionDirect(ctx, tmpPath)
+	if err != nil {
+		return fmt.Errorf("latest hl-visor version: %w", err)
 	}
 
-	// get version of the downloaded binary
-	versionCmd := exec.CommandContext(ctx, tmpPath, "--version")
-	var out bytes.Buffer
-	versionCmd.Stdout = &out
-
-	if err := versionCmd.Run(); err != nil {
-		return fmt.Errorf("error running version command: %w", err)
-	}
-
-	latestVersionOutput := out.String()
-	parts := strings.Split(latestVersionOutput, "|")
-	if len(parts) >= 3 {
-		commitLine := parts[0]
-		latestCommitParts := strings.Split(commitLine, " ")
-		if len(latestCommitParts) >= 2 {
-			cachedLatestHash = strings.TrimSpace(latestCommitParts[1])
-			cacheExpiry = time.Now().Add(downloadInterval)
-
-			updateUpToDateStatus()
-			return nil
-		}
-	}
-
-	return fmt.Errorf("unexpected version output format: %s", latestVersionOutput)
+	cachedLatestHash = commit
+	cachedETag = resp.Header.Get("ETag")
+	return nil
 }
 
 func updateUpToDateStatus() {
-	if currentCommitHash == "" {
-		// version monitor hasn't run yet, skip
+	if localVisorHash == "" || cachedLatestHash == "" {
 		return
 	}
 
-	if currentCommitHash == cachedLatestHash {
+	if localVisorHash == cachedLatestHash {
 		metrics.SetSoftwareUpToDate(true)
 	} else {
 		metrics.SetSoftwareUpToDate(false)
-		logger.InfoComponent("system", "Software is NOT up to date. Current: %s, Latest: %s",
-			currentCommitHash, cachedLatestHash)
+		logger.InfoComponent("system", "hl-visor is NOT up to date. Local: %s, Latest: %s",
+			localVisorHash, cachedLatestHash)
 	}
 }

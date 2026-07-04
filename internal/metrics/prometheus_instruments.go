@@ -589,49 +589,60 @@ var (
 // Validator-only additions.
 // =====================================================================
 
-// Per-validator consensus accumulator counters from
+// Consensus accumulator counters from
 // $NODE_HOME/data/accumulator_buckets/consensus/<bucket>/hourly/<date>/<hour>.
-// Each gauge holds the cumulative-since-source-start count; resets to 0
-// on hl-node restart. Modeled as gauges (not Prometheus counters) so the
-// restart-reset doesn't look like a counter regression to rate()/delta().
+// Each bucket line is {"time","n","delta"} written per ~30s flush window:
+// delta is the quantity accumulated in that window and n is the number of
+// accumulation events in it (n == delta only for CommittedBlocks, where
+// each block adds exactly 1). Neither field is cumulative, so the exporter
+// sums deltas into true Prometheus counters. Values are cumulative since
+// the exporter started observing; rate()/increase() are valid.
 var (
-	HLConsensusCommittedBlocks = promauto.NewGauge(prometheus.GaugeOpts{
+	HLConsensusCommittedBlocks = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "hl_consensus_committed_blocks",
-		Help: "Blocks committed by this validator's consensus accumulator since the hl-node process started. Cumulative gauge; resets on restart.",
+		Help: "Blocks committed by this validator since the exporter started observing. Counter; use rate().",
 	})
-	HLConsensusCommittedTxs = promauto.NewGauge(prometheus.GaugeOpts{
+	HLConsensusCommittedTxs = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "hl_consensus_committed_txs",
-		Help: "Total transactions committed by this validator since hl-node started.",
+		Help: "Transactions committed by this validator since the exporter started observing. Counter; use rate().",
 	})
-	HLConsensusCommittedTxBytes = promauto.NewGauge(prometheus.GaugeOpts{
+	HLConsensusCommittedTxBytes = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "hl_consensus_committed_tx_bytes",
-		Help: "Total bytes of committed transactions since hl-node started.",
+		Help: "Bytes of committed transactions since the exporter started observing. Counter; use rate().",
 	})
-	HLConsensusDroppedTxs = promauto.NewGauge(prometheus.GaugeOpts{
+	HLConsensusDroppedTxs = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "hl_consensus_dropped_txs",
-		Help: "Transactions dropped by this validator's mempool / consensus pipeline since hl-node started. Any non-zero rate is operator-actionable: the validator is shedding load.",
+		Help: "Transactions dropped by this validator's mempool / consensus pipeline since the exporter started observing. Any non-zero rate is operator-actionable: the validator is shedding load.",
 	})
-	HLConsensusRoundCatchup = promauto.NewGauge(prometheus.GaugeOpts{
+	HLConsensusRoundCatchup = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "hl_consensus_round_catchup",
-		Help: "Catch-up events (validator was behind and recovered) since hl-node started. Rate > 0 sustained = the validator is repeatedly falling behind.",
+		Help: "Catch-up events (validator was behind and recovered) since the exporter started observing. Sustained rate = the validator keeps falling behind.",
 	})
-	HLConsensusRoundQC = promauto.NewGauge(prometheus.GaugeOpts{
+	HLConsensusRoundQC = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "hl_consensus_round_qc",
-		Help: "Quorum Certificate-decided rounds since hl-node started. In a healthy network this tracks committed_blocks closely.",
+		Help: "Quorum Certificate rounds since the exporter started observing. In a healthy network this tracks committed_blocks closely.",
 	})
-	HLConsensusRoundTC = promauto.NewGauge(prometheus.GaugeOpts{
+	HLConsensusRoundTC = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "hl_consensus_round_tc",
-		Help: "Timeout Certificate rounds since hl-node started. View-change frequency; sustained rate > 0 = network instability.",
+		Help: "Timeout Certificate rounds (view changes) since the exporter started observing. Sustained rate = network instability.",
 	})
-	HLConsensusRPCRequestsRegistered = promauto.NewGauge(prometheus.GaugeOpts{
+	HLConsensusRPCRequestsRegistered = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "hl_consensus_rpc_requests_registered",
-		Help: "Validator-RPC requests registered (this validator served) since hl-node started.",
+		Help: "Validator-RPC requests served since the exporter started observing.",
 	})
-	HLConsensusRPCRequestsSent = promauto.NewGauge(prometheus.GaugeOpts{
+	HLConsensusRPCRequestsSent = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "hl_consensus_rpc_requests_sent",
-		Help: "Validator-RPC requests sent (this validator initiated) since hl-node started.",
+		Help: "Validator-RPC requests initiated since the exporter started observing.",
 	})
 )
+
+// Node-local jailed set parsed from the status stream's
+// current_jailed_validators field (data/node_logs/status). Faster than the
+// 5-minute validatorSummaries poll and works without internet access.
+var HLConsensusValidatorJailedLocal = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "hl_consensus_validator_jailed_local",
+	Help: "1 for each validator the local node currently reports jailed (node-local view, ~2min cadence). Series is removed when the validator unjails; join on the validator label for names.",
+}, []string{"validator"})
 
 // Replay-event tracking from $NODE_HOME/data/node_logs/replay/.
 // Each subdir is named "<height>_<iso>" and is created when the node

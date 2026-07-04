@@ -13,16 +13,54 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
-	"github.com/validaoxyz/hyperliquid-exporter/internal/utils"
 )
 
-type StatusData struct {
-	Timestamp string `json:"0"`
-	Data      struct {
-		HomeValidator string          `json:"home_validator"`
-		Round         int64           `json:"round"`
-		CurrentStakes [][]interface{} `json:"current_stakes"`
-	} `json:"1"`
+// statusStakeRows decodes the status stream's current_stakes field across
+// hl-node schema generations. Builds before 2026-07 wrote a bare array of
+// rows; builds since wrap the rows as {"validator_to_stake": [...]}. The
+// row element types also changed over time ([validator, signer] address
+// pairs before, [validator, stake] after), so callers must type-check
+// row[1] before using it.
+func statusStakeRows(raw json.RawMessage) [][]interface{} {
+	if len(raw) == 0 {
+		return nil
+	}
+	var rows [][]interface{}
+	if err := json.Unmarshal(raw, &rows); err == nil {
+		return rows
+	}
+	var wrapped struct {
+		ValidatorToStake [][]interface{} `json:"validator_to_stake"`
+	}
+	if err := json.Unmarshal(raw, &wrapped); err == nil {
+		return wrapped.ValidatorToStake
+	}
+	return nil
+}
+
+// registerStakeRows registers whatever identity information the stake rows
+// carry: validator addresses always, signer->validator mappings only on the
+// legacy [validator, signer] shape. Returns the number of signer mappings
+// registered and a local signer->validator map for immediate lookups.
+func registerStakeRows(rows [][]interface{}) (int, map[string]string) {
+	signerToValidator := make(map[string]string)
+	count := 0
+	for _, row := range rows {
+		if len(row) < 2 {
+			continue
+		}
+		validatorAddr, _ := row[0].(string)
+		if validatorAddr == "" {
+			continue
+		}
+		metrics.RegisterFullAddress(strings.ToLower(validatorAddr))
+		if signerAddr, ok := row[1].(string); ok && signerAddr != "" {
+			signerToValidator[strings.ToLower(signerAddr)] = strings.ToLower(validatorAddr)
+			metrics.RegisterSignerMapping(strings.ToLower(signerAddr), strings.ToLower(validatorAddr))
+			count++
+		}
+	}
+	return count, signerToValidator
 }
 
 // state tracking for reducing log spam
@@ -30,6 +68,31 @@ var (
 	lastValidatorAddress string
 	lastMappingSource    string // "local", "api", or ""
 )
+
+// jailedLocalPrev tracks the validators currently published on
+// hl_consensus_validator_jailed_local so unjailed ones are removed.
+// Only touched from the validator_status goroutine.
+var jailedLocalPrev = map[string]bool{}
+
+// publishJailedLocal reconciles the node-local jailed set gauge to the
+// current status line. An empty list clears every series.
+func publishJailedLocal(current []string) {
+	seen := make(map[string]bool, len(current))
+	for _, v := range current {
+		v = strings.ToLower(v)
+		if v == "" {
+			continue
+		}
+		seen[v] = true
+		metrics.HLConsensusValidatorJailedLocal.WithLabelValues(v).Set(1)
+	}
+	for v := range jailedLocalPrev {
+		if !seen[v] {
+			metrics.HLConsensusValidatorJailedLocal.DeleteLabelValues(v)
+		}
+	}
+	jailedLocalPrev = seen
+}
 
 func StartValidatorStatusMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	goSafe("validator_status", func() {
@@ -54,6 +117,7 @@ func StartValidatorStatusMonitor(ctx context.Context, cfg config.Config, errCh c
 					logger.ErrorComponent("consensus", "Validator Status Monitor error: %v", err)
 					errCh <- err
 				}
+				metrics.MarkMonitorTick("validator_status")
 			}
 		}
 	})
@@ -69,7 +133,7 @@ func readValidatorStatus(nodeHome string) error {
 		return nil
 	}
 
-	latestFile, err := utils.GetLatestFile(statusDir)
+	latestFile, err := latestHourlyFile(statusDir)
 	if err != nil {
 		metrics.SetIsValidator(false)
 		metrics.SetValidatorAddress("")
@@ -121,31 +185,22 @@ func processValidatorStatusLine(line string) error {
 
 	// parse the second element (index 1) which contains the actual data
 	var data struct {
-		HomeValidator string          `json:"home_validator"`
-		Round         int64           `json:"round"`
-		CurrentStakes [][]interface{} `json:"current_stakes"`
+		HomeValidator           string          `json:"home_validator"`
+		Round                   int64           `json:"round"`
+		CurrentStakes           json.RawMessage `json:"current_stakes"`
+		CurrentJailedValidators []string        `json:"current_jailed_validators"`
 	}
 
 	if err := json.Unmarshal(rawData[1], &data); err != nil {
 		return fmt.Errorf("failed to parse validator data: %w", err)
 	}
 
-	// first, build signer->validator mapping from current_stakes
-	signerToValidator := make(map[string]string)
-	for _, row := range data.CurrentStakes {
-		if len(row) < 2 {
-			continue
-		}
-		validatorAddr, _ := row[0].(string)
-		signerAddr, _ := row[1].(string)
-		if validatorAddr != "" && signerAddr != "" {
-			signerToValidator[strings.ToLower(signerAddr)] = strings.ToLower(validatorAddr)
-			metrics.RegisterSignerMapping(strings.ToLower(signerAddr), strings.ToLower(validatorAddr))
+	// register identity info from current_stakes; signer mappings only
+	// exist on the legacy row shape, newer builds rely on the API mapping
+	_, signerToValidator := registerStakeRows(statusStakeRows(data.CurrentStakes))
 
-			// register the full validator address for expansion
-			metrics.RegisterFullAddress(strings.ToLower(validatorAddr))
-		}
-	}
+	// node-local jailed set (present on 2026+ builds; empty list clears)
+	publishJailedLocal(data.CurrentJailedValidators)
 
 	// now handle home_validator (which is actually the signer address)
 	if data.HomeValidator != "" {
@@ -215,6 +270,9 @@ func ReadLastLine(filePath string) (string, error) {
 
 	var lastLine string
 	scanner := bufio.NewScanner(file)
+	// status lines carry per-validator maps for the whole validator set and
+	// regularly exceed bufio's default 64 KiB token limit
+	scanner.Buffer(make([]byte, 1<<20), 8<<20)
 	for scanner.Scan() {
 		lastLine = scanner.Text()
 	}
@@ -232,7 +290,7 @@ func GetValidatorStatus(nodeHome string) (string, bool) {
 		return "", false
 	}
 
-	latestFile, err := utils.GetLatestFile(statusDir)
+	latestFile, err := latestHourlyFile(statusDir)
 	if err != nil {
 		// only log debug since missing status files are normal for non-validator nodes
 		logger.DebugComponent("consensus", "Error finding latest status file: %v", err)
@@ -268,7 +326,7 @@ func GetValidatorStatus(nodeHome string) (string, bool) {
 
 	var data struct {
 		HomeValidator string          `json:"home_validator"`
-		CurrentStakes [][]interface{} `json:"current_stakes"`
+		CurrentStakes json.RawMessage `json:"current_stakes"`
 	}
 
 	if err := json.Unmarshal(rawData[1], &data); err != nil {
@@ -280,18 +338,22 @@ func GetValidatorStatus(nodeHome string) (string, bool) {
 		return "", false
 	}
 
-	// build signer->validator mapping from current_stakes
+	// legacy rows map our signer to the validator address directly
 	homeSigner := strings.ToLower(data.HomeValidator)
-	for _, row := range data.CurrentStakes {
+	for _, row := range statusStakeRows(data.CurrentStakes) {
 		if len(row) < 2 {
 			continue
 		}
 		validatorAddr, _ := row[0].(string)
-		signerAddr, _ := row[1].(string)
-		if strings.ToLower(signerAddr) == homeSigner && validatorAddr != "" {
-			// found the mapping for our signer
+		signerAddr, ok := row[1].(string)
+		if ok && strings.ToLower(signerAddr) == homeSigner && validatorAddr != "" {
 			return validatorAddr, true
 		}
+	}
+
+	// newer builds don't carry signer info here; try the API-fed mapping
+	if validatorAddr, ok := metrics.GetValidatorForSigner(homeSigner); ok {
+		return validatorAddr, true
 	}
 
 	// if mapping not found, return signer as validator
@@ -312,7 +374,7 @@ func PopulateSignerMappings(nodeHome string) error {
 		return nil
 	}
 
-	latestFile, err := utils.GetLatestFile(statusDir)
+	latestFile, err := latestHourlyFile(statusDir)
 	if err != nil {
 		logger.WarningComponent("consensus", "Error finding latest status file for mapping population: %v", err)
 		return nil // non-fatal, monitors will populate mappings later
@@ -335,7 +397,7 @@ func PopulateSignerMappings(nodeHome string) error {
 	}
 
 	var data struct {
-		CurrentStakes [][]interface{} `json:"current_stakes"`
+		CurrentStakes json.RawMessage `json:"current_stakes"`
 	}
 
 	if err := json.Unmarshal(rawData[1], &data); err != nil {
@@ -343,23 +405,9 @@ func PopulateSignerMappings(nodeHome string) error {
 		return nil
 	}
 
-	// populate all signer->validator mappings
-	count := 0
-	for _, row := range data.CurrentStakes {
-		if len(row) < 2 {
-			continue
-		}
-		validatorAddr, _ := row[0].(string)
-		signerAddr, _ := row[1].(string)
-		if validatorAddr != "" && signerAddr != "" {
-			metrics.RegisterSignerMapping(strings.ToLower(signerAddr), strings.ToLower(validatorAddr))
-
-			// register the full validator address for expansion
-			metrics.RegisterFullAddress(strings.ToLower(validatorAddr))
-			count++
-		}
-	}
-
+	// populate signer->validator mappings; on the newer stake-row shape
+	// there are none here and the API monitor covers it instead
+	count, _ := registerStakeRows(statusStakeRows(data.CurrentStakes))
 	logger.InfoComponent("consensus", "Pre-populated %d signer->validator mappings from local status file", count)
 	return nil
 }

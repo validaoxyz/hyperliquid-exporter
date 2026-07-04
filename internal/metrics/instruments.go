@@ -10,7 +10,6 @@ import (
 var (
 	// counters consensus
 	HLConsensusProposerCounter api.Int64Counter
-	HLTimeoutRoundsCounter     api.Int64Counter
 
 	// counters Core
 	HLCoreTxCounter              api.Int64Counter
@@ -455,14 +454,6 @@ func createInstruments() error {
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create metal parse duration gauge: %w", err)
-	}
-
-	HLTimeoutRoundsCounter, err = meter.Int64Counter(
-		"hl_timeout_rounds_total",
-		api.WithDescription("Total number of timeout rounds"),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create timeout rounds counter: %w", err)
 	}
 
 	// replica commands metrics

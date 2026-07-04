@@ -1,7 +1,6 @@
 package metrics
 
 import (
-	"runtime"
 	"sync"
 	"time"
 
@@ -30,8 +29,6 @@ var (
 	currentValues = make(map[api.Observable]interface{})
 	labeledValues = make(map[api.Observable]map[string]labeledValue)
 	callbacks     []api.Registration
-	// add cleanup ticker for labeledValues
-	cleanupTicker *time.Ticker
 )
 
 // TODO commonLabels holds the common labels to be added to all metrics
@@ -116,53 +113,10 @@ func initValidatorInfoCache() {
 	}
 }
 
-// start periodic cleanup of metric maps
-func StartMetricsCleanup() {
-	if cleanupTicker != nil {
-		return
-	}
-
-	cleanupTicker = time.NewTicker(30 * time.Second) // Reduced from 5 minutes to 30 seconds
-	go func() {
-		for range cleanupTicker.C {
-			cleanupLabeledValues()
-			// also trigger a manual GC after cleanup to free memory more aggressively
-			runtime.GC()
-		}
-	}()
-}
-
-// stop periodic cleanup
-func StopMetricsCleanup() {
-	if cleanupTicker != nil {
-		cleanupTicker.Stop()
-		cleanupTicker = nil
-	}
-}
-
-// remove old entries from labeledValues map
-func cleanupLabeledValues() {
-	metricsMutex.Lock()
-	defer metricsMutex.Unlock()
-
-	// keep a reasonable number of labeled values per metric
-	const maxLabelsPerMetric = 100 // reduced from 1000 to 100
-
-	for metric, labels := range labeledValues {
-		if len(labels) > maxLabelsPerMetric {
-			// create new map with limited size
-			newLabels := make(map[string]labeledValue)
-			count := 0
-
-			// keep the most recent entries (this is a simple approach)
-			for k, v := range labels {
-				if count < maxLabelsPerMetric {
-					newLabels[k] = v
-					count++
-				}
-			}
-
-			labeledValues[metric] = newLabels
-		}
-	}
-}
+// Note: there is deliberately no periodic truncation of labeledValues.
+// A previous version capped every labeled family at 100 series and evicted
+// by Go map iteration order (i.e. at random), which silently dropped
+// per-validator series on networks with more than 100 validators. Series
+// lifecycle is instead handled where the semantics are known: snapshot
+// reconciles (ReplaceValidatorLatencyEMA, ReplaceValidatorSummaries) and
+// per-monitor TTL housekeeping.

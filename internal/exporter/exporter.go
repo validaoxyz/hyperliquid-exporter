@@ -245,10 +245,6 @@ func Start(ctx context.Context, cfg config.Config) {
 	// start memory monitoring
 	runMonitor("memory", func() { metrics.StartMemoryMonitoring(monitorCtx) })
 
-	// start metrics cleanup to prevent unbounded map growth
-	metrics.StartMetricsCleanup()
-	defer metrics.StopMetricsCleanup()
-
 	// publish exporter build_info once and refresh the per-monitor health
 	// snapshot every 10s. Background goroutine so the values stay current
 	// without blocking the main error loop.
