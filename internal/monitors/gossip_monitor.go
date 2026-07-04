@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -12,16 +13,24 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
-	"github.com/validaoxyz/hyperliquid-exporter/internal/utils"
 )
 
 const (
 	gossipPollInterval = 30 * time.Second
 )
 
+// gossipTailBytes bounds how much of the hour-file each tick re-reads.
+// Only the newest "child_peers status" line matters and those arrive about
+// once a minute, so half a MiB of tail is plenty.
+const gossipTailBytes = 512 * 1024
+
 type GossipMonitor struct {
 	config    *config.Config
 	gossipDir string
+
+	// size gate: skip the tick when the hour-file didn't grow
+	lastPath string
+	lastSize int64
 }
 
 type PeerInfo struct {
@@ -109,13 +118,41 @@ func (m *GossipMonitor) processGossipFile(filePath string) error {
 	}
 	defer file.Close()
 
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to stat gossip file: %w", err)
+	}
+
+	// the hour-file only grows; skip the tick when nothing was appended
+	if filePath == m.lastPath && info.Size() == m.lastSize {
+		return nil
+	}
+
+	// only the newest "child_peers status" line matters, so reading the
+	// tail is enough and avoids re-parsing the whole hour every 30s
+	seeked := false
+	if info.Size() > gossipTailBytes {
+		if _, err := file.Seek(info.Size()-gossipTailBytes, io.SeekStart); err != nil {
+			return fmt.Errorf("failed to seek gossip file: %w", err)
+		}
+		seeked = true
+	}
+
 	// track the latest peer status
 	var verifiedCount, unverifiedCount int64
 	var lastUpdateTime time.Time
 
 	// read line by line
 	scanner := bufio.NewScanner(file)
+	// child_peers lines list every connected peer and can pass 64 KiB
+	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
+	skipFirst := seeked
 	for scanner.Scan() {
+		if skipFirst {
+			// the first line after a mid-file seek is almost surely partial
+			skipFirst = false
+			continue
+		}
 		line := scanner.Bytes()
 
 		// parse JSON array
@@ -196,6 +233,8 @@ func (m *GossipMonitor) processGossipFile(filePath string) error {
 		return fmt.Errorf("scanner error: %w", err)
 	}
 
+	m.lastPath, m.lastSize = filePath, info.Size()
+
 	if !lastUpdateTime.IsZero() {
 		metrics.SetP2PNonValPeerConnections(true, verifiedCount)
 		metrics.SetP2PNonValPeerConnections(false, unverifiedCount)
@@ -208,27 +247,7 @@ func (m *GossipMonitor) processGossipFile(filePath string) error {
 	return nil
 }
 
-// processes the latest gossip log file (kept for compatibility)
-func (m *GossipMonitor) processLatestGossipFile() error {
-	filePath, err := m.getLatestGossipLogFile()
-	if err != nil {
-		return fmt.Errorf("failed to get latest gossip file: %w", err)
-	}
-	return m.processGossipFile(filePath)
-}
-
 // returns the path to the latest gossip log file
 func (m *GossipMonitor) getLatestGossipLogFile() (string, error) {
-	// get today's directory
-	today := time.Now().Format("20060102")
-	todayDir := filepath.Join(m.gossipDir, today)
-
-	// check if today's directory exists
-	if _, err := os.Stat(todayDir); os.IsNotExist(err) {
-		// fallback to getting the latest file in the gossip directory
-		return utils.GetLatestFile(m.gossipDir)
-	}
-
-	// get latest file in today's directory
-	return utils.GetLatestFile(todayDir)
+	return latestHourlyFile(m.gossipDir)
 }

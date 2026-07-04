@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
@@ -66,10 +67,34 @@ func InitMemoryMetrics(meter metric.Meter) error {
 	return nil
 }
 
-// callback function that collects memory stats
-func collectMemoryStats(ctx context.Context, observer metric.Observer) error {
+var (
+	memStatsMu     sync.RWMutex
+	cachedMemStats runtime.MemStats
+	memStatsValid  bool
+)
+
+// snapshotMemStats refreshes the cached MemStats and returns the fresh
+// value. ReadMemStats stops the world, so it must only run on the slow
+// periodic path, never inside the scrape callback.
+func snapshotMemStats() runtime.MemStats {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
+	memStatsMu.Lock()
+	cachedMemStats = m
+	memStatsValid = true
+	memStatsMu.Unlock()
+	return m
+}
+
+// callback function that reports the cached memory stats on scrape
+func collectMemoryStats(observer metric.Observer) error {
+	memStatsMu.RLock()
+	m, ok := cachedMemStats, memStatsValid
+	memStatsMu.RUnlock()
+	if !ok {
+		// the first scrape can beat the memory monitor's first tick
+		m = snapshotMemStats()
+	}
 
 	// record heap objects
 	observer.ObserveInt64(HLGoHeapObjects, int64(m.HeapObjects))
@@ -90,6 +115,8 @@ func StartMemoryMonitoring(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
+	snapshotMemStats()
+
 	lastGoroutineCount := runtime.NumGoroutine()
 	goroutineGrowthWarnings := 0
 
@@ -98,8 +125,7 @@ func StartMemoryMonitoring(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			var m runtime.MemStats
-			runtime.ReadMemStats(&m)
+			m := snapshotMemStats()
 
 			currentGoroutines := runtime.NumGoroutine()
 

@@ -111,17 +111,17 @@ func StartValidatorIPMonitor(ctx context.Context, cfg config.Config, errCh chan<
 }
 
 func processLatestState(ctx context.Context, stateDir string, currentFile *string, reader *abci.Reader) error {
-	latestFile, err := utils.GetLatestFile(stateDir)
+	latestFile, err := utils.LatestDateNumericFile(stateDir)
 	if err != nil {
 		logger.ErrorComponent("consensus", "Error finding latest state file in dir %s: %v", stateDir, err)
 		return fmt.Errorf("error finding latest state file: %w", err)
 	}
 
-	logger.InfoComponent("consensus", "Processing state file: %s", latestFile)
-
 	if latestFile == *currentFile {
 		return nil
 	}
+
+	logger.InfoComponent("consensus", "Processing state file: %s", latestFile)
 
 	// use native ABCI reader to extract validator profiles
 	profiles, err := reader.ReadValidatorProfiles(latestFile)

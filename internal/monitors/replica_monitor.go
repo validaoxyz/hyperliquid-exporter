@@ -1,11 +1,7 @@
 package monitors
 
 import (
-	"bufio"
 	"context"
-	"fmt"
-	"io"
-	"os"
 	"sync"
 	"time"
 
@@ -64,11 +60,6 @@ func (m *ReplicaMonitor) Start(ctx context.Context) error {
 
 // continuously streams from the latest replica file
 func (m *ReplicaMonitor) streamLoop(ctx context.Context) {
-	var currentFile string
-	var file *os.File
-	var fileReader *bufio.Reader
-	isFirstRun := true
-
 	// wait a short time at startup to ensure signer mappings are populated
 	// prevents early blocks from having incorrect validator labels
 	select {
@@ -78,147 +69,60 @@ func (m *ReplicaMonitor) streamLoop(ctx context.Context) {
 		logger.DebugComponent("replica", "Initial startup delay complete, beginning processing")
 	}
 
-	defer func() {
-		if file != nil {
-			file.Close()
-		}
-	}()
+	blocksProcessed := 0
+	var totalParseTime float64
+	var parseCount int
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			// check for latest file
-			latestFile, err := utils.GetLatestFile(m.dataDir)
+	tailStream(ctx, tailStreamOpts{
+		component:   "replica",
+		name:        "replica cmds",
+		resolve:     func() (string, error) { return utils.LatestReplicaFile(m.dataDir) },
+		rescanEvery: 2 * time.Second,
+		eofSleep:    25 * time.Millisecond,
+		bufSize:     m.bufferSize,
+		onLine: func(line string) {
+			if len(line) == 0 || line == "\n" {
+				return
+			}
+
+			m.mu.Lock()
+			m.verificationStats.LinesProcessed++
+			m.mu.Unlock()
+
+			parseStart := time.Now()
+			block, err := m.parser.ParseBlockFromLine([]byte(line))
+			totalParseTime += time.Since(parseStart).Seconds()
+			parseCount++
 			if err != nil {
-				logger.ErrorComponent("replica", "Error finding latest replica file: %v", err)
-				time.Sleep(1 * time.Second)
-				continue
+				logger.DebugComponent("replica", "Error parsing JSON: %v", err)
+				m.mu.Lock()
+				m.verificationStats.ParseErrors++
+				m.mu.Unlock()
+				return
 			}
 
-			// if a new file is found, switch to it
-			if latestFile != currentFile {
-				logger.InfoComponent("replica", "Switching to replica file: %s", latestFile)
-
-				// clean up old file
-				if file != nil {
-					file.Close()
-				}
-
-				file, err = os.Open(latestFile)
-				if err != nil {
-					logger.ErrorComponent("replica", "Error opening replica file: %v", err)
-					time.Sleep(1 * time.Second)
-					continue
-				}
-
-				if isFirstRun {
-					// on first run, seek to the end of the file
-					_, err = file.Seek(0, io.SeekEnd)
-					if err != nil {
-						logger.ErrorComponent("replica", "Error seeking to end of file: %v", err)
-						file.Close()
-						file = nil
-						time.Sleep(1 * time.Second)
-						continue
-					}
-					logger.InfoComponent("replica", "First run: starting to stream from the end of file %s", latestFile)
-				} else {
-					logger.InfoComponent("replica", "Not first run: reading entire file %s", latestFile)
-				}
-
-				fileReader = bufio.NewReaderSize(file, m.bufferSize)
-				currentFile = latestFile
-				isFirstRun = false
+			blockMetrics, err := m.parser.ExtractMetrics(block)
+			if err != nil {
+				logger.DebugComponent("replica", "error extracting metrics: %v", err)
+				m.parser.ReturnBlock(block)
+				return
 			}
+			m.parser.ReturnBlock(block)
 
-			// read and process lines
-			if fileReader != nil {
-				blocksProcessed := 0
-				var totalParseTime float64
-				var parseCount int
-
-				for {
-					line, err := fileReader.ReadString('\n')
-					if err != nil {
-						if err == io.EOF {
-							// end of file reached, wait a bit before checking for more data
-							if blocksProcessed > 0 {
-								logger.DebugComponent("replica", "Processed %d blocks, waiting for more data", blocksProcessed)
-								blocksProcessed = 0
-							}
-							// update parse duration metric with average
-							if parseCount > 0 {
-								avgParseTime := totalParseTime / float64(parseCount)
-								metrics.SetReplicaParseDuration(avgParseTime)
-							}
-							time.Sleep(10 * time.Millisecond)
-							break // break from inner loop, continue outer loop
-						}
-						// for other errors, log and break to outer loop
-						logger.ErrorComponent("replica", "Error reading line: %v", err)
-						break
-					}
-
-					// skip empty lines
-					if len(line) == 0 || line == "\n" {
-						continue
-					}
-
-					// update line count
-					m.mu.Lock()
-					m.verificationStats.LinesProcessed++
-					m.mu.Unlock()
-
-					// parse the JSON line into a replica block using the parser's pool
-					parseStart := time.Now()
-					block, err := m.parser.ParseBlockFromLine([]byte(line))
-					parseTime := time.Since(parseStart).Seconds()
-					totalParseTime += parseTime
-					parseCount++
-					if err != nil {
-						logger.DebugComponent("replica", "Error parsing JSON: %v", err)
-						m.mu.Lock()
-						m.verificationStats.ParseErrors++
-						m.mu.Unlock()
-						continue
-					}
-
-					// extract metrics from the block
-					metrics, err := m.parser.ExtractMetrics(block)
-					if err != nil {
-						logger.DebugComponent("replica", "error extracting metrics: %v", err)
-						// return block to pool even on error
-						m.parser.ReturnBlock(block)
-						continue
-					}
-
-					// return block to pool after processing
-					m.parser.ReturnBlock(block)
-
-					// process the metrics
-					m.processBlock(metrics)
-					blocksProcessed++
-					if blocksProcessed%100 == 0 {
-						logger.InfoComponent("replica", "Processed %d blocks so far", blocksProcessed)
-					}
-				}
+			m.processBlock(blockMetrics)
+			blocksProcessed++
+		},
+		onIdle: func() {
+			if blocksProcessed > 0 {
+				logger.DebugComponent("replica", "Processed %d blocks, waiting for more data", blocksProcessed)
+				blocksProcessed = 0
 			}
-		}
-	}
-}
-
-// processes a single replica block
-func (m *ReplicaMonitor) processReplicaBlock(block *replica.ReplicaBlock) error {
-	// extract metrics from the block
-	metrics, err := m.parser.ExtractMetrics(block)
-	if err != nil {
-		return fmt.Errorf("extract metrics: %w", err)
-	}
-
-	m.processBlock(metrics)
-	return nil
+			if parseCount > 0 {
+				metrics.SetReplicaParseDuration(totalParseTime / float64(parseCount))
+				totalParseTime, parseCount = 0, 0
+			}
+		},
+	})
 }
 
 // processes metrics from a single block

@@ -93,7 +93,7 @@ func defaultNodeHome() string {
 
 // buildCSV reads the latest state file and returns the ip,moniker,address,vp CSV.
 func buildCSV(stateDir string) ([]byte, error) {
-	latest, err := utils.GetLatestFile(stateDir)
+	latest, err := utils.LatestDateNumericFile(stateDir)
 	if err != nil {
 		return nil, fmt.Errorf("find latest state: %w", err)
 	}
@@ -253,8 +253,8 @@ func (c *csvCache) get() []byte {
 
 // runBackfill walks day directories ascending from `since`, decodes one
 // representative (highest-height) state file per day, and writes a daily
-// validator-count JSONL row. It avoids utils.GetLatestFile (which walks the
-// whole tree on every call) by listing day dirs directly.
+// validator-count JSONL row. It lists day dirs directly rather than
+// resolving the newest leaf per iteration.
 func runBackfill(stateDir, since, outPath string, sleep time.Duration) error {
 	start, err := time.Parse("2006-01-02", since)
 	if err != nil {

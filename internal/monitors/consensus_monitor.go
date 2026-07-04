@@ -1,13 +1,10 @@
 package monitors
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +15,6 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
-	"github.com/validaoxyz/hyperliquid-exporter/internal/utils"
 )
 
 // stores QC participation data for sliding window calc
@@ -63,6 +59,9 @@ type ConsensusMonitor struct {
 
 	// block round tracking
 	lastBlockRound int64
+
+	// throttle for the participation-rate recalculation
+	lastQCRecalc time.Time
 
 	// connectivity tracking
 	disconnectedSet   map[string]bool
@@ -227,102 +226,44 @@ func (m *ConsensusMonitor) monitorConsensusLogs(ctx context.Context, errCh chan<
 
 	logger.InfoComponent("consensus", "Starting comprehensive consensus monitoring in: %s", consensusDir)
 
-	var currentFile string
-	var file *os.File
-	var fileReader *bufio.Reader
-	isFirstRun := true
-
-	for {
-		select {
-		case <-ctx.Done():
-			if file != nil {
-				file.Close()
+	var okLines, errLines int64
+	tailStream(ctx, tailStreamOpts{
+		component:   "consensus",
+		name:        "consensus stream",
+		resolve:     m.getLatestConsensusLogFile,
+		rescanEvery: 2 * time.Second,
+		eofSleep:    50 * time.Millisecond,
+		bufSize:     1 << 20,
+		onLine: func(line string) {
+			if err := m.processConsensusLine(line); err != nil {
+				logger.DebugComponent("consensus", "Error processing consensus line: %v", err)
+				errLines++
+			} else {
+				okLines++
 			}
-			return
-		default:
-			// find the latest log file
-			latestFile, err := m.getLatestConsensusLogFile()
-			if err != nil {
-				if errors.Is(err, os.ErrNotExist) {
-					time.Sleep(10 * time.Second)
-					continue
-				}
-				errCh <- fmt.Errorf("error finding latest consensus log file: %w", err)
-				time.Sleep(5 * time.Second)
-				continue
+		},
+		// the per-line metric/stat updates used to take the global metrics
+		// mutex several times per line at full consensus volume; flush once
+		// per EOF pause instead
+		onIdle: func() {
+			if errLines > 0 {
+				metrics.AddConsensusMonitorErrors("consensus", errLines)
+				m.statsMutex.Lock()
+				m.verificationStats.ParseErrors += errLines
+				m.statsMutex.Unlock()
+				errLines = 0
 			}
-
-			if latestFile == "" {
-				time.Sleep(10 * time.Second)
-				continue
+			if okLines > 0 {
+				metrics.AddConsensusMonitorLines("consensus", okLines)
+				metrics.SetConsensusMonitorLastProcessed("consensus", time.Now().Unix())
+				m.statsMutex.Lock()
+				m.verificationStats.LinesProcessed += okLines
+				m.verificationStats.LastProcessedAt = time.Now()
+				m.statsMutex.Unlock()
+				okLines = 0
 			}
-
-			// switch to new file if needed
-			if latestFile != currentFile {
-				if file != nil {
-					file.Close()
-					file = nil
-					fileReader = nil
-				}
-
-				file, err = os.Open(latestFile)
-				if err != nil {
-					errCh <- fmt.Errorf("error opening consensus log file: %w", err)
-					time.Sleep(1 * time.Second)
-					continue
-				}
-
-				// skip to end on first run
-				if isFirstRun {
-					_, err = file.Seek(0, io.SeekEnd)
-					if err != nil {
-						errCh <- fmt.Errorf("error seeking to end of file: %w", err)
-						file.Close()
-						file = nil
-						time.Sleep(1 * time.Second)
-						continue
-					}
-					logger.InfoComponent("consensus", "First run: starting to stream from the end of file %s", latestFile)
-					isFirstRun = false
-				} else {
-					logger.InfoComponent("consensus", "Not first run: reading entire file %s", latestFile)
-				}
-
-				fileReader = bufio.NewReader(file)
-				currentFile = latestFile
-			}
-
-			// read and process lines
-			if fileReader != nil {
-				for {
-					line, err := fileReader.ReadString('\n')
-					if err != nil {
-						if err == io.EOF {
-							time.Sleep(10 * time.Millisecond)
-							break
-						}
-						errCh <- fmt.Errorf("error reading consensus log: %w", err)
-						break
-					}
-
-					if err := m.processConsensusLine(line); err != nil {
-						logger.DebugComponent("consensus", "Error processing consensus line: %v", err)
-						metrics.IncrementConsensusMonitorErrors("consensus")
-						m.statsMutex.Lock()
-						m.verificationStats.ParseErrors++
-						m.statsMutex.Unlock()
-					} else {
-						metrics.IncrementConsensusMonitorLines("consensus")
-						metrics.SetConsensusMonitorLastProcessed("consensus", time.Now().Unix())
-						m.statsMutex.Lock()
-						m.verificationStats.LinesProcessed++
-						m.verificationStats.LastProcessedAt = time.Now()
-						m.statsMutex.Unlock()
-					}
-				}
-			}
-		}
-	}
+		},
+	})
 }
 
 // processes a single line from consensus logs
@@ -550,8 +491,13 @@ func (m *ConsensusMonitor) processBlockRaw(blockData json.RawMessage) error {
 		// add to sliding window for participation rate calculation
 		m.addQCWindowEntry(block.QC.Signers)
 
-		// calculate and update participation rates
-		m.updateQCParticipationRates()
+		// recalculating participation re-emits every validator under the
+		// global metrics mutex; at ~64ms block cadence doing that per block
+		// is pure lock churn. A 2s gate keeps the panel fresh enough.
+		if time.Since(m.lastQCRecalc) >= 2*time.Second {
+			m.updateQCParticipationRates()
+			m.lastQCRecalc = time.Now()
+		}
 	}
 
 	if len(block.TC) > 0 {
@@ -636,7 +582,7 @@ func (m *ConsensusMonitor) loadValidatorMappings() error {
 // returns the path to the latest consensus log file
 func (m *ConsensusMonitor) getLatestConsensusLogFile() (string, error) {
 	consensusDir := filepath.Join(m.config.NodeHome, "data", "node_logs", "consensus", "hourly")
-	return utils.GetLatestFile(consensusDir)
+	return latestHourlyFile(consensusDir)
 }
 
 // addQCWindowEntry adds a new QC entry to the sliding window
@@ -788,88 +734,34 @@ func (m *ConsensusMonitor) monitorStatusLogs(ctx context.Context, errCh chan<- e
 
 	logger.InfoComponent("consensus", "Starting status log monitoring in: %s", statusDir)
 
-	var currentFile string
-	var fileReader *bufio.Reader
-	isFirstRun := true
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			// find latest log file
-			latestFile, err := utils.GetLatestFile(statusDir)
-			if err != nil {
-				if errors.Is(err, os.ErrNotExist) {
-					time.Sleep(10 * time.Second)
-					continue
-				}
-				errCh <- fmt.Errorf("error finding latest status log file: %w", err)
-				time.Sleep(5 * time.Second)
-				continue
+	var okLines, errLines int64
+	tailStream(ctx, tailStreamOpts{
+		component:   "consensus",
+		name:        "status stream",
+		resolve:     func() (string, error) { return latestHourlyFile(statusDir) },
+		rescanEvery: 5 * time.Second,
+		eofSleep:    250 * time.Millisecond,
+		bufSize:     1 << 20,
+		onLine: func(line string) {
+			if err := m.processStatusLine(line); err != nil {
+				logger.DebugComponent("consensus", "Error processing status line: %v", err)
+				errLines++
+			} else {
+				okLines++
 			}
-
-			if latestFile == "" {
-				time.Sleep(10 * time.Second)
-				continue
+		},
+		onIdle: func() {
+			if errLines > 0 {
+				metrics.AddConsensusMonitorErrors("status", errLines)
+				errLines = 0
 			}
-
-			// switch to new file if needed
-			if latestFile != currentFile {
-				if fileReader != nil {
-					fileReader = nil
-				}
-
-				file, err := os.Open(latestFile)
-				if err != nil {
-					errCh <- fmt.Errorf("error opening status log file: %w", err)
-					time.Sleep(1 * time.Second)
-					continue
-				}
-
-				// skip to end on first run
-				if isFirstRun {
-					_, err = file.Seek(0, io.SeekEnd)
-					if err != nil {
-						errCh <- fmt.Errorf("error seeking to end of file: %w", err)
-						file.Close()
-						time.Sleep(1 * time.Second)
-						continue
-					}
-					logger.InfoComponent("consensus", "First run: starting to stream status from the end of file %s", latestFile)
-					isFirstRun = false
-				} else {
-					logger.InfoComponent("consensus", "Not first run: reading entire status file %s", latestFile)
-				}
-
-				fileReader = bufio.NewReader(file)
-				currentFile = latestFile
+			if okLines > 0 {
+				metrics.AddConsensusMonitorLines("status", okLines)
+				metrics.SetConsensusMonitorLastProcessed("status", time.Now().Unix())
+				okLines = 0
 			}
-
-			// read and process lines
-			if fileReader != nil {
-				for {
-					line, err := fileReader.ReadString('\n')
-					if err != nil {
-						if err == io.EOF {
-							time.Sleep(10 * time.Millisecond)
-							break
-						}
-						errCh <- fmt.Errorf("error reading status log: %w", err)
-						break
-					}
-
-					if err := m.processStatusLine(line); err != nil {
-						logger.DebugComponent("consensus", "Error processing status line: %v", err)
-						metrics.IncrementConsensusMonitorErrors("status")
-					} else {
-						metrics.IncrementConsensusMonitorLines("status")
-						metrics.SetConsensusMonitorLastProcessed("status", time.Now().Unix())
-					}
-				}
-			}
-		}
-	}
+		},
+	})
 }
 
 // processStatusLine processes a single line from status logs

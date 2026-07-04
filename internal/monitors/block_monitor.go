@@ -1,11 +1,9 @@
 package monitors
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,25 +54,22 @@ func StartBlockMonitor(ctx context.Context, cfg config.Config, errCh chan<- erro
 	if fastExists || slowExists {
 		logger.InfoComponent("core", "Detected new dual-state block time directories")
 		if fastExists {
-			go monitorBlockState(ctx, cfg, errCh, "fast", "node_fast_block_times")
+			goSafe("block", func() { monitorBlockState(ctx, cfg, "fast", "node_fast_block_times") })
 		}
 		if slowExists {
-			go monitorBlockState(ctx, cfg, errCh, "slow", "node_slow_block_times")
+			goSafe("block", func() { monitorBlockState(ctx, cfg, "slow", "node_slow_block_times") })
 		}
 	} else if oldExists {
 		// fallback to old single-directory format for backward compatibility
 		logger.InfoComponent("core", "Using legacy single block_times directory (node not yet upgraded)")
-		go monitorLegacyBlockState(ctx, cfg, errCh)
+		goSafe("block", func() { monitorLegacyBlockState(ctx, cfg) })
 	} else {
 		logger.WarningComponent("core", "No block time directories found - block monitoring disabled")
 	}
 }
 
-func monitorBlockState(ctx context.Context, cfg config.Config, errCh chan<- error, stateType string, dirName string) {
+func monitorBlockState(ctx context.Context, cfg config.Config, stateType string, dirName string) {
 	blockTimeDir := filepath.Join(cfg.NodeHome, "data", dirName)
-	var currentFile string
-	var fileReader *bufio.Reader
-	isFirstRun := true
 
 	logger.InfoComponent("core", "Starting %s state block monitor for directory: %s", stateType, blockTimeDir)
 
@@ -83,80 +78,25 @@ func monitorBlockState(ctx context.Context, cfg config.Config, errCh chan<- erro
 		return
 	}
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			// check for new files
-			latestFile, err := utils.GetLatestFile(blockTimeDir)
-			if err != nil {
-				errCh <- fmt.Errorf("error finding latest %s block time file: %w", stateType, err)
-				time.Sleep(1 * time.Second)
-				continue
+	tailStream(ctx, tailStreamOpts{
+		component:   "core",
+		name:        stateType + " block times",
+		resolve:     func() (string, error) { return utils.LatestFlatFile(blockTimeDir) },
+		rescanEvery: 2 * time.Second,
+		eofSleep:    250 * time.Millisecond,
+		onLine: func(line string) {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				return
 			}
-
-			// if a new file is found, switch to it
-			if latestFile != currentFile {
-				logger.InfoComponent("core", "Switching to new %s block time file: %s", stateType, latestFile)
-				if fileReader != nil {
-					fileReader = nil // allow the old file to be garbage collected
-				}
-				file, err := os.Open(latestFile)
-				if err != nil {
-					errCh <- fmt.Errorf("error opening new %s block time file: %w", stateType, err)
-					time.Sleep(1 * time.Second)
-					continue
-				}
-
-				if isFirstRun {
-					// on first run, seek to the end of the file
-					_, err = file.Seek(0, io.SeekEnd)
-					if err != nil {
-						errCh <- fmt.Errorf("error seeking to end of file: %w", err)
-						file.Close()
-						time.Sleep(1 * time.Second)
-						continue
-					}
-					logger.InfoComponent("core", "First run: starting to stream %s state from the end of file %s", stateType, latestFile)
-				} else {
-					logger.InfoComponent("core", "Not first run: reading entire %s state file %s", stateType, latestFile)
-				}
-
-				fileReader = bufio.NewReader(file)
-				currentFile = latestFile
-				isFirstRun = false
+			if err := parseBlockTimeLine(line, stateType); err != nil {
+				logger.DebugComponent("core", "Skipping unparseable %s block time line: %v", stateType, err)
 			}
-
-			// read and process lines
-			for {
-				line, err := fileReader.ReadString('\n')
-				if err != nil {
-					if err == io.EOF {
-						// end of file reached, wait a bit before checking for more data
-						time.Sleep(10 * time.Millisecond)
-						break
-					}
-					errCh <- fmt.Errorf("error reading from %s block time file: %w", stateType, err)
-					break
-				}
-				// Skip empty lines
-				line = strings.TrimSpace(line)
-				if line == "" {
-					continue
-				}
-
-				if err := parseBlockTimeLine(ctx, line, stateType); err != nil {
-					// Skip invalid lines silently - these are likely partial writes
-					// The next read cycle will get the complete line
-					logger.DebugComponent("core", "Skipping potentially incomplete %s block time line: %v", stateType, err)
-				}
-			}
-		}
-	}
+		},
+	})
 }
 
-func parseBlockTimeLine(ctx context.Context, line string, stateType string) error {
+func parseBlockTimeLine(line string, stateType string) error {
 	var data map[string]interface{}
 	if err := json.Unmarshal([]byte(line), &data); err != nil {
 		return fmt.Errorf("error parsing block time line: %w", err)
@@ -243,92 +183,38 @@ func parseBlockTimeLine(ctx context.Context, line string, stateType string) erro
 	return nil
 }
 
-func monitorLegacyBlockState(ctx context.Context, cfg config.Config, errCh chan<- error) {
+func monitorLegacyBlockState(ctx context.Context, cfg config.Config) {
 	blockTimeDir := filepath.Join(cfg.NodeHome, "data", "block_times")
-	var currentFile string
-	var fileReader *bufio.Reader
-	isFirstRun := true
 
 	logger.InfoComponent("core", "Starting legacy block monitor for directory: %s", blockTimeDir)
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			// check for new files
-			latestFile, err := utils.GetLatestFile(blockTimeDir)
-			if err != nil {
-				errCh <- fmt.Errorf("error finding latest block time file: %w", err)
-				time.Sleep(1 * time.Second)
-				continue
+	tailStream(ctx, tailStreamOpts{
+		component: "core",
+		name:      "legacy block times",
+		// old releases used either hourly/<date>/<h> nesting or flat date
+		// files depending on version; try nested first
+		resolve: func() (string, error) {
+			if p, err := latestHourlyFile(blockTimeDir); err == nil {
+				return p, nil
 			}
-
-			// if a new file is found, switch to it
-			if latestFile != currentFile {
-				logger.InfoComponent("core", "Switching to new block time file: %s", latestFile)
-				if fileReader != nil {
-					fileReader = nil // allow the old file to be garbage collected
-				}
-				file, err := os.Open(latestFile)
-				if err != nil {
-					errCh <- fmt.Errorf("error opening new block time file: %w", err)
-					time.Sleep(1 * time.Second)
-					continue
-				}
-
-				if isFirstRun {
-					// on first run, seek to the end of the file
-					_, err = file.Seek(0, io.SeekEnd)
-					if err != nil {
-						errCh <- fmt.Errorf("error seeking to end of file: %w", err)
-						file.Close()
-						time.Sleep(1 * time.Second)
-						continue
-					}
-					logger.InfoComponent("core", "First run: starting to stream from the end of file %s", latestFile)
-				} else {
-					logger.InfoComponent("core", "Not first run: reading entire file %s", latestFile)
-				}
-
-				fileReader = bufio.NewReader(file)
-				currentFile = latestFile
-				isFirstRun = false
+			return utils.LatestFlatFile(blockTimeDir)
+		},
+		rescanEvery: 2 * time.Second,
+		eofSleep:    250 * time.Millisecond,
+		onLine: func(line string) {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				return
 			}
-
-			// read and process lines
-			if fileReader != nil {
-				for {
-					line, err := fileReader.ReadString('\n')
-					if err != nil {
-						if err == io.EOF {
-							// eof reached, wait a lil before checking for more data
-							time.Sleep(10 * time.Millisecond)
-							break
-						}
-						errCh <- fmt.Errorf("error reading from block time file: %w", err)
-						break
-					}
-					// Skip empty lines
-					line = strings.TrimSpace(line)
-					if line == "" {
-						continue
-					}
-
-					// process without state label for legacy format
-					if err := parseLegacyBlockTimeLine(ctx, line); err != nil {
-						// Skip invalid lines silently - these are likely partial writes
-						// The next read cycle will get the complete line
-						logger.DebugComponent("core", "Skipping potentially incomplete legacy block time line: %v", err)
-					}
-				}
+			if err := parseLegacyBlockTimeLine(line); err != nil {
+				logger.DebugComponent("core", "Skipping unparseable legacy block time line: %v", err)
 			}
-		}
-	}
+		},
+	})
 }
 
 // for backward compatibility
-func parseLegacyBlockTimeLine(ctx context.Context, line string) error {
+func parseLegacyBlockTimeLine(line string) error {
 	var data map[string]interface{}
 	if err := json.Unmarshal([]byte(line), &data); err != nil {
 		return fmt.Errorf("error parsing block time line: %w", err)

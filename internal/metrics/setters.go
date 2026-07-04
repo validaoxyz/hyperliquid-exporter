@@ -1015,20 +1015,25 @@ func SetConsensusMonitorLastProcessed(monitorType string, timestamp int64) {
 	}
 }
 
-func IncrementConsensusMonitorLines(monitorType string) {
+// AddConsensusMonitorLines adds a batch of processed-line counts. The
+// consensus stream runs thousands of lines between EOF pauses; batching
+// keeps the per-line hot path free of metric calls.
+func AddConsensusMonitorLines(monitorType string, n int64) {
 	ctx := context.Background()
 	labels := []attribute.KeyValue{
 		attribute.String("monitor_type", monitorType),
 	}
-	HLConsensusMonitorLinesCounter.Add(ctx, 1, api.WithAttributes(labels...))
+	HLConsensusMonitorLinesCounter.Add(ctx, n, api.WithAttributes(labels...))
 }
 
-func IncrementConsensusMonitorErrors(monitorType string) {
+// AddConsensusMonitorErrors adds a batch of error counts; see
+// AddConsensusMonitorLines.
+func AddConsensusMonitorErrors(monitorType string, n int64) {
 	ctx := context.Background()
 	labels := []attribute.KeyValue{
 		attribute.String("monitor_type", monitorType),
 	}
-	HLConsensusMonitorErrorsCounter.Add(ctx, 1, api.WithAttributes(labels...))
+	HLConsensusMonitorErrorsCounter.Add(ctx, n, api.WithAttributes(labels...))
 }
 
 // validator latency metric setters

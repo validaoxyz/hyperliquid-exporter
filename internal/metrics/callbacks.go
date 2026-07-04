@@ -40,8 +40,8 @@ func RegisterCallbacks() error {
 				}
 			}
 
-			// collect memory stats
-			if err := collectMemoryStats(ctx, o); err != nil {
+			// collect memory stats (cached; no stop-the-world on scrape)
+			if err := collectMemoryStats(o); err != nil {
 				return err
 			}
 

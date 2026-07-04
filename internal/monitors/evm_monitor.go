@@ -2,11 +2,9 @@
 package monitors
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -18,7 +16,6 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/contracts"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
-	"github.com/validaoxyz/hyperliquid-exporter/internal/utils"
 )
 
 var (
@@ -94,82 +91,26 @@ func StartEVMMonitor(ctx context.Context, cfg config.Config, errCh chan<- error)
 			// continue running directory might be created later
 		}
 
-		var currentFilePath string
-		var fileReader *bufio.Reader
-		isFirstRun := true
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				time.Sleep(1 * time.Second)
-
-				// find the latest file in the directory
-				latestFile, err := utils.GetLatestFile(evmDataDir)
-				if err != nil {
-					errCh <- fmt.Errorf("error finding latest EVM data file: %w", err)
-					continue
+		tailStream(ctx, tailStreamOpts{
+			component:   "evm",
+			name:        "evm block+receipts",
+			resolve:     func() (string, error) { return latestHourlyFile(evmDataDir) },
+			rescanEvery: 2 * time.Second,
+			eofSleep:    250 * time.Millisecond,
+			onLine: func(line string) {
+				if err := processEVMBlockAndReceiptsLine(line); err != nil {
+					errCh <- fmt.Errorf("error processing EVM data line: %w", err)
 				}
-
-				// switch to new file if needed
-				if latestFile != currentFilePath {
-					logger.InfoComponent("evm", "Switching to new EVM data file: %s", latestFile)
-
-					if fileReader != nil {
-						fileReader = nil
-					}
-
-					file, err := os.Open(latestFile)
-					if err != nil {
-						errCh <- fmt.Errorf("error opening EVM data file: %w", err)
-						continue
-					}
-
-					// on first run start from eof (tail mode)
-					// on subsequent runs read entire file
-					if isFirstRun {
-						_, err = file.Seek(0, io.SeekEnd)
-						if err != nil {
-							errCh <- fmt.Errorf("error seeking to end of file: %w", err)
-							file.Close()
-							continue
-						}
-						logger.InfoComponent("evm", "First run: starting to stream from the end of file %s", latestFile)
-						isFirstRun = false
-					} else {
-						logger.InfoComponent("evm", "Not first run: reading entire file %s", latestFile)
-					}
-
-					fileReader = bufio.NewReader(file)
-					currentFilePath = latestFile
-				}
-
-				// process lines from the file
-				if fileReader != nil {
-					for {
-						line, err := fileReader.ReadString('\n')
-						if err != nil {
-							if err == io.EOF {
-								break
-							}
-							errCh <- fmt.Errorf("error reading from EVM data file: %w", err)
-							break
-						}
-
-						if err := processEVMBlockAndReceiptsLine(line); err != nil {
-							errCh <- fmt.Errorf("error processing EVM data line: %w", err)
-							continue
-						}
-					}
-				}
-			}
-		}
+			},
+		})
 	})
 }
 
 func processEVMBlockAndReceiptsLine(line string) error {
-	var data []interface{}
+	// element 2 (receipts) regularly dwarfs the block payload and nothing
+	// downstream reads it, so it must never be materialized: decode the
+	// outer array lazily and only unmarshal elements 0 and 1
+	var data []json.RawMessage
 	if err := json.Unmarshal([]byte(line), &data); err != nil {
 		return fmt.Errorf("error unmarshaling EVM data: %w", err)
 	}
@@ -179,9 +120,9 @@ func processEVMBlockAndReceiptsLine(line string) error {
 	}
 
 	// element 0: ISO timestamp (e.g., "2025-05-27T12:00:00.602996317")
-	timestampStr, ok := data[0].(string)
-	if !ok {
-		return fmt.Errorf("invalid timestamp format: expected string, got %T", data[0])
+	var timestampStr string
+	if err := json.Unmarshal(data[0], &timestampStr); err != nil {
+		return fmt.Errorf("invalid timestamp format: %w", err)
 	}
 
 	timestamp, err := time.Parse(time.RFC3339Nano, timestampStr)
@@ -191,29 +132,13 @@ func processEVMBlockAndReceiptsLine(line string) error {
 		timestamp = time.Time{}
 	}
 
-	blockData := data[1]
-
-	var receiptsData interface{}
-	if len(data) >= 3 {
-		receiptsData = data[2]
-		logger.DebugComponent("evm", "Line has receipts data: %v", receiptsData != nil)
-	} else {
-		logger.DebugComponent("evm", "Line has no receipts data (only %d elements)", len(data))
+	var blockData interface{}
+	if err := json.Unmarshal(data[1], &blockData); err != nil {
+		return fmt.Errorf("invalid block data: %w", err)
 	}
 
-	blockType, err := processBlockData(blockData, timestamp)
-	if err != nil {
+	if _, err := processBlockData(blockData, timestamp); err != nil {
 		return fmt.Errorf("error processing block data: %w", err)
-	}
-
-	if receiptsData != nil {
-		logger.DebugComponent("evm", "Processing receipts data")
-		if err := processReceiptsData(receiptsData, blockType); err != nil {
-			// Log but don't fail - receipts might be null for empty blocks
-			logger.Debug("error processing receipts: %v", err)
-		}
-	} else {
-		logger.DebugComponent("evm", "No receipts data to process")
 	}
 
 	return nil
@@ -489,24 +414,6 @@ func processTransactions(body map[string]interface{}, blockType string) error {
 			metrics.SetEVMMaxPriorityFeeGwei(maxPriorityFeeGwei)
 		}
 	}
-
-	return nil
-}
-
-func processReceiptsData(receiptsData interface{}, blockType string) error {
-	receiptsMap, ok := receiptsData.(map[string]interface{})
-	if !ok {
-		logger.DebugComponent("evm", "Receipts data is not a map: %T", receiptsData)
-		return fmt.Errorf("invalid receipts format")
-	}
-
-	receipts, ok := receiptsMap["receipts"].([]interface{})
-	if !ok {
-		logger.DebugComponent("evm", "No receipts array in receipts map")
-		return nil // No receipts
-	}
-
-	logger.DebugComponent("evm", "Found %d receipts (likely 0 due to null data)", len(receipts))
 
 	return nil
 }

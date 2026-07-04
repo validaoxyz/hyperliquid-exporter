@@ -16,7 +16,7 @@ import (
 )
 
 var (
-	currentCommitHash  string
+	currentCommitHash   string
 	lastNodeBinaryMtime time.Time
 )
 

@@ -1,12 +1,9 @@
 package monitors
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -36,77 +33,23 @@ func StartProposalMonitor(ctx context.Context, cfg config.Config, errCh chan<- e
 		logger.InfoComponent("consensus", "Proposal monitor started - tracking block proposers")
 
 		logsDir := filepath.Join(cfg.NodeHome, "data/replica_cmds")
-		var currentFile string
-		var fileReader *bufio.Reader
-		isFirstRun := true
 
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				// check for new files
-				latestFile, err := utils.GetLatestFile(logsDir)
-				if err != nil {
-					errCh <- fmt.Errorf("error finding latest proposal log file: %w", err)
-					time.Sleep(1 * time.Second)
-					continue
+		tailStream(ctx, tailStreamOpts{
+			component:   "consensus",
+			name:        "proposal stream",
+			resolve:     func() (string, error) { return utils.LatestReplicaFile(logsDir) },
+			rescanEvery: 2 * time.Second,
+			eofSleep:    250 * time.Millisecond,
+			onLine: func(line string) {
+				if err := parseProposalLine(line); err != nil {
+					logger.DebugComponent("consensus", "proposal parse skip: %v", err)
 				}
-
-				// if a new file is found, switch to it
-				if latestFile != currentFile {
-					logger.InfoComponent("consensus", "Switching to new proposal log file: %s", latestFile)
-					if fileReader != nil {
-						fileReader = nil // allow the old file to be garbage collected
-					}
-					file, err := os.Open(latestFile)
-					if err != nil {
-						errCh <- fmt.Errorf("error opening new proposal log file: %w", err)
-						time.Sleep(1 * time.Second)
-						continue
-					}
-
-					if isFirstRun {
-						// on first run, seek to the end of the file
-						_, err = file.Seek(0, io.SeekEnd)
-						if err != nil {
-							errCh <- fmt.Errorf("error seeking to end of file: %w", err)
-							file.Close()
-							time.Sleep(1 * time.Second)
-							continue
-						}
-						logger.InfoComponent("consensus", "First run: starting to stream from the end of file %s", latestFile)
-					} else {
-						logger.InfoComponent("consensus", "Not first run: reading entire file %s", latestFile)
-					}
-
-					fileReader = bufio.NewReader(file)
-					currentFile = latestFile
-					isFirstRun = false
-				}
-
-				// read and process lines
-				for {
-					line, err := fileReader.ReadString('\n')
-					if err != nil {
-						if err == io.EOF {
-							// end of file reached, wait a bit before checking for more data
-							time.Sleep(100 * time.Millisecond)
-							break
-						}
-						errCh <- fmt.Errorf("error reading from proposal log file: %w", err)
-						break
-					}
-					if err := parseProposalLine(ctx, line); err != nil {
-						errCh <- fmt.Errorf("error parsing proposal line: %w", err)
-					}
-				}
-			}
-		}
+			},
+		})
 	})
 }
 
-func parseProposalLine(ctx context.Context, line string) error {
+func parseProposalLine(line string) error {
 	// quick sanity-skip: logs sometimes emit plain-text lines; ignore if line doesn't start with '[' or '{'
 	if len(line) == 0 || (line[0] != '[' && line[0] != '{') {
 		return nil

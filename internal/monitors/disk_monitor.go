@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
@@ -12,10 +13,10 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
-// diskPollInterval is intentionally slow: walking NODE_HOME can be many
-// thousands of inodes and a full disk doesn't change in seconds. statfs
-// is cheap but the recursive size walk dominates.
-const diskPollInterval = 60 * time.Second
+// diskPollInterval is intentionally slow: walking NODE_HOME visits hundreds
+// of thousands of inodes on a long-lived node and a full disk doesn't change
+// in seconds. statfs is cheap but the recursive size walk dominates.
+const diskPollInterval = 120 * time.Second
 
 type fsStats struct {
 	Bavail uint64
@@ -93,23 +94,30 @@ func tickDisk(nodeHome string) {
 		logger.DebugComponent("disk", "statfs failed: %v", err)
 	}
 
-	total := dirSize(nodeHome)
+	total, bySub := walkSizes(nodeHome, trackedSubdirs)
 	metrics.HLNodeDiskUsedBytes.Set(float64(total))
 
 	for _, sub := range trackedSubdirs {
-		path := filepath.Join(nodeHome, sub)
-		size := dirSize(path)
-		metrics.HLNodeDiskSubdirBytes.WithLabelValues(sub).Set(float64(size))
+		metrics.HLNodeDiskSubdirBytes.WithLabelValues(sub).Set(float64(bySub[sub]))
 	}
 }
 
-// dirSize sums the on-disk sizes of all regular files under root. Returns 0
-// on any error (missing directory, permission denied, etc) — callers treat
-// "doesn't exist" the same as "0 bytes" which is appropriate for
-// the tracked-subdirs allowlist.
-func dirSize(root string) int64 {
+// walkSizes walks nodeHome once, attributing every regular file's size to
+// the grand total and to each tracked subdir prefix it lives under.
+// Prefixes nest (hyperliquid_data contains hyperliquid_data/db_hub/Evm), so
+// a file adds to every matching bucket. The single pass replaces the
+// previous walk-per-subdir approach, which re-traversed the biggest trees
+// up to three times per tick. Unreadable entries are skipped silently and
+// missing tracked dirs simply report 0.
+func walkSizes(nodeHome string, subs []string) (int64, map[string]int64) {
+	bySub := make(map[string]int64, len(subs))
+	prefixes := make([]string, len(subs))
+	for i, sub := range subs {
+		prefixes[i] = filepath.Join(nodeHome, sub) + string(filepath.Separator)
+	}
+
 	var total int64
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	_ = filepath.WalkDir(nodeHome, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // skip unreadable entries silently
 		}
@@ -120,8 +128,14 @@ func dirSize(root string) int64 {
 		if err != nil {
 			return nil
 		}
-		total += info.Size()
+		size := info.Size()
+		total += size
+		for i, prefix := range prefixes {
+			if strings.HasPrefix(path, prefix) {
+				bySub[subs[i]] += size
+			}
+		}
 		return nil
 	})
-	return total
+	return total, bySub
 }
