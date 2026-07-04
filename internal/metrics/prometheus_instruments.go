@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"runtime"
+	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -370,25 +371,58 @@ var (
 // Phase-B --probe-info-endpoint flag.
 // =====================================================================
 
+var ()
+
+// Info-probe instruments register lazily via InitInfoProbeInstruments: with
+// package-init registration, every node NOT running the probe exported
+// hl_info_endpoint_up == 0 forever, tripping any `== 0` alert even though
+// the probe is opt-in (--probe-info-endpoint).
 var (
-	HLInfoEndpointUp = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "hl_info_endpoint_up",
-		Help: "1 if the last POST :3001/info returned HTTP 200 with a non-empty body, 0 otherwise.",
-	})
-	HLInfoEndpointLatencySeconds = promauto.NewHistogram(prometheus.HistogramOpts{
-		Name:    "hl_info_endpoint_latency_seconds",
-		Help:    "Latency of the active POST :3001/info {\"type\":\"meta\"} probe.",
-		Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
-	})
-	HLInfoEndpointLastSuccessSeconds = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "hl_info_endpoint_last_success_seconds",
-		Help: "Unix timestamp of the last successful info-endpoint probe.",
-	})
-	HLInfoEndpointFailuresTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "hl_info_endpoint_failures_total",
-		Help: "Cumulative count of failed info-endpoint probes since exporter start.",
-	})
+	HLInfoEndpointUp                 prometheus.Gauge
+	HLInfoEndpointLatencySeconds     prometheus.Histogram
+	HLInfoEndpointLastSuccessSeconds prometheus.Gauge
+	HLInfoEndpointFailuresTotal      prometheus.Counter
+	HLInfoExchangeStatusDeltaSeconds prometheus.Gauge
+
+	infoProbeInstrumentsOnce    sync.Once
+	exchangeDeltaInstrumentOnce sync.Once
 )
+
+// InitInfoProbeInstruments registers the probe family. Called from
+// StartInfoProbeMonitor so the series exist only when probing is enabled.
+func InitInfoProbeInstruments() {
+	infoProbeInstrumentsOnce.Do(func() {
+		HLInfoEndpointUp = promauto.NewGauge(prometheus.GaugeOpts{
+			Name: "hl_info_endpoint_up",
+			Help: "1 if the last POST :3001/info returned HTTP 200 with a non-empty body, 0 otherwise. Absent (not 0) when --probe-info-endpoint is off.",
+		})
+		HLInfoEndpointLatencySeconds = promauto.NewHistogram(prometheus.HistogramOpts{
+			Name:    "hl_info_endpoint_latency_seconds",
+			Help:    "Latency of the active POST :3001/info {\"type\":\"meta\"} probe.",
+			Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+		})
+		HLInfoEndpointLastSuccessSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+			Name: "hl_info_endpoint_last_success_seconds",
+			Help: "Unix timestamp of the last successful info-endpoint probe.",
+		})
+		HLInfoEndpointFailuresTotal = promauto.NewCounter(prometheus.CounterOpts{
+			Name: "hl_info_endpoint_failures_total",
+			Help: "Cumulative count of failed info-endpoint probes since exporter start.",
+		})
+	})
+}
+
+// InitExchangeStatusDeltaInstrument registers the exchangeStatus timestamp
+// delta gauge on first successful parse, so nodes whose info endpoint
+// doesn't serve the field never export a misleading 0.
+func InitExchangeStatusDeltaInstrument() {
+	exchangeDeltaInstrumentOnce.Do(func() {
+		HLInfoExchangeStatusDeltaSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+			Name: "hl_info_exchange_status_delta_seconds",
+			Help: "local_wall_clock - exchangeStatus.time reported by the node's info endpoint, in seconds. Sustained growth means the node serves stale exchange state.",
+		})
+	})
+}
 
 // =====================================================================
 // Phase-C --extended-metrics flag.
@@ -804,3 +838,120 @@ var (
 		Help: "Unix timestamp at which the named peer IP was first observed in the current peer-set lifetime.",
 	}, []string{"ip"})
 )
+
+// Jailing-config gauges register on first successful read of
+// heartbeat_jailing_config.json (validator-only file): registering at init
+// would export threshold=0 on every other node, which reads as "jail at 0s".
+var (
+	HLNodeJailingThresholdSeconds prometheus.Gauge
+	HLNodeJailingDryRun           prometheus.Gauge
+
+	jailingInstrumentsOnce sync.Once
+)
+
+// InitJailingConfigInstruments registers the jailing-config pair; see above.
+func InitJailingConfigInstruments() {
+	jailingInstrumentsOnce.Do(func() {
+		HLNodeJailingThresholdSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+			Name: "hl_node_jailing_threshold_seconds",
+			Help: "latency_ema_jail_threshold from heartbeat_jailing_config.json: the heartbeat-ack EMA above which this node votes to jail a peer. Compare against hl_consensus_validator_latency_ema_seconds for per-peer headroom.",
+		})
+		HLNodeJailingDryRun = promauto.NewGauge(prometheus.GaugeOpts{
+			Name: "hl_node_jailing_dry_run",
+			Help: "1 if heartbeat_jailing_config.json has dry_run=true (jail decisions are logged, not enforced), 0 if enforcement is live.",
+		})
+	})
+}
+
+// Per-block consensus round advance from replica data. Round - ParentRound
+// is exactly 1 on a healthy chain; higher values are skipped (timed-out)
+// rounds, so bucketed counts give the true timeout-round rate.
+var (
+	HLCoreRoundAdvance = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "hl_core_round_advance",
+		Help:    "Distribution of round - parent_round per block (1 = healthy; >1 = skipped/timed-out rounds).",
+		Buckets: []float64{1, 2, 3, 4, 5, 10, 25, 50, 100},
+	})
+	HLCoreHardforkVersion = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "hl_core_hardfork_version",
+		Help: "Hardfork version stamped on the latest replica block. Steps up when a hardfork activates; explains restart clusters on version pushes. Requires --replica-metrics.",
+	})
+)
+
+// Extra per-validator facts from the validatorSummaries poll. Vectors carry
+// no series until populated, so they are safe to register unconditionally.
+var (
+	validatorInfoLabels = []string{"validator", "signer", "name"}
+
+	HLConsensusValidatorRecentBlocks = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hl_consensus_validator_recent_blocks",
+		Help: "nRecentBlocks from validatorSummaries: blocks this validator proposed in the API's recent window. 0 on a jailed or stalled validator.",
+	}, validatorInfoLabels)
+	HLConsensusValidatorCommissionRate = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hl_consensus_validator_commission_rate",
+		Help: "Validator commission as a fraction (0.04 = 4%).",
+	}, validatorInfoLabels)
+	HLConsensusValidatorUnjailableAfter = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hl_consensus_validator_unjailable_after_seconds",
+		Help: "Unix timestamp (ms epoch normalized to seconds) after which a jailed validator may unjailSelf. Series exists only while jailed; the countdown is (value - time()).",
+	}, validatorInfoLabels)
+	HLConsensusValidatorUptimeFraction = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hl_consensus_validator_uptime_fraction",
+		Help: "uptimeFraction from validatorSummaries stats, per period (day/week/month).",
+	}, []string{"validator", "signer", "name", "period"})
+	HLConsensusValidatorPredictedApr = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hl_consensus_validator_predicted_apr",
+		Help: "predictedApr from validatorSummaries stats, per period (day/week/month), as a fraction.",
+	}, []string{"validator", "signer", "name", "period"})
+)
+
+// Tokio scheduling-pressure counters previously decoded and dropped.
+// Same cumulative-since-source-start gauge semantics as the rest of the
+// hl_tokio_task_* family.
+var (
+	HLTokioTaskScheduledTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hl_tokio_task_scheduled_total",
+		Help: "Cumulative times the task was scheduled (woken) since the source process started.",
+	}, []string{"task"})
+	HLTokioTaskScheduledSecondsTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hl_tokio_task_scheduled_seconds_total",
+		Help: "Cumulative time the task spent waiting scheduled-but-not-polled since source start. Rising faster than poll time = runtime starvation.",
+	}, []string{"task"})
+	HLTokioTaskFastPollsTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hl_tokio_task_fast_polls_total",
+		Help: "Cumulative fast polls since source start.",
+	}, []string{"task"})
+	HLTokioTaskShortDelaysTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hl_tokio_task_short_delays_total",
+		Help: "Cumulative short scheduling delays since source start (complements long_delays).",
+	}, []string{"task"})
+)
+
+// Whether a crit location is suppressed by the operator's
+// crit_msg_ignore.json. Alert rules should exclude ignored locations.
+var HLNodeCritLocationIgnored = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "hl_node_crit_location_ignored",
+	Help: "1 if hl-node marks this crit location is_ignored (operator-suppressed via crit_msg_ignore.json), else 0.",
+}, []string{"file", "line"})
+
+// Total TCP connection count across non-validator gossip peers (a peer can
+// hold several connections; hl_p2p_non_val_peers_total counts peers).
+var HLP2PNonValConnections = promauto.NewGauge(prometheus.GaugeOpts{
+	Name: "hl_p2p_non_val_connections",
+	Help: "Sum of connection_count across non-validator gossip peers from the latest child_peers status.",
+})
+
+// Lifetime mean latency per subsystem (total_mean in the summary rows) as
+// a drift baseline for the windowed mean.
+var HLNodeSubsystemLatencyLifetimeMean = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "hl_node_subsystem_latency_lifetime_mean_seconds",
+	Help: "Mean per-sample latency since the source process started (windowed mean drifting above this = degradation).",
+}, subsystemLabels)
+
+// Rate-limiter tripwire: hl-node writes per-offender files under
+// data/rate_limited_ips/<stream>/hourly/<date>/ only when it actually
+// rate-limits someone. Zero on a healthy node.
+var HLNodeRateLimitedFiles = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "hl_node_rate_limited_files",
+	Help: "Non-empty rate_limited_ips files in the newest date dir, per stream (abci_stream, gossip_rpc_blocks, gossip_rpc_requests). Non-zero = the node is actively rate-limiting peers.",
+}, []string{"stream"})

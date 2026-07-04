@@ -37,8 +37,8 @@ func TestParseBlockCacheUsage(t *testing.T) {
 		want int64
 	}{
 		{"Block cache LRUCache@0x... capacity: 16.00 GB usage: 0.08 KB table_size: 1024", 81}, // 0.08 * 1024 → 81 (truncated)
-		{"... usage: 172.18 MB ...", 180543815},  // 172.18 * 1024 * 1024 → 180543815 (truncated)
-		{"... usage: 2.5 GB ...", 2684354560},    // 2.5 * 1024^3
+		{"... usage: 172.18 MB ...", 180543815},                                               // 172.18 * 1024 * 1024 → 180543815 (truncated)
+		{"... usage: 2.5 GB ...", 2684354560},                                                 // 2.5 * 1024^3
 		{"... usage: 4096 B ...", 4096},
 		{"no usage here", -1},
 	}

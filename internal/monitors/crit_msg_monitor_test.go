@@ -40,9 +40,9 @@ func TestParseCritMsgLine_Malformed(t *testing.T) {
 		[]byte(""),
 		[]byte("not json"),
 		[]byte("{}"),
-		[]byte(`["ts"]`),                   // missing inner
-		[]byte(`["ts",[]]`),                // empty inner
-		[]byte(`["ts",["base",1]]`),        // inner too short
+		[]byte(`["ts"]`),                      // missing inner
+		[]byte(`["ts",[]]`),                   // empty inner
+		[]byte(`["ts",["base",1]]`),           // inner too short
 		[]byte(`["ts",["base","a","b","c"]]`), // non-integer counts
 	} {
 		_, _, _, _, ok := parseCritMsgLine(line)

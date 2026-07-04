@@ -2,6 +2,8 @@ package monitors
 
 import (
 	"context"
+	"encoding/json"
+	"strconv"
 	"strings"
 	"time"
 
@@ -93,6 +95,7 @@ func updateValidatorMetrics(ctx context.Context, cfg config.Config) error {
 	// reconcile the per-validator gauges as one snapshot so validators that
 	// left the set are removed instead of freezing at their last value
 	metrics.ReplaceValidatorSummaries(snapshot)
+	reconcileValidatorExtras(summaries)
 
 	// update aggregate metrics
 	metrics.SetTotalStake(totalStake)
@@ -109,4 +112,110 @@ func updateValidatorMetrics(ctx context.Context, cfg config.Config) error {
 // returns the HL resolver instance
 func GetValidatorResolver() *hyperliquidapi.Resolver {
 	return hlResolver
+}
+
+// summaryPeriods is the fixed period set validatorSummaries stats carry.
+var summaryPeriods = []string{"day", "week", "month"}
+
+// prevExtraLabels tracks the label sets currently published on the extras
+// vectors so validators leaving the set (or unjailing) get their series
+// deleted. Single-goroutine access from the API monitor.
+var (
+	prevExtraLabels = map[string][3]string{}
+	prevUnjailable  = map[string][3]string{}
+)
+
+// reconcileValidatorExtras publishes the validatorSummaries facts beyond
+// stake/status: recent blocks proposed, commission, the unjail timestamp
+// while jailed, and per-period uptime/APR. These fields were previously
+// decoded and discarded even though unjailableAfter is the number an
+// operator actually needs mid-incident.
+func reconcileValidatorExtras(summaries []hyperliquidapi.ValidatorSummary) {
+	current := make(map[string][3]string, len(summaries))
+	currentJailed := make(map[string][3]string)
+
+	for _, summary := range summaries {
+		labels := [3]string{summary.Validator, summary.Signer, summary.Name}
+		current[summary.Validator] = labels
+
+		metrics.HLConsensusValidatorRecentBlocks.
+			WithLabelValues(labels[0], labels[1], labels[2]).Set(float64(summary.NRecentBlocks))
+
+		if v, err := strconv.ParseFloat(summary.Commission, 64); err == nil {
+			metrics.HLConsensusValidatorCommissionRate.
+				WithLabelValues(labels[0], labels[1], labels[2]).Set(v)
+		}
+
+		if summary.IsJailed && summary.UnjailableAfter > 0 {
+			currentJailed[summary.Validator] = labels
+			// the API reports milliseconds since epoch
+			metrics.HLConsensusValidatorUnjailableAfter.
+				WithLabelValues(labels[0], labels[1], labels[2]).Set(float64(summary.UnjailableAfter) / 1000.0)
+		}
+
+		for _, ps := range parseSummaryStats(summary.Stats) {
+			if ps.hasUptime {
+				metrics.HLConsensusValidatorUptimeFraction.
+					WithLabelValues(labels[0], labels[1], labels[2], ps.period).Set(ps.uptime)
+			}
+			if ps.hasApr {
+				metrics.HLConsensusValidatorPredictedApr.
+					WithLabelValues(labels[0], labels[1], labels[2], ps.period).Set(ps.apr)
+			}
+		}
+	}
+
+	for validator, labels := range prevExtraLabels {
+		if _, ok := current[validator]; ok {
+			continue
+		}
+		metrics.HLConsensusValidatorRecentBlocks.DeleteLabelValues(labels[0], labels[1], labels[2])
+		metrics.HLConsensusValidatorCommissionRate.DeleteLabelValues(labels[0], labels[1], labels[2])
+		for _, period := range summaryPeriods {
+			metrics.HLConsensusValidatorUptimeFraction.DeleteLabelValues(labels[0], labels[1], labels[2], period)
+			metrics.HLConsensusValidatorPredictedApr.DeleteLabelValues(labels[0], labels[1], labels[2], period)
+		}
+	}
+	for validator, labels := range prevUnjailable {
+		if _, ok := currentJailed[validator]; !ok {
+			metrics.HLConsensusValidatorUnjailableAfter.DeleteLabelValues(labels[0], labels[1], labels[2])
+		}
+	}
+	prevExtraLabels = current
+	prevUnjailable = currentJailed
+}
+
+type summaryPeriodStat struct {
+	period            string
+	uptime, apr       float64
+	hasUptime, hasApr bool
+}
+
+func parseSummaryStats(raw [][]json.RawMessage) []summaryPeriodStat {
+	out := make([]summaryPeriodStat, 0, len(raw))
+	for _, pair := range raw {
+		if len(pair) != 2 {
+			continue
+		}
+		var period string
+		if json.Unmarshal(pair[0], &period) != nil || period == "" {
+			continue
+		}
+		var body struct {
+			UptimeFraction string `json:"uptimeFraction"`
+			PredictedApr   string `json:"predictedApr"`
+		}
+		if json.Unmarshal(pair[1], &body) != nil {
+			continue
+		}
+		ps := summaryPeriodStat{period: period}
+		if v, err := strconv.ParseFloat(body.UptimeFraction, 64); err == nil {
+			ps.uptime, ps.hasUptime = v, true
+		}
+		if v, err := strconv.ParseFloat(body.PredictedApr, 64); err == nil {
+			ps.apr, ps.hasApr = v, true
+		}
+		out = append(out, ps)
+	}
+	return out
 }

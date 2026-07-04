@@ -45,6 +45,10 @@ type ValidatorSummary struct {
 	IsJailed        bool    `json:"isJailed"`
 	UnjailableAfter int64   `json:"unjailableAfter"`
 	IsActive        bool    `json:"isActive"`
+	Commission      string  `json:"commission"`
+	// Stats holds [period, {uptimeFraction, predictedApr, nSamples}] pairs
+	// for day/week/month.
+	Stats [][]json.RawMessage `json:"stats"`
 }
 
 // request to the HL API

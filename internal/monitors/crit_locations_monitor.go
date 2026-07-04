@@ -55,20 +55,20 @@ var (
 
 // critMsgRichFile mirrors the on-disk schema.
 type critMsgRichFile struct {
-	StartTime string          `json:"start_time"`
-	NBugs     int64           `json:"n_bugs"`
-	NCrits    int64           `json:"n_crits"`
+	StartTime string              `json:"start_time"`
+	NBugs     int64               `json:"n_bugs"`
+	NCrits    int64               `json:"n_crits"`
 	Stats     [][]json.RawMessage `json:"code_location_and_stats"`
 }
 
 type critLocation struct {
-	File       string `json:"fln"`
-	Line       int64  `json:"line"`
-	N          int64  `json:"n"`
-	IsIgnored  bool   `json:"is_ignored"`
-	FirstSeen  string `json:"first_seen"`
-	LastSeen   string `json:"last_seen"`
-	FirstMsg   string `json:"first_msg"`
+	File      string `json:"fln"`
+	Line      int64  `json:"line"`
+	N         int64  `json:"n"`
+	IsIgnored bool   `json:"is_ignored"`
+	FirstSeen string `json:"first_seen"`
+	LastSeen  string `json:"last_seen"`
+	FirstMsg  string `json:"first_msg"`
 }
 
 // StartCritLocationsMonitor publishes per-source-location crit counts
@@ -155,6 +155,11 @@ func tickCritLocations() {
 		current[labels] = true
 
 		metrics.HLNodeCritLocation.WithLabelValues(file, line).Set(float64(loc.N))
+		ignored := 0.0
+		if loc.IsIgnored {
+			ignored = 1
+		}
+		metrics.HLNodeCritLocationIgnored.WithLabelValues(file, line).Set(ignored)
 		if t, ok := parseVisorTime(loc.LastSeen); ok {
 			metrics.HLNodeCritLocationLastSeenSeconds.WithLabelValues(file, line).Set(float64(t.Unix()))
 		}
@@ -167,6 +172,7 @@ func tickCritLocations() {
 		if !current[lbl] {
 			metrics.HLNodeCritLocation.DeleteLabelValues(lbl[0], lbl[1])
 			metrics.HLNodeCritLocationLastSeenSeconds.DeleteLabelValues(lbl[0], lbl[1])
+			metrics.HLNodeCritLocationIgnored.DeleteLabelValues(lbl[0], lbl[1])
 			delete(activeLabels, lbl)
 		}
 	}

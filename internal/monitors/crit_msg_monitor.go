@@ -33,7 +33,7 @@ const critMsgPollInterval = 30 * time.Second
 //   - n_bugs      — cumulative count of bug! events
 //   - n_crits     — cumulative count of crit! events
 //   - n_locations — distinct (file, line) call sites that have fired a
-//                   bug or crit at least once since the process started
+//     bug or crit at least once since the process started
 //
 // All counts reset to 0 on process restart, so we model them as gauges,
 // which lets a restart cleanly zero the series instead of producing a

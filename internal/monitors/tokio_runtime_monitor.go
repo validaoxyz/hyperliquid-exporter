@@ -186,6 +186,10 @@ func deleteTokioSeries(task string) {
 	metrics.HLTokioTaskLongDelaysTotal.DeleteLabelValues(task)
 	metrics.HLTokioTaskIdleSecondsTotal.DeleteLabelValues(task)
 	metrics.HLTokioTaskDroppedTotal.DeleteLabelValues(task)
+	metrics.HLTokioTaskScheduledTotal.DeleteLabelValues(task)
+	metrics.HLTokioTaskScheduledSecondsTotal.DeleteLabelValues(task)
+	metrics.HLTokioTaskFastPollsTotal.DeleteLabelValues(task)
+	metrics.HLTokioTaskShortDelaysTotal.DeleteLabelValues(task)
 }
 
 func parseTokioLine(line []byte) (tokioTaskSample, bool) {
@@ -217,4 +221,8 @@ func publishTokioSample(s tokioTaskSample) {
 	metrics.HLTokioTaskLongDelaysTotal.WithLabelValues(s.TaskName).Set(float64(s.TotalLongDelayCount))
 	metrics.HLTokioTaskIdleSecondsTotal.WithLabelValues(s.TaskName).Set(s.TotalIdleDuration)
 	metrics.HLTokioTaskDroppedTotal.WithLabelValues(s.TaskName).Set(float64(s.DroppedCount))
+	metrics.HLTokioTaskScheduledTotal.WithLabelValues(s.TaskName).Set(float64(s.TotalScheduledCount))
+	metrics.HLTokioTaskScheduledSecondsTotal.WithLabelValues(s.TaskName).Set(s.TotalScheduledDuration)
+	metrics.HLTokioTaskFastPollsTotal.WithLabelValues(s.TaskName).Set(float64(s.TotalFastPollCount))
+	metrics.HLTokioTaskShortDelaysTotal.WithLabelValues(s.TaskName).Set(float64(s.TotalShortDelayCount))
 }

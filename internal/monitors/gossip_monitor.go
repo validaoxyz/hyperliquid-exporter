@@ -143,7 +143,7 @@ func (m *GossipMonitor) processGossipFile(filePath string) error {
 	}
 
 	// track the latest peer status
-	var verifiedCount, unverifiedCount int64
+	var verifiedCount, unverifiedCount, connectionCount int64
 	var lastUpdateTime time.Time
 
 	// read line by line
@@ -208,6 +208,7 @@ func (m *GossipMonitor) processGossipFile(filePath string) error {
 		// count peers by verification status
 		verified := int64(0)
 		unverified := int64(0)
+		connections := int64(0)
 
 		for _, peer := range peerList {
 			if len(peer) != 2 {
@@ -225,11 +226,13 @@ func (m *GossipMonitor) processGossipFile(filePath string) error {
 			} else {
 				unverified++
 			}
+			connections += int64(status.ConnectionCount)
 		}
 
 		// update counts with latest data
 		verifiedCount = verified
 		unverifiedCount = unverified
+		connectionCount = connections
 		lastUpdateTime = entryTime
 	}
 
@@ -243,6 +246,7 @@ func (m *GossipMonitor) processGossipFile(filePath string) error {
 		metrics.SetP2PNonValPeerConnections(true, verifiedCount)
 		metrics.SetP2PNonValPeerConnections(false, unverifiedCount)
 		metrics.SetP2PNonValPeersTotal(verifiedCount + unverifiedCount)
+		metrics.HLP2PNonValConnections.Set(float64(connectionCount))
 
 		logger.DebugComponent("gossip", "Updated non-validator peer metrics: verified=%d, unverified=%d, total=%d",
 			verifiedCount, unverifiedCount, verifiedCount+unverifiedCount)

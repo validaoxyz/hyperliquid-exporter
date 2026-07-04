@@ -88,6 +88,8 @@ const (
 
 // contains aggregated metrics for a block
 type BlockMetrics struct {
+	ParentRound     int64
+	HardforkVersion int64
 	Height          int64
 	Round           int64
 	Time            time.Time

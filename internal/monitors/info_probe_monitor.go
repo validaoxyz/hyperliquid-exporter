@@ -3,6 +3,7 @@ package monitors
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"time"
@@ -13,10 +14,10 @@ import (
 )
 
 const (
-	infoProbeInterval     = 15 * time.Second
-	infoProbeHTTPTimeout  = 5 * time.Second
-	defaultInfoEndpoint   = "http://127.0.0.1:3001/info"
-	infoProbeRequestBody  = `{"type":"meta"}`
+	infoProbeInterval    = 15 * time.Second
+	infoProbeHTTPTimeout = 5 * time.Second
+	defaultInfoEndpoint  = "http://127.0.0.1:3001/info"
+	infoProbeRequestBody = `{"type":"meta"}`
 )
 
 // StartInfoProbeMonitor actively POSTs `{"type":"meta"}` to the node's
@@ -35,6 +36,9 @@ func StartInfoProbeMonitor(ctx context.Context, cfg config.Config, errCh chan<- 
 	}
 
 	logger.InfoComponent("info_probe", "probing %s every %s", url, infoProbeInterval)
+
+	// series exist only when the probe is enabled (absent != 0)
+	metrics.InitInfoProbeInstruments()
 
 	client := &http.Client{Timeout: infoProbeHTTPTimeout}
 	ticker := time.NewTicker(infoProbeInterval)
@@ -88,10 +92,44 @@ func probeOnce(ctx context.Context, client *http.Client, url string) {
 	if resp.StatusCode == http.StatusOK && n > 0 {
 		metrics.HLInfoEndpointUp.Set(1)
 		metrics.HLInfoEndpointLastSuccessSeconds.Set(float64(time.Now().Unix()))
+		probeExchangeStatus(ctx, client, url)
 		return
 	}
 
 	metrics.HLInfoEndpointUp.Set(0)
 	metrics.HLInfoEndpointFailuresTotal.Inc()
 	logger.DebugComponent("info_probe", "POST %s -> %d body_len=%d", url, resp.StatusCode, n)
+}
+
+// probeExchangeStatus asks the node's own info endpoint for exchangeStatus
+// and publishes local_wall_clock - exchange_time. The node README's
+// recommended health check is exactly this comparison: a node can serve
+// 200s while its exchange state has stopped advancing.
+func probeExchangeStatus(ctx context.Context, client *http.Client, url string) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBufferString(`{"type":"exchangeStatus"}`))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		logger.DebugComponent("info_probe", "exchangeStatus: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return
+	}
+
+	var body struct {
+		Time float64 `json:"time"` // milliseconds since epoch
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil || body.Time <= 0 {
+		return
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	metrics.InitExchangeStatusDeltaInstrument()
+	metrics.HLInfoExchangeStatusDeltaSeconds.Set(float64(time.Now().UnixMilli())/1000.0 - body.Time/1000.0)
 }

@@ -155,6 +155,10 @@ func Start(ctx context.Context, cfg config.Config) {
 	logger.InfoComponent("gossip_connections", "Initializing gossip-connections monitor...")
 	runMonitor("gossip_connections", func() { monitors.StartGossipConnectionsMonitor(monitorCtx, cfg, gossipConnectionsErrCh) })
 
+	// rate-limiter tripwire (non-empty rate_limited_ips files per stream)
+	logger.InfoComponent("rate_limited", "Initializing rate-limited-ips monitor...")
+	runMonitor("rate_limited", func() { monitors.StartRateLimitedMonitor(monitorCtx, cfg) })
+
 	// validator-only consensus accumulator (committed_blocks, dropped_txs,
 	// round_qc/tc, rpc_requests…). Silently idles on non-validators.
 	logger.InfoComponent("accumulator_consensus", "Initializing consensus accumulator monitor...")

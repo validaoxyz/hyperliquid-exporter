@@ -22,12 +22,13 @@ import (
 // async runtime observers.
 //
 // Subsystems found on a live mainnet peer (May 2026):
-//   bucket_guard, execution_sender, handle_request_rate_limiter,
-//   node_fast_backlog_from_node, node_fast_begin_block_to_commit,
-//   node_fast_block_duration, node_slow_backlog_from_node,
-//   node_slow_begin_block_to_commit, node_slow_block_duration, proposer,
-//   run_node_compute_resps_hash, tcp_lz4, tokio_scheduled_observer_fast,
-//   tokio_scheduled_observer_slow, tokio_spawn_forever_scheduled
+//
+//	bucket_guard, execution_sender, handle_request_rate_limiter,
+//	node_fast_backlog_from_node, node_fast_begin_block_to_commit,
+//	node_fast_block_duration, node_slow_backlog_from_node,
+//	node_slow_begin_block_to_commit, node_slow_block_duration, proposer,
+//	run_node_compute_resps_hash, tcp_lz4, tokio_scheduled_observer_fast,
+//	tokio_scheduled_observer_slow, tokio_spawn_forever_scheduled
 //
 // All of these are useful for an operator dashboard; the allowlist is
 // here as an explicit ceiling rather than to filter known noise.
@@ -63,16 +64,16 @@ var subsystemAllowlist = map[string]bool{
 // latencySummary mirrors one JSON line under latency_summaries/<sub>/<date>.
 // Fields are floats representing seconds.
 type latencySummary struct {
-	Time          string  `json:"time"`
-	TotalN        int64   `json:"total_n"`
-	TotalMean     float64 `json:"total_mean"`
-	Mean          float64 `json:"mean"`
-	Median        float64 `json:"med"`
-	P90           float64 `json:"p90"`
-	P95           float64 `json:"p95"`
-	Max           float64 `json:"max"`
-	StdDev        float64 `json:"std_dev"`
-	WorkFrac      float64 `json:"work_frac"`
+	Time           string  `json:"time"`
+	TotalN         int64   `json:"total_n"`
+	TotalMean      float64 `json:"total_mean"`
+	Mean           float64 `json:"mean"`
+	Median         float64 `json:"med"`
+	P90            float64 `json:"p90"`
+	P95            float64 `json:"p95"`
+	Max            float64 `json:"max"`
+	StdDev         float64 `json:"std_dev"`
+	WorkFrac       float64 `json:"work_frac"`
 	BucketWorkFrac float64 `json:"bucket_work_frac"`
 }
 
@@ -214,4 +215,5 @@ func publishSubsystemLatency(subsystem string, s latencySummary) {
 	metrics.HLNodeSubsystemLatencyStdDev.WithLabelValues(subsystem).Set(s.StdDev)
 	metrics.HLNodeSubsystemWorkFrac.WithLabelValues(subsystem).Set(s.WorkFrac)
 	metrics.HLNodeSubsystemSamplesTotal.WithLabelValues(subsystem).Set(float64(s.TotalN))
+	metrics.HLNodeSubsystemLatencyLifetimeMean.WithLabelValues(subsystem).Set(s.TotalMean)
 }

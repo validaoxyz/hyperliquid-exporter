@@ -6,10 +6,18 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
 // probeOnce is the per-tick HTTP probe. Test against an httptest.Server
 // so we don't need network or hl-node to validate behavior.
+
+// the probe family registers lazily when the monitor starts; tests call
+// probeOnce directly, so register here (idempotent)
+func init() {
+	metrics.InitInfoProbeInstruments()
+}
 
 func TestProbeOnce_HappyPath(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -10,11 +10,11 @@ import (
 func TestCountLinesAndBytes(t *testing.T) {
 	dir := t.TempDir()
 	cases := []struct {
-		name    string
-		body    string
-		lines   int64
-		size    int64
-		wantOK  bool
+		name   string
+		body   string
+		lines  int64
+		size   int64
+		wantOK bool
 	}{
 		{"empty", "", 0, 0, true},
 		{"one line no newline", "hello", 0, 5, true},

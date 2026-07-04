@@ -2,6 +2,7 @@ package monitors
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"time"
@@ -85,4 +86,43 @@ func tickOperatorConfig(root string) {
 		}
 	}
 	metrics.HLNodeOperatorConfigFailedLoads.Set(float64(failed))
+
+	readJailingConfig(root)
+}
+
+// readJailingConfig publishes the contents of heartbeat_jailing_config.json:
+// the latency-EMA threshold this node uses when voting to jail peers, and
+// whether enforcement is live or dry-run. The mtime age above only says the
+// file changed; the threshold itself is the denominator of every
+// jail-headroom question, e.g.
+//
+//	hl_consensus_validator_latency_ema_seconds / hl_node_jailing_threshold_seconds
+func readJailingConfig(root string) {
+	raw, err := os.ReadFile(filepath.Join(root, "heartbeat_jailing_config.json"))
+	if err != nil {
+		return // non-validator nodes don't have the file
+	}
+	var jcfg struct {
+		DryRun                  *bool    `json:"dry_run"`
+		LatencyEmaJailThreshold *float64 `json:"latency_ema_jail_threshold"`
+	}
+	if err := json.Unmarshal(raw, &jcfg); err != nil {
+		logger.DebugComponent("operator_config", "parse heartbeat_jailing_config.json: %v", err)
+		return
+	}
+	if jcfg.LatencyEmaJailThreshold == nil && jcfg.DryRun == nil {
+		return
+	}
+
+	metrics.InitJailingConfigInstruments()
+	if jcfg.LatencyEmaJailThreshold != nil {
+		metrics.HLNodeJailingThresholdSeconds.Set(*jcfg.LatencyEmaJailThreshold)
+	}
+	if jcfg.DryRun != nil {
+		v := 0.0
+		if *jcfg.DryRun {
+			v = 1
+		}
+		metrics.HLNodeJailingDryRun.Set(v)
+	}
 }

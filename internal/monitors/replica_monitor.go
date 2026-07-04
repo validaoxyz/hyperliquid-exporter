@@ -145,6 +145,15 @@ func (m *ReplicaMonitor) processBlock(block *replica.BlockMetrics) {
 	metrics.IncCoreBlocksProcessed()
 	metrics.IncCoreRoundsProcessed()
 
+	// per-block round advance: 1 on a healthy chain, >1 means skipped
+	// (timed-out) rounds between this block and its parent
+	if block.ParentRound > 0 && block.Round > block.ParentRound {
+		metrics.HLCoreRoundAdvance.Observe(float64(block.Round - block.ParentRound))
+	}
+	if block.HardforkVersion > 0 {
+		metrics.HLCoreHardforkVersion.Set(float64(block.HardforkVersion))
+	}
+
 	// update proposer counter
 	if block.Proposer != "" {
 		metrics.IncrementProposerCounter(block.Proposer)

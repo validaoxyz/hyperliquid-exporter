@@ -122,6 +122,8 @@ func (p *Parser) ExtractMetrics(block *ReplicaBlock) (*BlockMetrics, error) {
 	return &BlockMetrics{
 		Height:          0,
 		Round:           block.ABCIBlock.Round,
+		ParentRound:     block.ABCIBlock.ParentRound,
+		HardforkVersion: block.ABCIBlock.Hardfork.Version,
 		Time:            blockTime,
 		Proposer:        block.ABCIBlock.Proposer,
 		TotalActions:    totalActions,

@@ -41,7 +41,7 @@ func TestParseTCPTrafficLine_Malformed(t *testing.T) {
 		[]byte(``),
 		[]byte(`not json`),
 		[]byte(`{}`),
-		[]byte(`[1,2,3]`),                            // wrong outer arity
+		[]byte(`[1,2,3]`), // wrong outer arity
 		[]byte(`["2026-01-01T00:00:00", "garbage"]`), // inner not array
 	}
 	for i, line := range cases {
@@ -91,10 +91,10 @@ func TestParseTCPTrafficLine_SkipsBadFlows(t *testing.T) {
 
 func TestLastFullLine(t *testing.T) {
 	cases := []struct {
-		name    string
-		input   string
-		want    string
-		wantOK  bool
+		name   string
+		input  string
+		want   string
+		wantOK bool
 	}{
 		{"trailing newline", "a\nb\nc\n", "c", true},
 		{"no trailing newline", "a\nb\nc", "c", true},
