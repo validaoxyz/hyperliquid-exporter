@@ -18,6 +18,7 @@ func runMonitor(name string, fn func()) {
 	metrics.RegisterMonitor(name)
 	go func() {
 		metrics.MarkMonitorStarted(name)
+		defer metrics.MarkMonitorStopped(name)
 		defer func() {
 			if r := recover(); r != nil {
 				metrics.IncMonitorPanic(name)

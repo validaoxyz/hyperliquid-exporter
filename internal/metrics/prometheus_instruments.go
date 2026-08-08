@@ -3,6 +3,7 @@ package metrics
 import (
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -268,11 +269,39 @@ var (
 
 	HLExporterMonitorStartedSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_exporter_monitor_started_seconds",
-		Help: "Unix timestamp at which each monitor's goroutine launched.",
+		Help: "Unix timestamp of the latest transition from zero to one active workers for each monitor.",
 	}, []string{"monitor"})
 	HLExporterMonitorLastTickSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_exporter_monitor_last_tick_seconds",
-		Help: "Unix timestamp of the most recent successful processing cycle per monitor (0 if the monitor has not yet processed real data).",
+		Help: "Deprecated compatibility alias for the most recent valid observation reported through MarkMonitorTick; absent before one is observed.",
+	}, []string{"monitor"})
+	HLExporterMonitorRegistered = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hl_exporter_monitor_registered",
+		Help: "Whether this monitor is part of the configured startup set (1=yes).",
+	}, []string{"monitor"})
+	HLExporterMonitorRunning = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hl_exporter_monitor_running",
+		Help: "Whether at least one worker for this logical monitor is currently running (1=yes, 0=no).",
+	}, []string{"monitor"})
+	HLExporterMonitorWorkers = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hl_exporter_monitor_workers",
+		Help: "Current number of active outer and inner workers for this logical monitor.",
+	}, []string{"monitor"})
+	HLExporterMonitorExitedSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hl_exporter_monitor_exited_seconds",
+		Help: "Unix timestamp at which the final worker most recently exited; absent while running or before first exit.",
+	}, []string{"monitor"})
+	HLExporterMonitorLastAttemptSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hl_exporter_monitor_last_attempt_seconds",
+		Help: "Unix timestamp of the most recent real poll, read, scan, or request attempt; absent before first attempt.",
+	}, []string{"monitor"})
+	HLExporterMonitorLastValidSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hl_exporter_monitor_last_valid_observation_seconds",
+		Help: "Unix timestamp of the most recent complete valid observation; absent before first valid observation.",
+	}, []string{"monitor"})
+	HLExporterMonitorLastPublicationSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hl_exporter_monitor_last_publication_seconds",
+		Help: "Unix timestamp of the most recent successful metric publication; absent before first publication.",
 	}, []string{"monitor"})
 	HLExporterMonitorPanicsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "hl_exporter_monitor_panics_total",
@@ -284,7 +313,7 @@ var (
 	}, []string{"monitor"})
 	HLExporterReady = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_exporter_ready",
-		Help: "1 once every registered monitor has produced at least one tick.",
+		Help: "1 once every configured monitor has started at least one worker; source availability and freshness are reported separately.",
 	})
 )
 
@@ -306,12 +335,32 @@ func goVersion() string {
 // so the values stay fresh between scrapes.
 func PublishMonitorHealthSnapshot() {
 	for _, s := range snapshotMonitors() {
+		if s.Registered {
+			HLExporterMonitorRegistered.WithLabelValues(s.Name).Set(1)
+		} else {
+			HLExporterMonitorRegistered.WithLabelValues(s.Name).Set(0)
+		}
+		if s.Running {
+			HLExporterMonitorRunning.WithLabelValues(s.Name).Set(1)
+		} else {
+			HLExporterMonitorRunning.WithLabelValues(s.Name).Set(0)
+		}
+		HLExporterMonitorWorkers.WithLabelValues(s.Name).Set(float64(s.Workers))
 		if s.StartedUnix > 0 {
 			HLExporterMonitorStartedSeconds.WithLabelValues(s.Name).Set(float64(s.StartedUnix))
+		} else {
+			HLExporterMonitorStartedSeconds.DeleteLabelValues(s.Name)
 		}
-		if s.LastTickUnix > 0 {
-			HLExporterMonitorLastTickSeconds.WithLabelValues(s.Name).Set(float64(s.LastTickUnix))
+		if s.ExitedUnix > 0 {
+			HLExporterMonitorExitedSeconds.WithLabelValues(s.Name).Set(float64(s.ExitedUnix))
+		} else {
+			HLExporterMonitorExitedSeconds.DeleteLabelValues(s.Name)
 		}
+		setOptionalMonitorTimestamp(HLExporterMonitorLastAttemptSeconds, s.Name, s.LastAttemptUnix)
+		setOptionalMonitorTimestamp(HLExporterMonitorLastValidSeconds, s.Name, s.LastValidUnix)
+		setOptionalMonitorTimestamp(HLExporterMonitorLastPublicationSeconds, s.Name, s.LastPublicationUnix)
+		// Keep the legacy family as an exact alias of last-valid observation.
+		setOptionalMonitorTimestamp(HLExporterMonitorLastTickSeconds, s.Name, s.LastValidUnix)
 		// Panics/errors are real Counters now, driven by .Inc() at the
 		// point each panic/error is recorded (IncMonitorPanic / IncMonitorError),
 		// not mirrored from the atomic snapshot here.
@@ -320,6 +369,15 @@ func PublishMonitorHealthSnapshot() {
 		HLExporterReady.Set(1)
 	} else {
 		HLExporterReady.Set(0)
+	}
+	publishSourceHealthAt(time.Now().Unix())
+}
+
+func setOptionalMonitorTimestamp(metric *prometheus.GaugeVec, monitor string, value int64) {
+	if value > 0 {
+		metric.WithLabelValues(monitor).Set(float64(value))
+	} else {
+		metric.DeleteLabelValues(monitor)
 	}
 }
 

@@ -12,7 +12,7 @@ and is launched from `internal/exporter/exporter.go` via `runMonitor("x", func()
 
 - **Inner goroutines** must use `goSafe("x", func() { ... })` from `safego.go`. The outer `runMonitor` wrapper's recover only covers the brief setup phase; `StartXMonitor` typically returns after launching the work loop, so the loop itself needs separate panic protection.
 
-- **Mark progress** via `metrics.MarkMonitorTick("x")` after each successful processing cycle. The exporter's `/readyz` endpoint and the `hl_exporter_monitor_last_tick_seconds` gauge use this.
+- **Mark progress** at the exact boundaries with `metrics.MarkMonitorAttempt`, `metrics.MarkMonitorValidObservation`, and `metrics.MarkMonitorPublication`. `MarkMonitorTick` remains a compatibility helper for a complete successful cycle. `/readyz` is launch readiness and does not wait for source data.
 
 - **Idle path** when the data source is missing (e.g. `node_logs/consensus/` on a non-validator node): log once, block on `<-ctx.Done()`, return. The monitor stays registered but does no work.
 

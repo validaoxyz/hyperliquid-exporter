@@ -33,8 +33,9 @@ func StartPrometheusServer(ctx context.Context, port int, enablePprof bool) erro
 		_, _ = w.Write([]byte("OK\n"))
 	})
 
-	// /livez always 200s while the process is running. /readyz reports ready
-	// once every monitor has reported at least one successful tick.
+	// /livez always 200s while the process is running. /readyz reports startup
+	// readiness once every configured monitor has launched at least one worker;
+	// source availability and freshness are separate metrics.
 	mux.HandleFunc("/livez", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))

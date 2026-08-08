@@ -97,7 +97,7 @@ func Start(ctx context.Context, cfg config.Config) {
 	}
 
 	logger.InfoComponent("consensus", "Initializing Validator Status monitor...")
-	monitors.StartValidatorStatusMonitor(ctx, cfg, validatorStatusErrCh)
+	runMonitor("validator_status", func() { monitors.StartValidatorStatusMonitor(monitorCtx, cfg, validatorStatusErrCh) })
 
 	if cfg.EnableValidatorRTT {
 		logger.InfoComponent("consensus", "Initializing validator IP monitor...")

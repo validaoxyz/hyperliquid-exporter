@@ -18,7 +18,12 @@ import (
 // The component name is used both for the structured log entry and to
 // attribute the panic in hl_exporter_monitor_panics_total{monitor=...}.
 func goSafe(component string, fn func()) {
+	// Register before the goroutine is scheduled so an outer setup worker
+	// cannot transiently mark the logical monitor exited between spawning an
+	// inner reader and returning.
+	metrics.MarkMonitorStarted(component)
 	go func() {
+		defer metrics.MarkMonitorStopped(component)
 		defer func() {
 			if r := recover(); r != nil {
 				metrics.IncMonitorPanic(component)

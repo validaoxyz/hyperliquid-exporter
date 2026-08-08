@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,11 +16,15 @@ var (
 
 // monitorState tracks the runtime state of one monitor.
 type monitorState struct {
-	startedUnix  int64 // atomic; set once when the monitor goroutine launches
-	lastTickUnix int64 // atomic; updated on every real processing cycle
-	panics       int64 // atomic
-	errors       int64 // atomic
-	registered   bool
+	startedUnix         int64 // atomic; latest transition from zero to one workers
+	exitedUnix          int64 // atomic; latest transition from one to zero workers
+	lastAttemptUnix     int64 // atomic; latest attempted source/probe cycle
+	lastValidUnix       int64 // atomic; latest complete, valid observation
+	lastPublicationUnix int64 // atomic; latest successful metric publication
+	workers             int64 // atomic; active outer and inner monitor workers
+	panics              int64 // atomic
+	errors              int64 // atomic
+	registered          bool
 }
 
 var (
@@ -37,21 +42,84 @@ func RegisterMonitor(name string) {
 	}
 }
 
-// MarkMonitorStarted records the goroutine-launch time for a monitor.
-// /readyz uses this — a monitor counts as ready as soon as its goroutine
-// is running, whether or not it has data to process yet. Operators
-// use last_tick_seconds to detect actual stalls.
+// MarkMonitorStarted records one active worker for a monitor. A logical
+// monitor may have an outer setup worker plus multiple inner readers, so the
+// running state is reference-counted rather than tied to the setup function's
+// return. /readyz intentionally remains launch readiness: it is satisfied
+// after the first worker starts, whether or not optional data exists yet.
 func MarkMonitorStarted(name string) {
 	state := getOrCreate(name)
-	atomic.StoreInt64(&state.startedUnix, time.Now().Unix())
+	markMonitorStartedAt(state, time.Now().Unix())
 }
 
-// MarkMonitorTick records that the monitor produced a successful processing
-// cycle. The readyz endpoint flips to ready once every registered monitor has
-// reported at least one tick.
+func markMonitorStartedAt(state *monitorState, now int64) {
+	if atomic.AddInt64(&state.workers, 1) == 1 {
+		atomic.StoreInt64(&state.startedUnix, now)
+		atomic.StoreInt64(&state.exitedUnix, 0)
+	}
+}
+
+// MarkMonitorStopped records the end of one monitor worker. The logical
+// monitor exits only when its final worker returns or panics.
+func MarkMonitorStopped(name string) {
+	state := getOrCreate(name)
+	for {
+		workers := atomic.LoadInt64(&state.workers)
+		if workers == 0 {
+			return
+		}
+		if atomic.CompareAndSwapInt64(&state.workers, workers, workers-1) {
+			if workers == 1 {
+				atomic.StoreInt64(&state.exitedUnix, time.Now().Unix())
+			}
+			return
+		}
+	}
+}
+
+// MarkMonitorAttempt records a real poll, read, scan, or request attempt. It
+// does not imply that the input was valid or that metrics were published.
+func MarkMonitorAttempt(name string) {
+	state := getOrCreate(name)
+	markMonitorAttemptAt(state, time.Now().Unix())
+}
+
+func markMonitorAttemptAt(state *monitorState, now int64) {
+	atomic.StoreInt64(&state.lastAttemptUnix, now)
+}
+
+// MarkMonitorValidObservation records a complete observation that passed the
+// source's parse/schema checks. It does not imply publication.
+func MarkMonitorValidObservation(name string) {
+	state := getOrCreate(name)
+	markMonitorValidObservationAt(state, time.Now().Unix())
+}
+
+func markMonitorValidObservationAt(state *monitorState, now int64) {
+	atomic.StoreInt64(&state.lastAttemptUnix, now)
+	atomic.StoreInt64(&state.lastValidUnix, now)
+}
+
+// MarkMonitorPublication records a successful publication of a complete
+// observation.
+func MarkMonitorPublication(name string) {
+	state := getOrCreate(name)
+	markMonitorPublicationAt(state, time.Now().Unix())
+}
+
+func markMonitorPublicationAt(state *monitorState, now int64) {
+	atomic.StoreInt64(&state.lastPublicationUnix, now)
+}
+
+// MarkMonitorTick is the compatibility helper used by existing monitors after
+// a successful processing cycle. New or corrected monitors should use the
+// attempt/valid/publication functions at their exact boundaries.
 func MarkMonitorTick(name string) {
 	state := getOrCreate(name)
-	atomic.StoreInt64(&state.lastTickUnix, time.Now().Unix())
+	now := time.Now().Unix()
+	atomic.StoreInt64(&state.lastAttemptUnix, now)
+	atomic.StoreInt64(&state.lastValidUnix, now)
+	atomic.StoreInt64(&state.lastPublicationUnix, now)
 }
 
 // IncMonitorPanic increments the recovered-panic counter for a monitor.
@@ -90,11 +158,11 @@ func getOrCreate(name string) *monitorState {
 	return state
 }
 
-// Ready reports whether every registered monitor's goroutine has started.
+// Ready reports whether every registered monitor has started at least once.
 // We deliberately do NOT require each one to have produced a real tick —
 // many monitors legitimately sit idle on non-validator nodes (no consensus
-// dir) or when a feature is disabled. Operators alert on stalled monitors
-// via time() - hl_exporter_monitor_last_tick_seconds, not /readyz.
+// dir) or when a feature is disabled. Running/exited and source freshness are
+// exported separately.
 func Ready() bool {
 	monitorsMu.RLock()
 	defer monitorsMu.RUnlock()
@@ -115,11 +183,17 @@ func Ready() bool {
 // MonitorSnapshot returns a copy of the current health state. Callbacks use
 // this when emitting the observable gauges.
 type MonitorSnapshot struct {
-	Name         string
-	StartedUnix  int64
-	LastTickUnix int64
-	Panics       int64
-	Errors       int64
+	Name                string
+	Registered          bool
+	Running             bool
+	Workers             int64
+	StartedUnix         int64
+	ExitedUnix          int64
+	LastAttemptUnix     int64
+	LastValidUnix       int64
+	LastPublicationUnix int64
+	Panics              int64
+	Errors              int64
 }
 
 func snapshotMonitors() []MonitorSnapshot {
@@ -127,13 +201,21 @@ func snapshotMonitors() []MonitorSnapshot {
 	defer monitorsMu.RUnlock()
 	out := make([]MonitorSnapshot, 0, len(monitors))
 	for name, state := range monitors {
+		workers := atomic.LoadInt64(&state.workers)
 		out = append(out, MonitorSnapshot{
-			Name:         name,
-			StartedUnix:  atomic.LoadInt64(&state.startedUnix),
-			LastTickUnix: atomic.LoadInt64(&state.lastTickUnix),
-			Panics:       atomic.LoadInt64(&state.panics),
-			Errors:       atomic.LoadInt64(&state.errors),
+			Name:                name,
+			Registered:          state.registered,
+			Running:             workers > 0,
+			Workers:             workers,
+			StartedUnix:         atomic.LoadInt64(&state.startedUnix),
+			ExitedUnix:          atomic.LoadInt64(&state.exitedUnix),
+			LastAttemptUnix:     atomic.LoadInt64(&state.lastAttemptUnix),
+			LastValidUnix:       atomic.LoadInt64(&state.lastValidUnix),
+			LastPublicationUnix: atomic.LoadInt64(&state.lastPublicationUnix),
+			Panics:              atomic.LoadInt64(&state.panics),
+			Errors:              atomic.LoadInt64(&state.errors),
 		})
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
