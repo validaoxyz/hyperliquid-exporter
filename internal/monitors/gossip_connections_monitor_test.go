@@ -41,6 +41,16 @@ func TestParseGossipConnectionLine_KnownEvents(t *testing.T) {
 			"got_tcp_greeting",
 		},
 		{
+			"sending evm kvs current mainnet object-only",
+			`["2026-08-09T03:00:03",["sending evm kvs",{"Ip":"203.0.113.3"}]]`,
+			"sending_evm_kvs",
+		},
+		{
+			"marking node ip verified current mainnet object-only",
+			`["2026-08-09T03:00:03",["marking node_ip as verified",{"Ip":"203.0.113.4"}]]`,
+			"marking_node_ip_verified",
+		},
+		{
 			"error checking connection historical",
 			`["2026-05-25T06:59:53.6",["error checking connection",{"err":"x"}]]`,
 			"error_checking_connection",
@@ -183,6 +193,9 @@ func TestParseGossipConnectionLine_ExactMatchingAndPayloadShape(t *testing.T) {
 		t.Fatalf("null required flag reason=%q", nullFlag.reason)
 	}
 	for _, line := range []string{
+		`["2026-08-08T03:00:03",["finished checks",{"Ip":"192.0.2.1"}]]`,
+		`["2026-08-09T03:00:03",["sending evm kvs",{}]]`,
+		`["2026-08-09T03:00:03",["marking node_ip as verified",{"Ip":"192.0.2.1","extra":true}]]`,
 		`["2026-08-08T03:00:03",["got tcp greeting",{"Ip":"192.0.2.1","extra":true},true]]`,
 		`["2026-08-08T03:00:03",["got tcp greeting",{"Ip":"192.0.2.1"},null]]`,
 		`["2026-08-08T03:00:03",["rejecting gossip stream because max peers reached","limit",{}]]`,

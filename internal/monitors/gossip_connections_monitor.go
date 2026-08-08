@@ -204,13 +204,14 @@ func validKnownGossipPayload(tag string, inner []json.RawMessage) bool {
 		var endpoint, stream string
 		return unmarshalRequiredJSON(inner[1], &endpoint) == nil && unmarshalRequiredJSON(inner[2], &stream) == nil
 	case "closing gossip stream because no quorum yet", "finished checks", "sending abci_state",
-		"successfully sent abci_state", "sending evm kvs", "dropping connection after sending abci state",
-		"marking node_ip as verified", "closing gossip stream because peer is already connected":
-		if len(inner) != 3 || !rawJSONObject(inner[1]) {
-			return false
-		}
-		var flag bool
-		return unmarshalRequiredJSON(inner[2], &flag) == nil
+		"successfully sent abci_state", "dropping connection after sending abci state",
+		"closing gossip stream because peer is already connected":
+		return validGossipIPFlagPayload(inner, false)
+	case "sending evm kvs", "marking node_ip as verified":
+		// Current mainnet emits these as object-only events while the
+		// retained testnet generation includes a trailing bool. Both exact
+		// build-scoped projections carry the same bounded event identity.
+		return validGossipIPFlagPayload(inner, true)
 	case "dropping connection":
 		return len(inner) == 5
 	case "got tcp greeting":
@@ -243,6 +244,17 @@ func validKnownGossipPayload(tag string, inner []json.RawMessage) bool {
 	default:
 		return len(inner) == 2 && rawJSONObject(inner[1])
 	}
+}
+
+func validGossipIPFlagPayload(inner []json.RawMessage, allowObjectOnly bool) bool {
+	if len(inner) == 2 {
+		return allowObjectOnly && rawExactIPObject(inner[1])
+	}
+	if len(inner) != 3 || !rawExactIPObject(inner[1]) {
+		return false
+	}
+	var flag bool
+	return unmarshalRequiredJSON(inner[2], &flag) == nil
 }
 
 func rawExactIPObject(raw json.RawMessage) bool {
