@@ -24,27 +24,18 @@ type validatorConnectionObservation struct {
 func monitorValidatorConnectionLogs(ctx context.Context, cfg *config.Config, _ chan<- error) {
 	root := filepath.Join(cfg.NodeHome, "data", "node_logs", "validator_connections", "hourly")
 	tailStream(ctx, tailStreamOpts{
-		component: "consensus",
-		name:      "validator connections stream",
-		resolve: func() (string, error) {
-			metrics.MarkSourceAttempt(metrics.SourceValidatorConnections)
-			if _, err := os.Stat(root); err != nil {
-				if os.IsNotExist(err) {
-					metrics.MarkSourceAbsent(metrics.SourceValidatorConnections)
-				} else {
-					metrics.MarkSourceError(metrics.SourceValidatorConnections, metrics.SourceFailureStat)
-				}
-				return "", err
-			}
-			path, err := latestHourlyFile(root)
-			if err != nil {
-				metrics.MarkSourceError(metrics.SourceValidatorConnections, metrics.SourceFailureDiscovery)
-			}
-			return path, err
+		component:    "consensus",
+		name:         "validator connections stream",
+		resolveState: func() tailStreamResolution { return resolveValidatorConnectionStream(root) },
+		rescanEvery:  10 * time.Second,
+		eofSleep:     500 * time.Millisecond,
+		onSwitch:     func(string) { metrics.MarkSourceAvailable(metrics.SourceValidatorConnections) },
+		onUnavailable: func(kind tailStreamUnavailable) {
+			markValidatorConnectionUnavailable(kind)
 		},
-		rescanEvery: 10 * time.Second,
-		eofSleep:    500 * time.Millisecond,
-		onSwitch:    func(string) { metrics.MarkSourceAvailable(metrics.SourceValidatorConnections) },
+		onFailure: func(failure tailStreamFailure) {
+			markTailSourceFailure(metrics.SourceValidatorConnections, failure)
+		},
 		onLine: func(line string) {
 			observation, err := parseValidatorConnectionLine([]byte(strings.TrimSpace(line)))
 			if err != nil {
@@ -62,6 +53,27 @@ func monitorValidatorConnectionLogs(ctx context.Context, cfg *config.Config, _ c
 			metrics.MarkSourcePublication(metrics.SourceValidatorConnections)
 		},
 	})
+}
+
+func resolveValidatorConnectionStream(root string) tailStreamResolution {
+	return resolveValidatorConnectionStreamWith(root, os.ReadDir)
+}
+
+func resolveValidatorConnectionStreamWith(root string, readDir func(string) ([]os.DirEntry, error)) tailStreamResolution {
+	metrics.MarkSourceAttempt(metrics.SourceValidatorConnections)
+	result := resolveLatestHourlyStreamWith(root, readDir)
+	if result.err != nil {
+		metrics.MarkSourceError(metrics.SourceValidatorConnections, metrics.SourceFailureDiscovery)
+	}
+	return result
+}
+
+func markValidatorConnectionUnavailable(kind tailStreamUnavailable) {
+	if kind == tailStreamUnavailableAbsent {
+		metrics.MarkSourceAbsent(metrics.SourceValidatorConnections)
+		return
+	}
+	metrics.MarkSourceAvailable(metrics.SourceValidatorConnections)
 }
 
 func parseValidatorConnectionLine(line []byte) (validatorConnectionObservation, error) {
