@@ -24,7 +24,17 @@ func completeRocksDBLog(at time.Time, stops int64, cache string) string {
 }
 
 func reducedRocksDBLog(at time.Time, bufferManagerStops int64) string {
-	return fmt.Sprintf("%s 1 [db/db_impl/db_impl.cc:1084] ------- DUMPING STATS -------\nWrite Stall (count): write-buffer-manager-limit-stops: %d\n", at.Format("2006/01/02-15:04:05.000000"), bufferManagerStops)
+	return fmt.Sprintf(`%s 1 [db/db_impl/db_impl.cc:1084] ------- DUMPING STATS -------
+** DB Stats **
+Uptime(secs): 603.1 total, 600.0 interval
+Cumulative writes: 5236 writes, 5236 keys
+Cumulative WAL: 1 writes, 1 syncs
+Cumulative stall: 00:00:0.000 H:M:S, 0.0 percent
+Interval writes: 10 writes, 10 keys
+Interval WAL: 1 writes, 1 syncs
+Interval stall: 00:00:0.000 H:M:S, 0.0 percent
+Write Stall (count): write-buffer-manager-limit-stops: %d,
+`, at.Format("2006/01/02-15:04:05.000000"), bufferManagerStops)
 }
 
 func TestParseWriteStallLine(t *testing.T) {
@@ -97,7 +107,8 @@ func TestReadRocksDBStatsAcceptsReducedLiveProjection(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "LOG")
 	at := time.Date(2026, 8, 9, 3, 4, 5, 6000, time.UTC)
-	if err := os.WriteFile(logPath, []byte(reducedRocksDBLog(at, 7)), 0o644); err != nil {
+	contents := reducedRocksDBLog(at, 7) + reducedRocksDBLog(at.Add(10*time.Minute), 9)
+	if err := os.WriteFile(logPath, []byte(contents), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -106,13 +117,111 @@ func TestReadRocksDBStatsAcceptsReducedLiveProjection(t *testing.T) {
 		t.Fatalf("reduced live projection rejected: %v", err)
 	}
 	if got := stats.writeStalls["write-buffer-manager-limit-stops"]; got != 7 {
-		t.Fatalf("write-buffer-manager stalls = %d, want 7", got)
+		t.Fatalf("latest marker-delimited write-buffer-manager stalls = %d, want 7", got)
 	}
 	if len(stats.writeStalls) != 1 {
 		t.Fatalf("reduced projection published %d stall reasons, want 1", len(stats.writeStalls))
 	}
 	if stats.cacheUsageBytes != -1 {
 		t.Fatalf("missing cache usage = %d, want unavailable", stats.cacheUsageBytes)
+	}
+}
+
+func TestReadRocksDBStatsDoesNotCommitInProgressFullProjection(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "LOG")
+	at := time.Date(2026, 8, 9, 3, 4, 5, 6000, time.UTC)
+	partial := fmt.Sprintf("%s 1 [x] ------- DUMPING STATS -------\nWrite Stall (count): write-buffer-manager-limit-stops: 99\n", at.Add(10*time.Minute).Format("2006/01/02-15:04:05.000000"))
+	if err := os.WriteFile(logPath, []byte(completeRocksDBLog(at, 3, "4.00 MB")+partial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := readRocksDBStatsComplete(logPath)
+	if err != nil {
+		t.Fatalf("fall back to marker-delimited full projection: %v", err)
+	}
+	if got := stats.writeStalls["l0-file-count-limit-stops"]; got != 3 {
+		t.Fatalf("in-progress dump replaced prior full stalls: got %d want 3", got)
+	}
+	if got := stats.writeStalls["write-buffer-manager-limit-stops"]; got != 0 {
+		t.Fatalf("in-progress dump leaked write-buffer stalls: got %d want 0", got)
+	}
+	if want := int64(4 * 1024 * 1024); stats.cacheUsageBytes != want {
+		t.Fatalf("in-progress dump deleted prior cache: got %d want %d", stats.cacheUsageBytes, want)
+	}
+}
+
+func TestReadRocksDBStatsFallsBackBeforeNewestMetricsArrive(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "LOG")
+	at := time.Date(2026, 8, 9, 3, 4, 5, 6000, time.UTC)
+	partial := fmt.Sprintf("%s 1 [x] ------- DUMPING STATS -------\n** DB Stats **\n", at.Add(10*time.Minute).Format("2006/01/02-15:04:05.000000"))
+	if err := os.WriteFile(logPath, []byte(completeRocksDBLog(at, 3, "4.00 MB")+partial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := readRocksDBStatsComplete(logPath)
+	if err != nil {
+		t.Fatalf("fall back before newest metrics arrive: %v", err)
+	}
+	if got := stats.writeStalls["l0-file-count-limit-stops"]; got != 3 {
+		t.Fatalf("early newest dump replaced prior full stalls: got %d want 3", got)
+	}
+	if want := int64(4 * 1024 * 1024); stats.cacheUsageBytes != want {
+		t.Fatalf("early newest dump deleted prior cache: got %d want %d", stats.cacheUsageBytes, want)
+	}
+}
+
+func TestReadRocksDBStatsFallsBackWhileNewestMetricLineIsTorn(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "LOG")
+	at := time.Date(2026, 8, 9, 3, 4, 5, 6000, time.UTC)
+	partial := fmt.Sprintf("%s 1 [x] ------- DUMPING STATS -------\nWrite Stall (count): write-buffer-manager-limit-stops:", at.Add(10*time.Minute).Format("2006/01/02-15:04:05.000000"))
+	if err := os.WriteFile(logPath, []byte(completeRocksDBLog(at, 3, "4.00 MB")+partial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := readRocksDBStatsComplete(logPath)
+	if err != nil {
+		t.Fatalf("fall back while newest metric line is torn: %v", err)
+	}
+	if got := stats.writeStalls["l0-file-count-limit-stops"]; got != 3 {
+		t.Fatalf("torn newest dump replaced prior full stalls: got %d want 3", got)
+	}
+	if want := int64(4 * 1024 * 1024); stats.cacheUsageBytes != want {
+		t.Fatalf("torn newest dump deleted prior cache: got %d want %d", stats.cacheUsageBytes, want)
+	}
+
+	// Once another marker closes that malformed dump, it is a completed bad
+	// generation and must fail instead of falling back through it.
+	contents := completeRocksDBLog(at, 3, "4.00 MB") + partial + "\n" + reducedRocksDBLog(at.Add(20*time.Minute), 0)
+	if err := os.WriteFile(logPath, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readRocksDBStatsComplete(logPath); err == nil {
+		t.Fatal("marker-delimited malformed projection was accepted")
+	}
+}
+
+func TestReadRocksDBStatsRejectsUnknownMarkerDelimitedProjections(t *testing.T) {
+	at := time.Date(2026, 8, 9, 3, 4, 5, 6000, time.UTC)
+	marker := func(offset time.Duration) string {
+		return fmt.Sprintf("%s 1 [x] ------- DUMPING STATS -------\n", at.Add(offset).Format("2006/01/02-15:04:05.000000"))
+	}
+	cases := map[string]string{
+		"arbitrary stall subset": marker(0) + "Write Stall (count): l0-file-count-limit-stops: 1\n" + marker(time.Minute),
+		"cache only":             marker(0) + "Block cache LRUCache@0x1 usage: 1.00 MB\n" + marker(time.Minute),
+	}
+	for name, contents := range cases {
+		t.Run(name, func(t *testing.T) {
+			logPath := filepath.Join(t.TempDir(), "LOG")
+			if err := os.WriteFile(logPath, []byte(contents), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readRocksDBStatsComplete(logPath); err == nil {
+				t.Fatal("unsupported marker-delimited projection was accepted")
+			}
+		})
 	}
 }
 
@@ -197,7 +306,8 @@ func TestRocksDBCompleteSnapshotRollbackAbsenceAndRecovery(t *testing.T) {
 
 	// A complete reduced projection replaces the available-field set. It must
 	// not preserve omitted per-CF/cache values from the prior full projection.
-	if err := os.WriteFile(logPath, []byte(reducedRocksDBLog(now.Add(7*time.Second), 11)), 0o644); err != nil {
+	contents := reducedRocksDBLog(now.Add(7*time.Second), 11) + reducedRocksDBLog(now.Add(8*time.Second), 13)
+	if err := os.WriteFile(logPath, []byte(contents), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	tickRocksDB(nodeHome, state, now.Add(8*time.Second))

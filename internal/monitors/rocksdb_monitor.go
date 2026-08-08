@@ -46,6 +46,8 @@ const (
 	rocksDBLogTailBytes = 256 * 1024
 )
 
+var errRocksDBStatsNoRecognizedMetrics = errors.New("stats block contains no recognized metrics")
+
 type rocksDBStats struct {
 	writeStalls     map[string]int64
 	cacheUsageBytes int64
@@ -280,23 +282,62 @@ func readRocksDBStatsComplete(path string) (rocksDBStats, error) {
 		return rocksDBStats{}, err
 	}
 	const marker = "------- DUMPING STATS -------"
-	idx := strings.LastIndex(string(buf), marker)
-	if idx < 0 {
+	text := string(buf)
+	latestMarker := strings.LastIndex(text, marker)
+	if latestMarker < 0 {
 		return rocksDBStats{}, fmt.Errorf("no complete stats marker in tail")
 	}
-	lineStart := strings.LastIndex(string(buf[:idx]), "\n") + 1
-	markerLineEnd := strings.IndexByte(string(buf[idx:]), '\n')
+	latestStart := strings.LastIndex(text[:latestMarker], "\n") + 1
+	latest, latestErr := parseRocksDBStatsBlock(text[latestStart:])
+	if latestErr == nil && rocksDBStatsHasFullProjection(latest) {
+		return latest, nil
+	}
+
+	// A marker may be visible before the first metric line is appended. That
+	// is an incomplete newest dump, not a reason to reject the immediately
+	// preceding marker-delimited generation.
+	previousMarker := strings.LastIndex(text[:latestMarker], marker)
+	if previousMarker < 0 {
+		if latestErr != nil {
+			return rocksDBStats{}, latestErr
+		}
+		return rocksDBStats{}, fmt.Errorf("reduced stats projection has no following marker")
+	}
+	previousStart := strings.LastIndex(text[:previousMarker], "\n") + 1
+	previous, err := parseRocksDBStatsBlock(text[previousStart:latestStart])
+	if err != nil {
+		return rocksDBStats{}, err
+	}
+	if !rocksDBStatsHasKnownProjection(previous) {
+		return rocksDBStats{}, fmt.Errorf("unsupported marker-delimited stats projection")
+	}
+
+	// A full projection proves its own completeness because every known stall
+	// reason and cache usage arrive in the same dump. A reduced projection has
+	// no terminal sentinel, so accepting the last one at EOF can transiently
+	// publish an in-progress full dump. Require the following marker to close a
+	// reduced projection, accepting the immediately preceding block instead.
+	return previous, nil
+}
+
+func parseRocksDBStatsBlock(block string) (rocksDBStats, error) {
+	const marker = "------- DUMPING STATS -------"
+	idx := strings.Index(block, marker)
+	if idx < 0 {
+		return rocksDBStats{}, fmt.Errorf("missing stats marker")
+	}
+	lineStart := strings.LastIndex(block[:idx], "\n") + 1
+	markerLineEnd := strings.IndexByte(block[idx:], '\n')
 	if markerLineEnd < 0 {
 		return rocksDBStats{}, fmt.Errorf("unterminated stats marker")
 	}
-	markerLine := string(buf[lineStart : idx+markerLineEnd])
+	markerLine := block[lineStart : idx+markerLineEnd]
 	sampleTime, err := parseRocksDBLogTime(markerLine)
 	if err != nil {
 		return rocksDBStats{}, err
 	}
-	tail := string(buf[idx:])
 	stats := rocksDBStats{writeStalls: make(map[string]int64), cacheUsageBytes: -1, sampleTime: sampleTime}
-	for _, line := range strings.Split(tail, "\n") {
+	for _, line := range strings.Split(block[idx:], "\n") {
 		if strings.Contains(line, "Write Stall (count):") {
 			if err := parseWriteStallLineStrict(line, stats.writeStalls); err != nil {
 				return rocksDBStats{}, err
@@ -316,9 +357,33 @@ func readRocksDBStatsComplete(path string) (rocksDBStats, error) {
 	// withdraw their old series; a block with no recognized metric remains
 	// unusable rather than fabricating an all-zero snapshot.
 	if len(stats.writeStalls) == 0 && stats.cacheUsageBytes < 0 {
-		return rocksDBStats{}, fmt.Errorf("stats block contains no recognized metrics")
+		return rocksDBStats{}, errRocksDBStatsNoRecognizedMetrics
 	}
 	return stats, nil
+}
+
+func rocksDBStatsHasFullProjection(stats rocksDBStats) bool {
+	if stats.cacheUsageBytes < 0 {
+		return false
+	}
+	for _, reason := range rocksDBStallReasons {
+		if _, available := stats.writeStalls[reason]; !available {
+			return false
+		}
+	}
+	return true
+}
+
+func rocksDBStatsHasReducedProjection(stats rocksDBStats) bool {
+	if stats.cacheUsageBytes >= 0 || len(stats.writeStalls) != 1 {
+		return false
+	}
+	_, available := stats.writeStalls["write-buffer-manager-limit-stops"]
+	return available
+}
+
+func rocksDBStatsHasKnownProjection(stats rocksDBStats) bool {
+	return rocksDBStatsHasFullProjection(stats) || rocksDBStatsHasReducedProjection(stats)
 }
 
 func parseWriteStallLine(line string, out map[string]int64) {
