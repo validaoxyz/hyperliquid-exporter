@@ -2,6 +2,8 @@ package monitors
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,103 +15,142 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
-// snapshotStatusPollInterval matches the underlying ~11-min snapshot
-// cadence at 30s tick; cheap enough to leave at this rate.
 const snapshotStatusPollInterval = 30 * time.Second
 
-// StartSnapshotStatusMonitor watches
-// $NODE_HOME/data/periodic_abci_state_statuses/<YYYYMMDD>/<height>.
-//
-// Each entry is a zero-byte file written by hl-node AFTER the
-// corresponding .rmp snapshot completes successfully. The filename is
-// the block height; the file's mtime is when the snapshot finished. The
-// status sentinel outlives the .rmp itself (we observe ~58 statuses
-// retained vs ~37 .rmps), so this directory is the right source for
-// "when did the last snapshot succeed".
-//
-// Operator alert: hl_node_snapshot_last_age_seconds > 15m means the
-// snapshot pipeline has stalled.
+var errInvalidSnapshotStatusEntry = errors.New("invalid snapshot status entry")
+
+type snapshotStatusSnapshot struct {
+	DateDirs       int
+	Known          int
+	LatestHeight   int64
+	LatestComplete time.Time
+}
+
+// StartSnapshotStatusMonitor polls the fixed status root even when it is
+// absent at startup. hl-node writes a zero-byte <date>/<height> sentinel after
+// a height-driven snapshot completes. At most the two newest date directories
+// form the retained scan window; their count is not cadence or headroom.
 func StartSnapshotStatusMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	root := filepath.Join(cfg.NodeHome, "data", "periodic_abci_state_statuses")
-
-	if _, err := os.Stat(root); err != nil {
-		logger.InfoComponent("snapshot_status",
-			"periodic_abci_state_statuses directory not present (%s); monitor idle", root)
-		<-ctx.Done()
-		return
-	}
-
-	logger.InfoComponent("snapshot_status", "watching %s", root)
+	metrics.RegisterSource(metrics.SourceSnapshotStatus, true)
+	logger.InfoComponent("snapshot_status", "polling %s", root)
 
 	ticker := time.NewTicker(snapshotStatusPollInterval)
 	defer ticker.Stop()
 
 	tickSnapshotStatus(root)
-	metrics.MarkMonitorTick("snapshot_status")
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			tickSnapshotStatus(root)
-			metrics.MarkMonitorTick("snapshot_status")
 		}
 	}
 }
 
-func tickSnapshotStatus(root string) {
-	// Latest date directory.
-	dateEntries, err := os.ReadDir(root)
+func tickSnapshotStatus(root string) bool {
+	metrics.MarkMonitorAttempt("snapshot_status")
+	metrics.MarkSourceAttempt(metrics.SourceSnapshotStatus)
+	snapshot, err := scanSnapshotStatus(root)
 	if err != nil {
-		return
-	}
-	dates := []string{}
-	for _, e := range dateEntries {
-		if e.IsDir() {
-			dates = append(dates, e.Name())
+		if errors.Is(err, os.ErrNotExist) {
+			metrics.MarkSourceAbsent(metrics.SourceSnapshotStatus)
+			metrics.HLNodeSnapshotKnown.Set(0)
+			metrics.HLNodeSnapshotLastHeight.Set(0)
+			metrics.HLNodeSnapshotLastAgeSeconds.Set(0)
+			metrics.HLNodeSnapshotHeightLagAvailable.Set(0)
+			metrics.HLNodeSnapshotHeightLagBlocks.DeleteLabelValues()
+			return false
 		}
+		stage := metrics.SourceFailureRead
+		if errors.Is(err, errInvalidSnapshotStatusEntry) {
+			stage = metrics.SourceFailureSchema
+		}
+		metrics.MarkSourceError(metrics.SourceSnapshotStatus, stage)
+		metrics.IncMonitorError("snapshot_status")
+		return false
 	}
-	if len(dates) == 0 {
+
+	publishSnapshotStatus(snapshot, time.Now(), latestVisorHeight())
+	metrics.MarkSourceValidObservation(metrics.SourceSnapshotStatus, snapshot.LatestComplete)
+	metrics.MarkSourcePublication(metrics.SourceSnapshotStatus)
+	metrics.MarkMonitorValidObservation("snapshot_status")
+	metrics.MarkMonitorPublication("snapshot_status")
+	return true
+}
+
+func publishSnapshotStatus(snapshot snapshotStatusSnapshot, now time.Time, currentHeight int64) {
+	metrics.HLNodeSnapshotKnown.Set(float64(snapshot.Known))
+	metrics.HLNodeSnapshotLastHeight.Set(float64(snapshot.LatestHeight))
+	if snapshot.LatestComplete.IsZero() {
+		metrics.HLNodeSnapshotLastAgeSeconds.Set(0)
+		metrics.HLNodeSnapshotHeightLagAvailable.Set(0)
+		metrics.HLNodeSnapshotHeightLagBlocks.DeleteLabelValues()
 		return
+	}
+	age := now.Sub(snapshot.LatestComplete).Seconds()
+	if age < 0 {
+		age = 0
+	}
+	metrics.HLNodeSnapshotLastAgeSeconds.Set(age)
+	if currentHeight >= snapshot.LatestHeight && snapshot.LatestHeight > 0 {
+		metrics.HLNodeSnapshotHeightLagBlocks.WithLabelValues().Set(float64(currentHeight - snapshot.LatestHeight))
+		metrics.HLNodeSnapshotHeightLagAvailable.Set(1)
+		return
+	}
+	metrics.HLNodeSnapshotHeightLagBlocks.DeleteLabelValues()
+	metrics.HLNodeSnapshotHeightLagAvailable.Set(0)
+}
+
+func scanSnapshotStatus(root string) (snapshotStatusSnapshot, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return snapshotStatusSnapshot{}, err
+	}
+	dates := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		parsed, err := time.Parse("20060102", entry.Name())
+		if err != nil || parsed.Format("20060102") != entry.Name() {
+			return snapshotStatusSnapshot{}, fmt.Errorf("%w: invalid date directory", errInvalidSnapshotStatusEntry)
+		}
+		dates = append(dates, entry.Name())
 	}
 	sort.Strings(dates)
-	// count across the two newest date dirs: the retention window spans
-	// UTC midnight, so counting only today made the gauge sawtooth to
-	// near zero right after rollover
 	if len(dates) > 2 {
 		dates = dates[len(dates)-2:]
 	}
 
-	var maxHeight int64
-	var maxMtime time.Time
-	count := 0
-	for _, d := range dates {
-		hgtEntries, err := os.ReadDir(filepath.Join(root, d))
+	snapshot := snapshotStatusSnapshot{DateDirs: len(dates)}
+	for _, date := range dates {
+		heightEntries, err := os.ReadDir(filepath.Join(root, date))
 		if err != nil {
-			continue
+			return snapshotStatusSnapshot{}, err
 		}
-		for _, e := range hgtEntries {
-			h, err := strconv.ParseInt(e.Name(), 10, 64)
+		for _, entry := range heightEntries {
+			if entry.IsDir() {
+				return snapshotStatusSnapshot{}, fmt.Errorf("%w: nested directory", errInvalidSnapshotStatusEntry)
+			}
+			height, err := strconv.ParseInt(entry.Name(), 10, 64)
+			if err != nil || height <= 0 {
+				return snapshotStatusSnapshot{}, fmt.Errorf("%w: invalid height", errInvalidSnapshotStatusEntry)
+			}
+			info, err := entry.Info()
 			if err != nil {
-				continue
+				return snapshotStatusSnapshot{}, err
 			}
-			count++
-			if h > maxHeight {
-				maxHeight = h
+			if info.Size() != 0 {
+				return snapshotStatusSnapshot{}, fmt.Errorf("%w: nonempty sentinel", errInvalidSnapshotStatusEntry)
 			}
-			if info, err := e.Info(); err == nil {
-				if mt := info.ModTime(); mt.After(maxMtime) {
-					maxMtime = mt
-				}
+			snapshot.Known++
+			if height > snapshot.LatestHeight || (height == snapshot.LatestHeight && info.ModTime().After(snapshot.LatestComplete)) {
+				snapshot.LatestHeight = height
+				snapshot.LatestComplete = info.ModTime()
 			}
 		}
 	}
-	if maxHeight > 0 {
-		metrics.HLNodeSnapshotLastHeight.Set(float64(maxHeight))
-	}
-	if !maxMtime.IsZero() {
-		metrics.HLNodeSnapshotLastAgeSeconds.Set(time.Since(maxMtime).Seconds())
-	}
-	metrics.HLNodeSnapshotKnown.Set(float64(count))
+	return snapshot, nil
 }

@@ -2,6 +2,8 @@ package monitors
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,84 +15,114 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
-// replayPollInterval — replay events are rare (one or two per week is
-// typical even on a busy validator). 60s is plenty.
 const replayPollInterval = 60 * time.Second
 
-// StartReplayMonitor counts subdirectories under
-// $NODE_HOME/data/node_logs/replay/. Each entry is named
-// "<height>_<iso-restart>" and is created by hl-node when it enters
-// replay mode (recovering from a checkpoint). The dir contents are
-// usually empty — the existence and name of the entry are the signal.
-//
-// Operator semantics: a healthy validator has very few replay events
-// per week. Sustained growth = repeated recoveries, often correlated
-// with network instability or hl-visor restarts.
-//
-// Validator-only (the replay dir exists on validators that have ever
-// recovered; absent on greenfield non-validator nodes).
+var errInvalidReplayEntry = errors.New("invalid replay entry")
+
+type replaySnapshot struct {
+	Retained       int
+	LatestHeight   int64
+	LatestStart    time.Time
+	LatestActivity time.Time
+}
+
+// StartReplayMonitor watches retained <height>_<RFC3339-start> markers. The
+// encoded timestamp is immutable and the height is the recovery start floor.
+// Directory mtime is only activity; no observed marker proves an end/duration.
 func StartReplayMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	root := filepath.Join(cfg.NodeHome, "data", "node_logs", "replay")
-	if _, err := os.Stat(root); err != nil {
-		logger.InfoComponent("replay",
-			"replay directory not present (%s); monitor idle", root)
-		<-ctx.Done()
-		return
-	}
-
-	logger.InfoComponent("replay", "watching %s", root)
+	metrics.RegisterSource(metrics.SourceReplay, true)
+	logger.InfoComponent("replay", "polling %s", root)
 
 	ticker := time.NewTicker(replayPollInterval)
 	defer ticker.Stop()
 
 	tickReplay(root)
-	metrics.MarkMonitorTick("replay")
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			tickReplay(root)
-			metrics.MarkMonitorTick("replay")
 		}
 	}
 }
 
-func tickReplay(root string) {
+func tickReplay(root string) bool {
+	metrics.MarkMonitorAttempt("replay")
+	metrics.MarkSourceAttempt(metrics.SourceReplay)
+	snapshot, err := scanReplay(root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			metrics.MarkSourceAbsent(metrics.SourceReplay)
+			metrics.HLNodeReplayEventsTotal.Set(0)
+			metrics.HLNodeReplayLastSeconds.Set(0)
+			metrics.HLNodeReplayLastHeight.Set(0)
+			metrics.HLNodeReplayLastActivitySeconds.Set(0)
+			return false
+		}
+		stage := metrics.SourceFailureRead
+		if errors.Is(err, errInvalidReplayEntry) {
+			stage = metrics.SourceFailureSchema
+		}
+		metrics.MarkSourceError(metrics.SourceReplay, stage)
+		metrics.IncMonitorError("replay")
+		return false
+	}
+
+	metrics.HLNodeReplayEventsTotal.Set(float64(snapshot.Retained))
+	metrics.HLNodeReplayLastSeconds.Set(optionalUnix(snapshot.LatestStart))
+	metrics.HLNodeReplayLastHeight.Set(float64(snapshot.LatestHeight))
+	metrics.HLNodeReplayLastActivitySeconds.Set(optionalUnix(snapshot.LatestActivity))
+	metrics.MarkSourceValidObservation(metrics.SourceReplay, snapshot.LatestStart)
+	metrics.MarkSourcePublication(metrics.SourceReplay)
+	metrics.MarkMonitorValidObservation("replay")
+	metrics.MarkMonitorPublication("replay")
+	return true
+}
+
+func scanReplay(root string) (replaySnapshot, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return
+		return replaySnapshot{}, err
 	}
-	var count int64
-	var newestMtime time.Time
-	var newestHeight int64
-	for _, e := range entries {
-		if !e.IsDir() {
+	var snapshot replaySnapshot
+	for _, entry := range entries {
+		if !entry.IsDir() {
 			continue
 		}
-		count++
-		info, err := e.Info()
+		height, start, err := parseReplayEntryName(entry.Name())
 		if err != nil {
-			continue
+			return replaySnapshot{}, err
 		}
-		mt := info.ModTime()
-		if mt.After(newestMtime) {
-			newestMtime = mt
-			// parse height from "<height>_<iso>"
-			name := e.Name()
-			if idx := strings.IndexByte(name, '_'); idx > 0 {
-				if h, err := strconv.ParseInt(name[:idx], 10, 64); err == nil {
-					newestHeight = h
-				}
-			}
+		info, err := entry.Info()
+		if err != nil {
+			return replaySnapshot{}, err
+		}
+		snapshot.Retained++
+		if start.After(snapshot.LatestStart) {
+			snapshot.LatestStart = start
+			snapshot.LatestHeight = height
+		}
+		if info.ModTime().After(snapshot.LatestActivity) {
+			snapshot.LatestActivity = info.ModTime()
 		}
 	}
-	metrics.HLNodeReplayEventsTotal.Set(float64(count))
-	if !newestMtime.IsZero() {
-		metrics.HLNodeReplayLastSeconds.Set(float64(newestMtime.Unix()))
+	return snapshot, nil
+}
+
+func parseReplayEntryName(name string) (int64, time.Time, error) {
+	separator := strings.IndexByte(name, '_')
+	if separator <= 0 || separator == len(name)-1 {
+		return 0, time.Time{}, fmt.Errorf("%w: %q", errInvalidReplayEntry, name)
 	}
-	if newestHeight > 0 {
-		metrics.HLNodeReplayLastHeight.Set(float64(newestHeight))
+	height, err := strconv.ParseInt(name[:separator], 10, 64)
+	if err != nil || height <= 0 {
+		return 0, time.Time{}, fmt.Errorf("%w: invalid height", errInvalidReplayEntry)
 	}
+	start, err := time.Parse(time.RFC3339Nano, name[separator+1:])
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("%w: invalid timestamp", errInvalidReplayEntry)
+	}
+	return height, start, nil
 }

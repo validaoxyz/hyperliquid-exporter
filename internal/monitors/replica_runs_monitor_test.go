@@ -1,60 +1,77 @@
 package monitors
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-func TestReplicaRuns_CountsDirsAndPicksNewestMtime(t *testing.T) {
+func TestScanReplicaRunsUsesNameForStartAndMtimeForActivity(t *testing.T) {
 	root := t.TempDir()
-
-	// Three "run" dirs with explicit mtimes.
-	oldDir := filepath.Join(root, "2026-05-23T08:25:08Z")
-	midDir := filepath.Join(root, "2026-05-25T11:07:30Z")
-	newDir := filepath.Join(root, "2026-05-25T11:13:57Z")
-	for _, d := range []string{oldDir, midDir, newDir} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
+	oldName := "2026-05-23T08:25:08Z"
+	newName := "2026-05-25T11:13:57Z"
+	oldDir := filepath.Join(root, oldName)
+	newDir := filepath.Join(root, newName)
+	for _, dir := range []string{oldDir, newDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	// Override mtimes so we know which is newest deterministically.
-	old := time.Now().Add(-72 * time.Hour)
-	mid := time.Now().Add(-2 * time.Hour)
-	newest := time.Now().Add(-30 * time.Minute)
-	mustChtime(t, oldDir, old)
-	mustChtime(t, midDir, mid)
-	mustChtime(t, newDir, newest)
+	// Deliberately retouch the older run after the newer one. Start selection
+	// must remain name-derived while activity reports the retouch.
+	oldActivity := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	newActivity := time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC)
+	mustChtime(t, oldDir, oldActivity)
+	mustChtime(t, newDir, newActivity)
 
-	// Also a non-dir entry; should be ignored.
-	if err := os.WriteFile(filepath.Join(root, "stray.txt"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	tickReplicaRuns(root)
-
-	// The function sets the gauges directly. We can't easily read them
-	// from a test, but the smoke is: it doesn't panic on a mixed-content
-	// directory and identifies the three dir entries.
-	entries, err := os.ReadDir(root)
+	got, err := scanReplicaRuns(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dirCount := 0
-	for _, e := range entries {
-		if e.IsDir() {
-			dirCount++
-		}
+	wantStart, _ := time.Parse(time.RFC3339Nano, newName)
+	if got.Retained != 2 || !got.LatestStart.Equal(wantStart) || !got.LatestActivity.Equal(oldActivity) {
+		t.Fatalf("snapshot = %+v", got)
 	}
-	if dirCount != 3 {
-		t.Errorf("expected 3 dirs in fixture, got %d", dirCount)
+
+	if err := os.RemoveAll(oldDir); err != nil {
+		t.Fatal(err)
+	}
+	got, err = scanReplicaRuns(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Retained != 1 || !got.LatestStart.Equal(wantStart) {
+		t.Fatalf("post-prune snapshot = %+v", got)
 	}
 }
 
-func TestReplicaRuns_EmptyRootIsSafe(t *testing.T) {
-	tickReplicaRuns(t.TempDir())
+func TestScanReplicaRunsRejectsInvalidDirectoryWithoutPartialSnapshot(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"2026-05-25T11:13:57Z", "not-a-run"} {
+		if err := os.Mkdir(filepath.Join(root, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := scanReplicaRuns(root)
+	if !errors.Is(err, errInvalidReplicaRunEntry) {
+		t.Fatalf("error = %v", err)
+	}
+	if got != (replicaRunsSnapshot{}) {
+		t.Fatalf("partial snapshot escaped: %+v", got)
+	}
+}
+
+func TestScanReplicaRunsEmptyRootIsValid(t *testing.T) {
+	got, err := scanReplicaRuns(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != (replicaRunsSnapshot{}) {
+		t.Fatalf("snapshot = %+v", got)
+	}
 }
 
 func mustChtime(t *testing.T, path string, mtime time.Time) {

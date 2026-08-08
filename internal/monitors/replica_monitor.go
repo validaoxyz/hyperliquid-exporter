@@ -2,9 +2,12 @@ package monitors
 
 import (
 	"context"
+	"errors"
+	"os"
 	"sync"
 	"time"
 
+	"github.com/validaoxyz/hyperliquid-exporter/internal/actiontypes"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/replica"
@@ -52,6 +55,7 @@ func NewReplicaMonitor(dataDir string, bufferSize int) *ReplicaMonitor {
 
 // starts monitoring replica files using streaming approach
 func (m *ReplicaMonitor) Start(ctx context.Context) error {
+	metrics.RegisterSource(metrics.SourceReplica, true)
 	logger.InfoComponent("replica", "Starting streaming replica monitor, dataDir: %s", m.dataDir)
 
 	goSafe("replica", func() { m.streamLoop(ctx) })
@@ -74,9 +78,21 @@ func (m *ReplicaMonitor) streamLoop(ctx context.Context) {
 	var parseCount int
 
 	tailStream(ctx, tailStreamOpts{
-		component:   "replica",
-		name:        "replica cmds",
-		resolve:     func() (string, error) { return utils.LatestReplicaFile(m.dataDir) },
+		component: "replica",
+		name:      "replica cmds",
+		resolve: func() (string, error) {
+			metrics.MarkMonitorAttempt("replica")
+			metrics.MarkSourceAttempt(metrics.SourceReplica)
+			path, err := utils.LatestReplicaFile(m.dataDir)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					metrics.MarkSourceAbsent(metrics.SourceReplica)
+				} else {
+					metrics.MarkSourceError(metrics.SourceReplica, metrics.SourceFailureDiscovery)
+				}
+			}
+			return path, err
+		},
 		rescanEvery: 2 * time.Second,
 		eofSleep:    25 * time.Millisecond,
 		bufSize:     m.bufferSize,
@@ -84,6 +100,8 @@ func (m *ReplicaMonitor) streamLoop(ctx context.Context) {
 			if len(line) == 0 || line == "\n" {
 				return
 			}
+			metrics.MarkMonitorAttempt("replica")
+			metrics.MarkSourceAttempt(metrics.SourceReplica)
 
 			m.mu.Lock()
 			m.verificationStats.LinesProcessed++
@@ -95,9 +113,7 @@ func (m *ReplicaMonitor) streamLoop(ctx context.Context) {
 			parseCount++
 			if err != nil {
 				logger.DebugComponent("replica", "Error parsing JSON: %v", err)
-				m.mu.Lock()
-				m.verificationStats.ParseErrors++
-				m.mu.Unlock()
+				m.recordParseFailure(err)
 				return
 			}
 
@@ -105,11 +121,16 @@ func (m *ReplicaMonitor) streamLoop(ctx context.Context) {
 			if err != nil {
 				logger.DebugComponent("replica", "error extracting metrics: %v", err)
 				m.parser.ReturnBlock(block)
+				m.recordParseFailure(err)
 				return
 			}
 			m.parser.ReturnBlock(block)
 
 			m.processBlock(blockMetrics)
+			metrics.MarkSourceValidObservation(metrics.SourceReplica, blockMetrics.Time)
+			metrics.MarkSourcePublication(metrics.SourceReplica)
+			metrics.MarkMonitorValidObservation("replica")
+			metrics.MarkMonitorPublication("replica")
 			blocksProcessed++
 		},
 		onIdle: func() {
@@ -122,7 +143,24 @@ func (m *ReplicaMonitor) streamLoop(ctx context.Context) {
 				totalParseTime, parseCount = 0, 0
 			}
 		},
+		onSwitch: func(string) {
+			metrics.MarkSourceReadOutcome(metrics.SourceReplica, true)
+		},
+		onFailure: func(failure tailStreamFailure) {
+			markTailSourceFailure(metrics.SourceReplica, failure)
+			metrics.IncMonitorError("replica")
+		},
 	})
+}
+
+func (m *ReplicaMonitor) recordParseFailure(err error) {
+	stage, reason := replica.ClassifyError(err)
+	metrics.HLReplicaParserEventsTotal.WithLabelValues(stage, reason).Inc()
+	metrics.MarkSourceError(metrics.SourceReplica, metrics.SourceFailureSchema)
+	metrics.IncMonitorError("replica")
+	m.mu.Lock()
+	m.verificationStats.ParseErrors++
+	m.mu.Unlock()
 }
 
 // processes metrics from a single block
@@ -137,12 +175,14 @@ func (m *ReplicaMonitor) processBlock(block *replica.BlockMetrics) {
 	// update verification stats
 	m.verificationStats.BlocksProcessed++
 	m.verificationStats.LastProcessedAt = time.Now()
-	m.verificationStats.LastBlockHeight = block.Round
+	m.verificationStats.LastBlockHeight = block.Height
 	m.verificationStats.ActionsProcessed += int64(block.TotalActions)
 	m.verificationStats.OperationsProcessed += int64(block.TotalOperations)
 
 	// update counters
 	metrics.IncCoreBlocksProcessed()
+	metrics.HLReplicaActionBundlesTotal.Add(float64(block.TotalBundles))
+	metrics.HLReplicaLastProcessedHeight.Set(float64(block.Height))
 
 	// per-block round advance: 1 on a healthy chain, >1 means skipped
 	// (timed-out) rounds between this block and its parent
@@ -160,33 +200,42 @@ func (m *ReplicaMonitor) processBlock(block *replica.BlockMetrics) {
 
 	// update action counters
 	orderCount := int64(0)
-	cancelCount := int64(0)
 	for actionType, count := range block.ActionCounts {
 		metrics.IncCoreTxTotal(actionType, int64(count))
+		metrics.HLReplicaSignedActionsTotal.WithLabelValues(actionType).Add(float64(count))
 
 		// track in verification stats
 		m.verificationStats.ActionCounts[actionType] += int64(count)
 
 		// track orders separately
-		if actionType == replica.ActionTypeOrder || actionType == replica.ActionTypeTwapOrder {
-			orderCount += int64(count)
-		}
-		// track cancels
-		if actionType == replica.ActionTypeCancel || actionType == replica.ActionTypeCancelByCloid {
-			cancelCount += int64(count)
-		}
 	}
 
 	// update operation counters (new)
 	for actionType, count := range block.OperationCounts {
-		category := getCategoryForAction(actionType)
+		category := actiontypes.Category(actionType)
 		metrics.IncCoreOperationsTotal(actionType, category, int64(count))
+		metrics.HLReplicaOperationsTotal.WithLabelValues(actionType, category).Add(float64(count))
+		if actionType == replica.ActionTypeOrder || actionType == replica.ActionTypeTwapOrder {
+			orderCount += int64(count)
+		}
 	}
 
 	// update dedicated order counter
 	if orderCount > 0 {
 		metrics.IncCoreOrdersTotal(orderCount)
+		metrics.HLReplicaOrdersTotal.Add(float64(orderCount))
 	}
+	for category, count := range block.MultiSigInner {
+		metrics.HLReplicaMultiSigInnerActionsTotal.WithLabelValues(category).Add(float64(count))
+	}
+	for reason, count := range block.ParserEvents {
+		stage := "action"
+		if reason == "multisig_inner_missing" || reason == "unknown_multisig_inner" {
+			stage = "multisig"
+		}
+		metrics.HLReplicaParserEventsTotal.WithLabelValues(stage, reason).Add(float64(count))
+	}
+	publishReplicaResponses(block.Responses)
 
 	// update histogram
 	metrics.ObserveCoreTxPerBlock(float64(block.TotalActions))
@@ -198,7 +247,27 @@ func (m *ReplicaMonitor) processBlock(block *replica.BlockMetrics) {
 	// update last processed metrics
 	metrics.SetCoreLastProcessedRound(float64(block.Round))
 	metrics.SetCoreLastProcessedTime(float64(block.Time.Unix()))
-	metrics.MarkMonitorTick("replica")
+}
+
+func publishReplicaResponses(response replica.ResponseMetrics) {
+	metrics.HLReplicaResponseCoverageTotal.WithLabelValues(response.Coverage).Inc()
+	metrics.HLReplicaResponseCountRelationTotal.WithLabelValues(response.CountRelation).Inc()
+	validRecords := response.Records - response.MalformedRecords
+	if validRecords > 0 {
+		metrics.HLReplicaResponseRecordsTotal.WithLabelValues("valid").Add(float64(validRecords))
+	}
+	if response.MalformedRecords > 0 {
+		metrics.HLReplicaResponseRecordsTotal.WithLabelValues("malformed").Add(float64(response.MalformedRecords))
+	}
+	if response.MalformedContainers > 0 {
+		metrics.HLReplicaParserEventsTotal.WithLabelValues("response", "malformed_container").Add(float64(response.MalformedContainers))
+	}
+	for status, count := range response.ActionStatuses {
+		metrics.HLReplicaResponseActionStatusTotal.WithLabelValues(status).Add(float64(count))
+	}
+	for outcome, count := range response.Outcomes {
+		metrics.HLReplicaExecutionOutcomesTotal.WithLabelValues(outcome).Add(float64(count))
+	}
 }
 
 // returns current statistics
@@ -231,48 +300,5 @@ func (m *ReplicaMonitor) GetVerificationStats() ReplicaVerificationStats {
 
 // returns the category for a given action type
 func getCategoryForAction(actionType string) string {
-	switch actionType {
-	// trading operations
-	case replica.ActionTypeOrder, replica.ActionTypeTwapOrder,
-		replica.ActionTypeCancel, replica.ActionTypeCancelByCloid,
-		replica.ActionTypeBatchModify, replica.ActionTypeModify,
-		replica.ActionTypeScheduleCancel,
-		"liquidate", "twapCancel":
-		return "trading"
-
-	// transfer operations
-	case replica.ActionTypeUsdTransfer, replica.ActionTypeSpotSend,
-		"usdSend", "spotDeploy", "withdraw3", "spotUser",
-		"vaultTransfer", "vaultDistribute", "subAccountTransfer",
-		"subAccountSpotTransfer", "cDeposit", "cWithdraw":
-		return "transfer"
-
-	// settings/account operations
-	case replica.ActionTypeUpdateLeverage, replica.ActionTypeApproveAgent,
-		replica.ActionTypeSetReferrer, replica.ActionTypeApproveBuilderFee,
-		"createSubAccount", "subAccountModify", "registerReferrer",
-		"linkStakingUser", "setDisplayName", "createVault",
-		"vaultModify", "updateIsolatedMargin", "topUpIsolatedOnlyMargin",
-		"convertToMultiSigUser", "multiSig":
-		return "settings"
-
-	// governance/system operations
-	case replica.ActionTypeTokenDelegate, replica.ActionTypeVoteAppHash,
-		"VoteEthDepositAction", "VoteEthFinalizedWithdrawalAction",
-		"VoteGlobalAction", "SetGlobalAction", "CSignerAction",
-		"ValidatorSignWithdrawalAction", "NetChildVaultPositionsAction":
-		return "governance"
-
-	// rewards/claiming
-	case replica.ActionTypeClaimRewards, "reserveRequestWeight":
-		return "rewards"
-
-	// evm operations
-	case replica.ActionTypeEvmRawTx, replica.ActionTypeEvmUserModify,
-		"evmUserSpotTransfer", "finalizeEvmContract":
-		return "evm"
-
-	default:
-		return "other"
-	}
+	return actiontypes.Category(actionType)
 }

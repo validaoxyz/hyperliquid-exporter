@@ -401,7 +401,7 @@ var (
 	})
 	HLNodeSnapshotKnown = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_node_snapshot_known_count",
-		Help: "Number of snapshot status sentinels retained on disk in the latest date directory.",
+		Help: "Number of snapshot-completion sentinels in the retained scan window of at most the two newest valid date directories; this is not cadence or capacity headroom.",
 	})
 )
 
@@ -617,11 +617,11 @@ var (
 var (
 	HLNodeObservedRunsTotal = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_node_observed_runs",
-		Help: "Number of hl-node runs observed via the filesystem (count of run-timestamp directories under data/replica_cmds/).",
+		Help: "Current number of valid retained run-timestamp directories under data/replica_cmds/; pruning can decrease this gauge and it is not a lifetime counter.",
 	})
 	HLNodeObservedRunStartSeconds = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_node_observed_run_start_seconds",
-		Help: "Unix timestamp of the most recent run's start, derived from the newest data/replica_cmds/<run_timestamp>/ mtime.",
+		Help: "Unix timestamp of the newest retained hl-node run, parsed from the immutable data/replica_cmds/<run_timestamp>/ directory name.",
 	})
 )
 
@@ -750,11 +750,11 @@ var HLConsensusValidatorJailedLocal = promauto.NewGaugeVec(prometheus.GaugeOpts{
 var (
 	HLNodeReplayEventsTotal = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_node_replay_events",
-		Help: "Number of replay events observed on disk under data/node_logs/replay/. A healthy validator has very few; growth = repeated recoveries.",
+		Help: "Current number of valid retained replay marker directories under data/node_logs/replay/; pruning can decrease this gauge and it is not a lifetime counter.",
 	})
 	HLNodeReplayLastSeconds = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_node_replay_last_seconds",
-		Help: "Unix timestamp of the most recent replay event (newest subdir mtime).",
+		Help: "Immutable start timestamp of the newest retained replay marker, parsed from its <height>_<ISO timestamp> directory name.",
 	})
 	HLNodeReplayLastHeight = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_node_replay_last_height",

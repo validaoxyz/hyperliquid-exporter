@@ -10,51 +10,11 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/validaoxyz/hyperliquid-exporter/internal/actiontypes"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
-
-// mempoolTxActionTypeAllowlist bounds the action-type label set. New action
-// variants fall into type="other" until reviewed.
-var mempoolTxActionTypeAllowlist = map[string]bool{
-	"approveAgent":                     true,
-	"approveBuilderFee":                true,
-	"agentEnableDexAbstraction":        true,
-	"agentSendAsset":                   true,
-	"agentSetAbstraction":              true,
-	"batchModify":                      true,
-	"cancel":                           true,
-	"cancelByCloid":                    true,
-	"claimRewards":                     true,
-	"evmRawTx":                         true,
-	"modify":                           true,
-	"multiSig":                         true,
-	"NetChildVaultPositionsAction":     true,
-	"noop":                             true,
-	"order":                            true,
-	"perpDeploy":                       true,
-	"scheduleCancel":                   true,
-	"sendAsset":                        true,
-	"setReferrer":                      true,
-	"SetGlobalAction":                  true,
-	"spotSend":                         true,
-	"subAccountSpotTransfer":           true,
-	"subAccountTransfer":               true,
-	"tokenDelegate":                    true,
-	"twapCancel":                       true,
-	"twapOrder":                        true,
-	"updateIsolatedMargin":             true,
-	"updateLeverage":                   true,
-	"usdClassTransfer":                 true,
-	"usdSend":                          true,
-	"userSetAbstraction":               true,
-	"ValidatorSignWithdrawalAction":    true,
-	"vaultTransfer":                    true,
-	"VoteEthFinalizedWithdrawalAction": true,
-	"voteAppHash":                      true,
-	"withdraw3":                        true,
-}
 
 var mempoolTxOrderTIFAllowlist = map[string]bool{
 	"Alo":            true,
@@ -311,13 +271,7 @@ func publishMempoolTxsLine(stats mempoolTxParsedLine) {
 }
 
 func mempoolTxActionTypeLabel(actionType string) (string, bool) {
-	if actionType == "" {
-		return "other", false
-	}
-	if mempoolTxActionTypeAllowlist[actionType] {
-		return actionType, true
-	}
-	return "other", false
+	return actiontypes.Normalize(actionType)
 }
 
 func mempoolTxOperationCount(action mempoolTxAction) int {

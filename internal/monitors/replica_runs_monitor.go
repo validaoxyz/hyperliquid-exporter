@@ -2,6 +2,8 @@ package monitors
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -11,76 +13,103 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
-// replicaRunsPollInterval — these dirs change only on hl-node startup,
-// so a slow tick is fine.
+// These directories change only on hl-node startup, so a slow poll is enough.
 const replicaRunsPollInterval = 60 * time.Second
 
-// StartReplicaRunsMonitor publishes filesystem-observable hl-node run
-// tracking. The data/replica_cmds/ directory contains one
-// `<run_timestamp>/` subdirectory per hl-node startup; counting them
-// gives the lifetime run count, and the newest mtime gives the current
-// run's start time.
-//
-// This is a deliberate redundancy with the /proc-based process monitor:
-//
-//   - process_monitor reads /proc/PID/stat — most accurate, Linux-only,
-//     fails in containerized deploys where /proc isn't visible.
-//   - replica_runs reads the data directory hl-node writes to anyway —
-//     less precise (5s mkdir granularity, not the actual process clock)
-//     but works in any environment that can read NODE_HOME.
-//
-// Both publish at the same logical metric tier so dashboards can fall
-// back gracefully when one source is unavailable.
+var errInvalidReplicaRunEntry = errors.New("invalid replica run entry")
+
+type replicaRunsSnapshot struct {
+	Retained       int
+	LatestStart    time.Time
+	LatestActivity time.Time
+}
+
+// StartReplicaRunsMonitor publishes the retained replica_cmds session window.
+// A run directory's RFC3339 name is its immutable start. Directory mtime is
+// exposed separately as filesystem activity because adding a UTC date child
+// retouches it. Neither value proves an end time or a run duration.
 func StartReplicaRunsMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	root := filepath.Join(cfg.NodeHome, "data", "replica_cmds")
-	if _, err := os.Stat(root); err != nil {
-		logger.InfoComponent("replica_runs",
-			"replica_cmds directory not present (%s); monitor idle", root)
-		<-ctx.Done()
-		return
-	}
-
-	logger.InfoComponent("replica_runs", "watching %s", root)
+	metrics.RegisterSource(metrics.SourceReplicaRuns, true)
+	logger.InfoComponent("replica_runs", "polling %s", root)
 
 	ticker := time.NewTicker(replicaRunsPollInterval)
 	defer ticker.Stop()
 
 	tickReplicaRuns(root)
-	metrics.MarkMonitorTick("replica_runs")
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			tickReplicaRuns(root)
-			metrics.MarkMonitorTick("replica_runs")
 		}
 	}
 }
 
-func tickReplicaRuns(root string) {
+func tickReplicaRuns(root string) bool {
+	metrics.MarkMonitorAttempt("replica_runs")
+	metrics.MarkSourceAttempt(metrics.SourceReplicaRuns)
+	snapshot, err := scanReplicaRuns(root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			metrics.MarkSourceAbsent(metrics.SourceReplicaRuns)
+			metrics.HLNodeObservedRunsTotal.Set(0)
+			metrics.HLNodeObservedRunStartSeconds.Set(0)
+			metrics.HLNodeObservedRunLastActivitySeconds.Set(0)
+			return false
+		}
+		stage := metrics.SourceFailureRead
+		if errors.Is(err, errInvalidReplicaRunEntry) {
+			stage = metrics.SourceFailureSchema
+		}
+		metrics.MarkSourceError(metrics.SourceReplicaRuns, stage)
+		metrics.IncMonitorError("replica_runs")
+		return false
+	}
+
+	metrics.HLNodeObservedRunsTotal.Set(float64(snapshot.Retained))
+	metrics.HLNodeObservedRunStartSeconds.Set(optionalUnix(snapshot.LatestStart))
+	metrics.HLNodeObservedRunLastActivitySeconds.Set(optionalUnix(snapshot.LatestActivity))
+	metrics.MarkSourceValidObservation(metrics.SourceReplicaRuns, snapshot.LatestStart)
+	metrics.MarkSourcePublication(metrics.SourceReplicaRuns)
+	metrics.MarkMonitorValidObservation("replica_runs")
+	metrics.MarkMonitorPublication("replica_runs")
+	return true
+}
+
+func scanReplicaRuns(root string) (replicaRunsSnapshot, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return
+		return replicaRunsSnapshot{}, err
 	}
-	var count int
-	var newestMtime time.Time
-	for _, e := range entries {
-		if !e.IsDir() {
+	var snapshot replicaRunsSnapshot
+	for _, entry := range entries {
+		if !entry.IsDir() {
 			continue
 		}
-		count++
-		info, err := e.Info()
+		start, err := time.Parse(time.RFC3339Nano, entry.Name())
 		if err != nil {
-			continue
+			return replicaRunsSnapshot{}, fmt.Errorf("%w: %q", errInvalidReplicaRunEntry, entry.Name())
 		}
-		if mt := info.ModTime(); mt.After(newestMtime) {
-			newestMtime = mt
+		info, err := entry.Info()
+		if err != nil {
+			return replicaRunsSnapshot{}, err
+		}
+		snapshot.Retained++
+		if start.After(snapshot.LatestStart) {
+			snapshot.LatestStart = start
+		}
+		if info.ModTime().After(snapshot.LatestActivity) {
+			snapshot.LatestActivity = info.ModTime()
 		}
 	}
-	metrics.HLNodeObservedRunsTotal.Set(float64(count))
-	if !newestMtime.IsZero() {
-		metrics.HLNodeObservedRunStartSeconds.Set(float64(newestMtime.Unix()))
+	return snapshot, nil
+}
+
+func optionalUnix(value time.Time) float64 {
+	if value.IsZero() {
+		return 0
 	}
+	return float64(value.Unix())
 }

@@ -8,6 +8,7 @@ import (
 
 // ReplicaBlock represents a single block from replica_cmds
 type ReplicaBlock struct {
+	Height    int64 `json:"height"`
 	ABCIBlock struct {
 		Time                string          `json:"time"`
 		Round               int64           `json:"round"`
@@ -21,6 +22,7 @@ type ReplicaBlock struct {
 
 // resets the ReplicaBlock for reuse
 func (r *ReplicaBlock) Reset() {
+	r.Height = 0
 	r.ABCIBlock.Time = ""
 	r.ABCIBlock.Round = 0
 	r.ABCIBlock.ParentRound = 0
@@ -98,7 +100,24 @@ type BlockMetrics struct {
 	ActionCounts    map[string]int
 	TotalOperations int            // new: total individual operations
 	OperationCounts map[string]int // new: operations by type
+	TotalBundles    int
+	MultiSigInner   map[string]int
+	ParserEvents    map[string]int
+	Responses       ResponseMetrics
 	ProcessDuration time.Duration
+}
+
+// ResponseMetrics is intentionally count/outcome based. It never retains
+// request hashes, response bundle hashes, users, accounts, or error text, and
+// it does not positionally associate request and response arrays.
+type ResponseMetrics struct {
+	Coverage            string
+	CountRelation       string
+	Records             int
+	MalformedRecords    int
+	MalformedContainers int
+	ActionStatuses      map[string]int
+	Outcomes            map[string]int
 }
 
 // represents a parsed action bundle
