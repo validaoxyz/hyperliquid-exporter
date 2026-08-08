@@ -81,6 +81,8 @@ tests:
         values: '1 1 1 1'
       - series: 'hl_exporter_monitor_running{job="hyperliquid-exporter",instance="node-a",monitor="consensus"}'
         values: '0 0 0 0'
+      - series: 'hl_exporter_monitor_exited_seconds{job="hyperliquid-exporter",instance="node-a",monitor="consensus"}'
+        values: '1720000000 1720000000 1720000000 1720000000'
     alert_rule_test:
       - eval_time: 3m
         alertname: HyperliquidExporterMonitorExited
@@ -104,6 +106,10 @@ tests:
       - series: 'hl_exporter_monitor_registered{job="hyperliquid-exporter",instance="unregistered",monitor="optional"}'
         values: '0 0 0 0'
       - series: 'hl_exporter_monitor_running{job="hyperliquid-exporter",instance="unregistered",monitor="optional"}'
+        values: '0 0 0 0'
+      - series: 'hl_exporter_monitor_registered{job="hyperliquid-exporter",instance="never-started",monitor="consensus"}'
+        values: '1 1 1 1'
+      - series: 'hl_exporter_monitor_running{job="hyperliquid-exporter",instance="never-started",monitor="consensus"}'
         values: '0 0 0 0'
     alert_rule_test:
       - eval_time: 3m

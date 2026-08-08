@@ -10,11 +10,12 @@ groups:
           (hl_exporter_source_read_ok{source="process"} == 1)
             and on(job, instance)
           (hl_exporter_source_schema_ok{source="process"} == 1)
+        for: 2m
         labels:
           severity: critical
         annotations:
           summary: "The hl-node process is not present"
-          description: "A complete valid procfs scan did not find the hl-node process."
+          description: "Complete valid procfs scans have not found the hl-node process for 2 minutes."
 
       - alert: HyperliquidVisorProcessDown
         expr: |
@@ -25,8 +26,9 @@ groups:
           (hl_exporter_source_read_ok{source="process"} == 1)
             and on(job, instance)
           (hl_exporter_source_schema_ok{source="process"} == 1)
+        for: 2m
         labels:
           severity: critical
         annotations:
           summary: "The hl-visor process is not present"
-          description: "A complete valid procfs scan did not find the hl-visor process."
+          description: "Complete valid procfs scans have not found the hl-visor process for 2 minutes."

@@ -41,7 +41,7 @@ var approvedRuleContracts = map[string]map[string]ruleContract{
 			severity:    "warning",
 		},
 		"HyperliquidExporterMonitorExited": {
-			expr:        `(hl_exporter_monitor_registered == 1) and (hl_exporter_monitor_running == 0)`,
+			expr:        `(hl_exporter_monitor_registered == 1) and (hl_exporter_monitor_running == 0) and (hl_exporter_monitor_exited_seconds > 0)`,
 			forDuration: "2m",
 			severity:    "warning",
 		},
@@ -61,12 +61,14 @@ var approvedRuleContracts = map[string]map[string]ruleContract{
 	},
 	"hyperliquid-linux.rules.yml": {
 		"HyperliquidNodeProcessDown": {
-			expr:     `(hl_node_process_up{process="hl-node"} == 0) and on(job, instance) (hl_exporter_source_enabled{source="process"} == 1) and on(job, instance) (hl_exporter_source_read_ok{source="process"} == 1) and on(job, instance) (hl_exporter_source_schema_ok{source="process"} == 1)`,
-			severity: "critical",
+			expr:        `(hl_node_process_up{process="hl-node"} == 0) and on(job, instance) (hl_exporter_source_enabled{source="process"} == 1) and on(job, instance) (hl_exporter_source_read_ok{source="process"} == 1) and on(job, instance) (hl_exporter_source_schema_ok{source="process"} == 1)`,
+			forDuration: "2m",
+			severity:    "critical",
 		},
 		"HyperliquidVisorProcessDown": {
-			expr:     `(hl_node_process_up{process="hl-visor"} == 0) and on(job, instance) (hl_exporter_source_enabled{source="process"} == 1) and on(job, instance) (hl_exporter_source_read_ok{source="process"} == 1) and on(job, instance) (hl_exporter_source_schema_ok{source="process"} == 1)`,
-			severity: "critical",
+			expr:        `(hl_node_process_up{process="hl-visor"} == 0) and on(job, instance) (hl_exporter_source_enabled{source="process"} == 1) and on(job, instance) (hl_exporter_source_read_ok{source="process"} == 1) and on(job, instance) (hl_exporter_source_schema_ok{source="process"} == 1)`,
+			forDuration: "2m",
+			severity:    "critical",
 		},
 	},
 	"hyperliquid-extended.rules.yml": {

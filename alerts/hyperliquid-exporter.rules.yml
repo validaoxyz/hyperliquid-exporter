@@ -28,6 +28,8 @@ groups:
           (hl_exporter_monitor_registered == 1)
             and
           (hl_exporter_monitor_running == 0)
+            and
+          (hl_exporter_monitor_exited_seconds > 0)
         for: 2m
         labels:
           severity: warning
