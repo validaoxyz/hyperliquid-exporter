@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +28,11 @@ type consensusRPCRecord struct {
 	hasRequest  bool
 	hasResponse bool
 }
+
+// This is a defensive exporter bound, not a protocol maximum. The previous
+// 100-block ceiling was inferred from one sample and current nodes exceed it.
+// Keep a positive exact integer bounded by the shared committed-record budget.
+const maxConsensusRPCServedBlocks = int64(pendingLineCap)
 
 type consensusRPCLifecycle struct {
 	session      [32]byte
@@ -287,11 +291,11 @@ func parseConsensusRPCResponse(raw json.RawMessage) ([32]byte, string, string, i
 	if err := json.Unmarshal(blocksRaw, &blocksBody); err != nil || blocksBody == nil {
 		return [32]byte{}, "", "", 0, fmt.Errorf("invalid BlocksAndTxs response")
 	}
-	var n float64
-	if rawN, present := blocksBody["n"]; !present || json.Unmarshal(rawN, &n) != nil || math.Trunc(n) != n || n < 2 || n > 100 {
+	var n int64
+	if rawN, present := blocksBody["n"]; !present || unmarshalRequiredJSON(rawN, &n) != nil || n < 1 || n > maxConsensusRPCServedBlocks {
 		return [32]byte{}, "", "", 0, fmt.Errorf("invalid served block count")
 	}
-	return digest, "ok", "blocks_and_txs", int64(n), nil
+	return digest, "ok", "blocks_and_txs", n, nil
 }
 
 func canonicalJSON(raw []byte) ([]byte, error) {

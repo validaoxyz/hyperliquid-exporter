@@ -13,7 +13,7 @@ import (
 const (
 	rpcTestTimestamp = "2026-08-08T00:00:00.000000000"
 	rpcTestRequest   = `{"content":{"BlocksAndTxs":{"after_round":10,"until_block_hash":"0xfabricated"}},"query_peers":false}`
-	rpcTestResponse  = `{"Ok":{"BlocksAndTxs":{"after_round":10,"until_block_hash":"0xfabricated","n":27,"last_block_hash":"0xresult"}}}`
+	rpcTestResponse  = `{"Ok":{"BlocksAndTxs":{"after_round":10,"until_block_hash":"0xfabricated","n":102,"last_block_hash":"0xresult"}}}`
 )
 
 func TestConsensusRPCCompleteLifecyclePublishesStagesAndServedQuantityOnce(t *testing.T) {
@@ -69,21 +69,33 @@ func TestConsensusRPCCompleteLifecyclePublishesStagesAndServedQuantityOnce(t *te
 	if got := validatorMetricValue(t, metrics.HLConsensusRPCEvents.WithLabelValues("serve", "response_sent", "ok", "blocks_and_txs")) - terminalBefore; got != 1 {
 		t.Fatalf("terminal delta = %v, want 1", got)
 	}
-	if got := validatorMetricValue(t, metrics.HLConsensusRPCBlocksServed) - blocksBefore; got != 27 {
-		t.Fatalf("served block delta = %v, want 27", got)
+	if got := validatorMetricValue(t, metrics.HLConsensusRPCBlocksServed) - blocksBefore; got != 102 {
+		t.Fatalf("served block delta = %v, want 102", got)
 	}
 	if got := tracker.accept(terminal); got != "unjoinable" {
 		t.Fatalf("replayed terminal = %q, want unjoinable", got)
 	}
 }
 
-func TestConsensusRPCRejectsOutOfContractServedCountsAndQueryPeers(t *testing.T) {
-	for _, n := range []string{"0", "-1", "101", "2.5", "null"} {
+func TestConsensusRPCAcceptsPositiveBoundedServedCounts(t *testing.T) {
+	for _, n := range []string{"1", "100", "102", fmt.Sprintf("%d", maxConsensusRPCServedBlocks)} {
+		response := fmt.Sprintf(`{"Ok":{"BlocksAndTxs":{"n":%s}}}`, n)
+		if _, outcome, content, _, err := parseConsensusRPCResponse(json.RawMessage(response)); err != nil || outcome != "ok" || content != "blocks_and_txs" {
+			t.Fatalf("served n=%s rejected: outcome=%q content=%q err=%v", n, outcome, content, err)
+		}
+	}
+}
+
+func TestConsensusRPCRejectsInvalidServedCountsAndQueryPeers(t *testing.T) {
+	for _, n := range []string{"0", "-1", "2.5", "2.0", "null", fmt.Sprintf("%d", maxConsensusRPCServedBlocks+1), "9223372036854775808"} {
 		response := fmt.Sprintf(`{"Ok":{"BlocksAndTxs":{"n":%s}}}`, n)
 		line := rpcLine(`["Rpc task response",` + rpcTestRequest + `,` + response + `]`)
 		if _, err := parseConsensusRPCLine([]byte(line)); err == nil {
 			t.Fatalf("served n=%s accepted", n)
 		}
+	}
+	if _, err := parseConsensusRPCLine([]byte(rpcLine(`["Rpc task response",` + rpcTestRequest + `,{"Ok":{"BlocksAndTxs":{}}}]`))); err == nil {
+		t.Fatal("missing served count accepted")
 	}
 
 	tracker := newConsensusRPCTracker()
