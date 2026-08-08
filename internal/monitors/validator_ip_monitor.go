@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -204,13 +205,7 @@ func runValidatorProbeCycle(ctx context.Context, now time.Time) bool {
 	jobs := make(chan validatorProbeTarget)
 	var wg sync.WaitGroup
 	for i := 0; i < validatorProbeWorkers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for target := range jobs {
-				probeValidatorTarget(ctx, target, now)
-			}
-		}()
+		startValidatorProbeWorker(ctx, jobs, now, &wg, probeValidatorTarget)
 	}
 	for _, target := range targets {
 		validatorProbeMu.Lock()
@@ -231,6 +226,37 @@ func runValidatorProbeCycle(ctx context.Context, now time.Time) bool {
 	wg.Wait()
 	publishLegacyTCPConnectSnapshot(now)
 	return true
+}
+
+func startValidatorProbeWorker(
+	ctx context.Context,
+	jobs <-chan validatorProbeTarget,
+	now time.Time,
+	wg *sync.WaitGroup,
+	probe func(context.Context, validatorProbeTarget, time.Time),
+) {
+	wg.Add(1)
+	goSafe("validator_ip", func() {
+		defer wg.Done()
+		for target := range jobs {
+			runValidatorProbeSafely(ctx, target, now, probe)
+		}
+	})
+}
+
+func runValidatorProbeSafely(
+	ctx context.Context,
+	target validatorProbeTarget,
+	now time.Time,
+	probe func(context.Context, validatorProbeTarget, time.Time),
+) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			metrics.IncMonitorPanic("validator_ip")
+			logger.ErrorComponent("validator_ip", "validator probe PANIC recovered: %v\n%s", recovered, debug.Stack())
+		}
+	}()
+	probe(ctx, target, now)
 }
 
 func currentValidatorProbeTargets(now time.Time, limit int) []validatorProbeTarget {

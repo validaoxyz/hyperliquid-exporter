@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -249,6 +250,94 @@ func TestTailStreamRetainsTornRecordUntilDelimiter(t *testing.T) {
 	appendTestFile(t, path, "ial\n")
 	if got := waitStreamValue(t, lines); got != "partial\n" {
 		t.Fatalf("reassembled line = %q", got)
+	}
+}
+
+func TestTailStreamEnforcesRecordCapBeforeDelimiterAndRecovers(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bounded")
+	var current atomic.Value
+	current.Store("")
+	lines := make(chan string, 4)
+	failures := make(chan tailStreamFailure, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tailStream(ctx, tailStreamOpts{
+			component:   "stream_test",
+			name:        "bounded stream",
+			resolve:     func() (string, error) { return current.Load().(string), nil },
+			rescanEvery: 10 * time.Millisecond,
+			eofSleep:    5 * time.Millisecond,
+			bufSize:     8,
+			recordCap:   32,
+			onLine:      func(line string) { lines <- line },
+			onFailure:   func(failure tailStreamFailure) { failures <- failure },
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(streamTestTimeout):
+			t.Fatal("tailStream did not stop after cancellation")
+		}
+	})
+
+	time.Sleep(25 * time.Millisecond)
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", 64)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current.Store(path)
+	select {
+	case got := <-failures:
+		if got != tailStreamFailureRecord {
+			t.Fatalf("oversized torn record failure = %q, want record", got)
+		}
+	case <-time.After(streamTestTimeout):
+		t.Fatal("timed out waiting for oversized record failure")
+	}
+	select {
+	case got := <-lines:
+		t.Fatalf("oversized torn record emitted as %q", got)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	appendTestFile(t, path, "\nok\n")
+	if got := waitStreamValue(t, lines); got != "ok\n" {
+		t.Fatalf("line after oversized torn record = %q, want ok", got)
+	}
+
+	appendTestFile(t, path, strings.Repeat("y", 64)+"\nafter\n")
+	select {
+	case got := <-failures:
+		if got != tailStreamFailureRecord {
+			t.Fatalf("oversized terminated record failure = %q, want record", got)
+		}
+	case <-time.After(streamTestTimeout):
+		t.Fatal("timed out waiting for terminated oversized record failure")
+	}
+	if got := waitStreamValue(t, lines); got != "after\n" {
+		t.Fatalf("line after terminated oversized record = %q, want after", got)
+	}
+
+	acceptedBoundary := strings.Repeat("z", 31) + "\n"
+	appendTestFile(t, path, acceptedBoundary)
+	if got := waitStreamValue(t, lines); got != acceptedBoundary {
+		t.Fatalf("record exactly at cap = %q, want accepted", got)
+	}
+	appendTestFile(t, path, strings.Repeat("z", 32)+"\nboundary-recovery\n")
+	select {
+	case got := <-failures:
+		if got != tailStreamFailureRecord {
+			t.Fatalf("record one byte over cap failure = %q, want record", got)
+		}
+	case <-time.After(streamTestTimeout):
+		t.Fatal("timed out waiting for cap+1 record failure")
+	}
+	if got := waitStreamValue(t, lines); got != "boundary-recovery\n" {
+		t.Fatalf("line after cap+1 record = %q, want recovery", got)
 	}
 }
 

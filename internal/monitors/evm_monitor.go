@@ -69,15 +69,16 @@ func StartEVMMonitor(ctx context.Context, cfg config.Config, errCh chan<- error)
 		onLine: func(line string) {
 			metrics.MarkMonitorAttempt("evm")
 			metrics.MarkSourceAttempt(metrics.SourceEVM)
-			if err := processor.processLine(line); err != nil {
+			if err := processor.processLineWithCommit(line, func(sourceTime time.Time) {
+				metrics.MarkSourceValidObservation(metrics.SourceEVM, sourceTime)
+				metrics.MarkSourcePublication(metrics.SourceEVM)
+				metrics.MarkMonitorValidObservation("evm")
+				metrics.MarkMonitorPublication("evm")
+			}); err != nil {
 				recordEVMParseFailure(err)
 				ReportError(ctx, "evm", errCh, fmt.Errorf("process EVM stream record: %w", err))
 				return
 			}
-			metrics.MarkSourceValidObservation(metrics.SourceEVM, processor.lastSourceTime())
-			metrics.MarkSourcePublication(metrics.SourceEVM)
-			metrics.MarkMonitorValidObservation("evm")
-			metrics.MarkMonitorPublication("evm")
 		},
 		onFailure: func(failure tailStreamFailure) {
 			switch failure {
@@ -187,7 +188,6 @@ func (productionEVMSink) addPrecompileCalls(outcome string, count uint64) {
 type evmProcessor struct {
 	mu            sync.Mutex
 	lastBlockTime time.Time
-	lastSource    time.Time
 	sink          evmMetricSink
 	recipients    *recipientLimiter
 }
@@ -200,6 +200,10 @@ func newEVMProcessor(sink evmMetricSink, recipientMetrics bool, recipientLimit i
 }
 
 func (p *evmProcessor) processLine(line string) error {
+	return p.processLineWithCommit(line, nil)
+}
+
+func (p *evmProcessor) processLineWithCommit(line string, commit func(time.Time)) error {
 	obs, err := streamevm.ParseLine([]byte(line), streamevm.FullOptions())
 	if err != nil {
 		return err
@@ -220,58 +224,57 @@ func (p *evmProcessor) processLine(line string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	p.sink.setBlockHeight(obs.Height)
-	if !p.lastBlockTime.IsZero() && obs.SourceTime.After(p.lastBlockTime) {
-		delta := obs.SourceTime.Sub(p.lastBlockTime)
-		p.sink.recordBlockTimeMilliseconds(float64(delta) / float64(time.Millisecond))
-	}
-	if p.lastBlockTime.IsZero() || obs.SourceTime.After(p.lastBlockTime) {
-		p.lastBlockTime = obs.SourceTime
-	}
-	p.lastSource = obs.SourceTime
-	p.sink.setLatestBlockTime(obs.SourceTime.Unix())
-	p.sink.setGasSnapshot(gasUsed, gasLimit, gasRatio)
-	p.sink.setBaseFeeGwei(baseFeeGwei)
-	p.sink.setPriorityFeeGwei(priorityFeeGwei, obs.HasPriorityFee)
-	p.sink.recordTxCount(obs.TransactionCount)
+	publish := func() {
+		p.sink.setBlockHeight(obs.Height)
+		if !p.lastBlockTime.IsZero() && obs.SourceTime.After(p.lastBlockTime) {
+			delta := obs.SourceTime.Sub(p.lastBlockTime)
+			p.sink.recordBlockTimeMilliseconds(float64(delta) / float64(time.Millisecond))
+		}
+		if p.lastBlockTime.IsZero() || obs.SourceTime.After(p.lastBlockTime) {
+			p.lastBlockTime = obs.SourceTime
+		}
+		p.sink.setLatestBlockTime(obs.SourceTime.Unix())
+		p.sink.setGasSnapshot(gasUsed, gasLimit, gasRatio)
+		p.sink.setBaseFeeGwei(baseFeeGwei)
+		p.sink.setPriorityFeeGwei(priorityFeeGwei, obs.HasPriorityFee)
+		p.sink.recordTxCount(obs.TransactionCount)
 
-	shapeCounts := map[string]uint64{
-		streamevm.TxShapeCreate:  0,
-		streamevm.TxShapeMessage: 0,
-		streamevm.TxShapeUnknown: 0,
-	}
-	for _, tx := range obs.Transactions {
-		p.sink.incrementTxType(tx.Type)
-		shapeCounts[tx.Shape]++
-		if tx.Shape == streamevm.TxShapeMessage && p.recipients.enabled {
-			p.sink.incrementRecipient(p.recipients.label(tx.Recipient))
+		shapeCounts := map[string]uint64{
+			streamevm.TxShapeCreate:  0,
+			streamevm.TxShapeMessage: 0,
+			streamevm.TxShapeUnknown: 0,
+		}
+		for _, tx := range obs.Transactions {
+			p.sink.incrementTxType(tx.Type)
+			shapeCounts[tx.Shape]++
+			if tx.Shape == streamevm.TxShapeMessage && p.recipients.enabled {
+				p.sink.incrementRecipient(p.recipients.label(tx.Recipient))
+			}
+		}
+		for _, shape := range []string{streamevm.TxShapeCreate, streamevm.TxShapeMessage, streamevm.TxShapeUnknown} {
+			p.sink.incrementTxShape(shape, shapeCounts[shape])
+		}
+		if obs.ReceiptsEnabled {
+			p.sink.incrementReceiptOutcome("success", obs.ReceiptOutcomes.Success)
+			p.sink.incrementReceiptOutcome("failed", obs.ReceiptOutcomes.Failed)
+			p.sink.incrementReceiptOutcome("unknown", obs.ReceiptOutcomes.Unknown)
+			if obs.ReceiptCountMismatch {
+				p.sink.markCountMismatch(obs.Height)
+			}
+		}
+		if obs.SystemTxsEnabled {
+			p.sink.addSystemTxItems(obs.SystemTxCount)
+		}
+		if obs.PrecompileCallsEnabled {
+			p.sink.addPrecompileCalls("ok", obs.PrecompileOutcomes.OK)
+			p.sink.addPrecompileCalls("other", obs.PrecompileOutcomes.Other)
+		}
+		if commit != nil {
+			commit(obs.SourceTime)
 		}
 	}
-	for _, shape := range []string{streamevm.TxShapeCreate, streamevm.TxShapeMessage, streamevm.TxShapeUnknown} {
-		p.sink.incrementTxShape(shape, shapeCounts[shape])
-	}
-	if obs.ReceiptsEnabled {
-		p.sink.incrementReceiptOutcome("success", obs.ReceiptOutcomes.Success)
-		p.sink.incrementReceiptOutcome("failed", obs.ReceiptOutcomes.Failed)
-		p.sink.incrementReceiptOutcome("unknown", obs.ReceiptOutcomes.Unknown)
-		if obs.ReceiptCountMismatch {
-			p.sink.markCountMismatch(obs.Height)
-		}
-	}
-	if obs.SystemTxsEnabled {
-		p.sink.addSystemTxItems(obs.SystemTxCount)
-	}
-	if obs.PrecompileCallsEnabled {
-		p.sink.addPrecompileCalls("ok", obs.PrecompileOutcomes.OK)
-		p.sink.addPrecompileCalls("other", obs.PrecompileOutcomes.Other)
-	}
+	metrics.WithPrometheusSnapshotUpdate(publish)
 	return nil
-}
-
-func (p *evmProcessor) lastSourceTime() time.Time {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.lastSource
 }
 
 // processEVMBlockAndReceiptsLine is retained as the package-level parsing

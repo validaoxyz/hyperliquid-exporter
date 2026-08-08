@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -20,6 +22,45 @@ func TestValidatorProbeCycleIsSingleFlight(t *testing.T) {
 	validatorProbeCycleMu.Unlock()
 	if !runValidatorProbeCycle(context.Background(), time.Now()) {
 		t.Fatal("idle validator probe cycle was rejected")
+	}
+}
+
+func TestValidatorProbeWorkersRecoverPerJobWithoutDrainingPool(t *testing.T) {
+	panicCounter := metrics.HLExporterMonitorPanicsTotal.WithLabelValues("validator_ip")
+	before := validatorMetricValue(t, panicCounter)
+	jobs := make(chan validatorProbeTarget)
+	var wg sync.WaitGroup
+	var completed atomic.Int32
+	for range validatorProbeWorkers {
+		startValidatorProbeWorker(context.Background(), jobs, time.Now(), &wg, func(_ context.Context, target validatorProbeTarget, _ time.Time) {
+			if target.ip == "panic" {
+				panic("synthetic validator probe panic")
+			}
+			completed.Add(1)
+		})
+	}
+	const panicJobs = validatorProbeWorkers + 3
+	producerDone := make(chan struct{})
+	go func() {
+		defer close(producerDone)
+		for range panicJobs {
+			jobs <- validatorProbeTarget{ip: "panic"}
+		}
+		jobs <- validatorProbeTarget{ip: "success"}
+		close(jobs)
+	}()
+	select {
+	case <-producerDone:
+	case <-time.After(time.Second):
+		t.Fatal("probe producer blocked after workers recovered panics")
+	}
+	wg.Wait()
+
+	if got := validatorMetricValue(t, panicCounter) - before; got != panicJobs {
+		t.Fatalf("recovered validator probe panics = %v, want %d", got, panicJobs)
+	}
+	if got := completed.Load(); got != 1 {
+		t.Fatalf("post-panic probe jobs completed = %d, want 1", got)
 	}
 }
 

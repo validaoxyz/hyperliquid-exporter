@@ -120,6 +120,8 @@ func commitValidatorAPISnapshot(summaries []hyperliquidapi.ValidatorSummary, sna
 		// observations can reconcile in this same generation.
 		metrics.ReplaceValidatorSnapshot(snapshot)
 		reconcileValidatorExtras(summaries)
+		refreshRetainedConsensusStatusUnlocked(time.Now())
+		refreshJailedLocalLabelsUnlocked()
 		metrics.MarkSourceValidObservation(metrics.SourceValidatorAPI, time.Time{})
 		metrics.MarkSourcePublication(metrics.SourceValidatorAPI)
 		metrics.MarkMonitorValidObservation("validator_api")
@@ -204,6 +206,94 @@ func isFullHexAddress(s string) bool {
 		}
 	}
 	return true
+}
+
+func normalizeWireAddress(value string) (string, bool) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if isFullHexAddress(value) || metrics.IsAddressTruncated(value) {
+		return value, true
+	}
+	return value, false
+}
+
+// wireAddressKey is stable before and after the mutable full-address cache is
+// populated. Consensus records use the first four and last four hex digits;
+// full status/API spellings are reduced to that same wire identity only for
+// correlations that must survive full/truncated spelling changes. Do not use
+// this lossy key alone to deduplicate two full addresses.
+func wireAddressKey(value string) string {
+	if isFullHexAddress(value) {
+		return value[:6] + ".." + value[len(value)-4:]
+	}
+	separator := strings.Index(value, "..")
+	if separator < 6 {
+		return value
+	}
+	return value[:6] + ".." + value[len(value)-4:]
+}
+
+// wireAddressesConflict implements the source's mixed full/truncated alias
+// rules without treating two distinct full 20-byte addresses that happen to
+// share the same wire fingerprint as equal. A truncated spelling conflicts
+// with any matching full spelling because the source does not carry enough
+// bits to distinguish them.
+func wireAddressesConflict(existing, candidate string) bool {
+	if existing == candidate {
+		return true
+	}
+	existingFull := isFullHexAddress(existing)
+	candidateFull := isFullHexAddress(candidate)
+	if existingFull && candidateFull {
+		return false
+	}
+	if existingFull {
+		return fullAddressMatchesTruncated(existing, candidate)
+	}
+	if candidateFull {
+		return fullAddressMatchesTruncated(candidate, existing)
+	}
+
+	existingPrefix, existingSuffix := truncatedAddressParts(existing)
+	candidatePrefix, candidateSuffix := truncatedAddressParts(candidate)
+	return existingSuffix == candidateSuffix &&
+		(strings.HasPrefix(existingPrefix, candidatePrefix) || strings.HasPrefix(candidatePrefix, existingPrefix))
+}
+
+func truncatedAddressParts(value string) (prefix, suffix string) {
+	separator := strings.Index(value, "..")
+	if separator < 0 {
+		return value, ""
+	}
+	return value[:separator], value[separator+2:]
+}
+
+func fullAddressMatchesTruncated(full, truncated string) bool {
+	prefix, suffix := truncatedAddressParts(truncated)
+	return suffix != "" && strings.HasPrefix(full, prefix) && strings.HasSuffix(full, suffix)
+}
+
+func appendUniqueWireAddress(seen []string, candidate string) ([]string, bool) {
+	for _, existing := range seen {
+		if wireAddressesConflict(existing, candidate) {
+			return seen, false
+		}
+	}
+	return append(seen, candidate), true
+}
+
+type wireAddressRelation struct {
+	subject  string
+	reporter string
+}
+
+func appendUniqueWireRelation(seen []wireAddressRelation, candidate wireAddressRelation) ([]wireAddressRelation, bool) {
+	for _, existing := range seen {
+		if wireAddressesConflict(existing.subject, candidate.subject) &&
+			wireAddressesConflict(existing.reporter, candidate.reporter) {
+			return seen, false
+		}
+	}
+	return append(seen, candidate), true
 }
 
 // returns the HL resolver instance

@@ -2,6 +2,7 @@ package monitors
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,27 @@ func TestStatusStakeRowsLegacyArray(t *testing.T) {
 	}
 	if s, ok := rows[0][1].(string); !ok || s != "0x2222222222222222222222222222222222222222" {
 		t.Fatalf("legacy row[1] should be a signer string, got %v", rows[0][1])
+	}
+}
+
+func TestRegisterStakeRowsRegistersLegacySignerAndStableAlias(t *testing.T) {
+	const validator = "0x1111111111111111111111111111111111111111"
+	const signer = "0x2222222222222222222222222222222222222222"
+	metrics.ClearAddressCache()
+	t.Cleanup(metrics.ClearAddressCache)
+
+	count, mapping := registerStakeRows([][]interface{}{{validator, signer}})
+	if count != 1 {
+		t.Fatalf("mapping count = %d, want 1", count)
+	}
+	if got := mapping[signer]; got != validator {
+		t.Fatalf("mapping[%q] = %q, want %q", signer, got, validator)
+	}
+	if _, exists := mapping["0x2222..2222"]; exists {
+		t.Fatal("provisional mapping stored a lossy truncated signer key")
+	}
+	if got := metrics.ExpandAddress("0x2222..2222"); got != signer {
+		t.Fatalf("registered signer expansion = %q, want %q", got, signer)
 	}
 }
 
@@ -85,20 +107,45 @@ func TestDecodeStatusStakeRowsRejectsOversizedGeneration(t *testing.T) {
 	}
 }
 
+func TestDecodeStatusStakeRowsRejectsInvalidAndDuplicateIdentities(t *testing.T) {
+	for _, raw := range []string{
+		`[["not-an-address",1]]`,
+		`[["0x1111111111111111111111111111111111111111",-1]]`,
+		`[["0x1111111111111111111111111111111111111111",1],["0x1111111111111111111111111111111111111111",2]]`,
+		`[["0x1111111111111111111111111111111111111111",1],["0x1111..1111",2]]`,
+		`[["0x1111111111111111111111111111111111111111","0x2222222222222222222222222222222222222222"],["0x3333333333333333333333333333333333333333","0x2222222222222222222222222222222222222222"]]`,
+		`[["0x1111111111111111111111111111111111111111","0x2222222222222222222222222222222222222222"],["0x3333333333333333333333333333333333333333","0x2222..2222"]]`,
+		`[["0x1111111111111111111111111111111111111111",1],["0x3333333333333333333333333333333333333333","0x2222222222222222222222222222222222222222"]]`,
+	} {
+		if _, err := decodeStatusStakeRows(json.RawMessage(raw)); err == nil {
+			t.Fatalf("invalid current_stakes generation accepted: %s", raw)
+		}
+	}
+	for _, raw := range []string{
+		`[["0x1111..1111",1],["0x2222..2222",2]]`,
+		`[["0x1111..1111","0x3333..3333"],["0x2222..2222","0x4444..4444"]]`,
+	} {
+		if _, err := decodeStatusStakeRows(json.RawMessage(raw)); err != nil {
+			t.Fatalf("historical truncated identities rejected: %v", err)
+		}
+	}
+}
+
 func TestParseValidatorStatusLineRejectsNullRequiredFields(t *testing.T) {
 	const timestamp = `"2026-07-04T08:00:00.000000000"`
 	const home = `"0x2222222222222222222222222222222222222222"`
 	validBody := `{"home_validator":` + home + `,"round":1,"current_stakes":[],"current_jailed_validators":[]}`
 	for name, line := range map[string]string{
-		"timestamp":           `[null,` + validBody + `]`,
-		"body":                `[` + timestamp + `,null]`,
-		"home_validator":      `[` + timestamp + `,{"home_validator":null,"round":1,"current_stakes":[],"current_jailed_validators":[]}]`,
-		"round":               `[` + timestamp + `,{"home_validator":` + home + `,"round":null,"current_stakes":[],"current_jailed_validators":[]}]`,
-		"current_stakes":      `[` + timestamp + `,{"home_validator":` + home + `,"round":1,"current_stakes":null,"current_jailed_validators":[]}]`,
-		"wrapped stakes":      `[` + timestamp + `,{"home_validator":` + home + `,"round":1,"current_stakes":{"validator_to_stake":null},"current_jailed_validators":[]}]`,
-		"jailed validators":   `[` + timestamp + `,{"home_validator":` + home + `,"round":1,"current_stakes":[],"current_jailed_validators":null}]`,
-		"null stake row":      `[` + timestamp + `,{"home_validator":` + home + `,"round":1,"current_stakes":[null],"current_jailed_validators":[]}]`,
-		"null stake identity": `[` + timestamp + `,{"home_validator":` + home + `,"round":1,"current_stakes":[[null,1]],"current_jailed_validators":[]}]`,
+		"timestamp":            `[null,` + validBody + `]`,
+		"body":                 `[` + timestamp + `,null]`,
+		"home_validator":       `[` + timestamp + `,{"home_validator":null,"round":1,"current_stakes":[],"current_jailed_validators":[]}]`,
+		"empty home_validator": `[` + timestamp + `,{"home_validator":"","round":1,"current_stakes":[],"current_jailed_validators":[]}]`,
+		"round":                `[` + timestamp + `,{"home_validator":` + home + `,"round":null,"current_stakes":[],"current_jailed_validators":[]}]`,
+		"current_stakes":       `[` + timestamp + `,{"home_validator":` + home + `,"round":1,"current_stakes":null,"current_jailed_validators":[]}]`,
+		"wrapped stakes":       `[` + timestamp + `,{"home_validator":` + home + `,"round":1,"current_stakes":{"validator_to_stake":null},"current_jailed_validators":[]}]`,
+		"jailed validators":    `[` + timestamp + `,{"home_validator":` + home + `,"round":1,"current_stakes":[],"current_jailed_validators":null}]`,
+		"null stake row":       `[` + timestamp + `,{"home_validator":` + home + `,"round":1,"current_stakes":[null],"current_jailed_validators":[]}]`,
+		"null stake identity":  `[` + timestamp + `,{"home_validator":` + home + `,"round":1,"current_stakes":[[null,1]],"current_jailed_validators":[]}]`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := parseValidatorStatusLine(line); err == nil {
@@ -177,6 +224,72 @@ func TestProcessValidatorStatusLineLegacySchema(t *testing.T) {
 	}
 }
 
+func TestGetValidatorStatusCorrelatesFullAndTruncatedLegacySigner(t *testing.T) {
+	const validator = "0x3333333333333333333333333333333333333333"
+	const fullSigner = "0x4444444444444444444444444444444444444444"
+	const truncatedSigner = "0x4444..4444"
+
+	for name, pair := range map[string][2]string{
+		"full home and truncated row": {fullSigner, truncatedSigner},
+		"truncated home and full row": {truncatedSigner, fullSigner},
+	} {
+		t.Run(name, func(t *testing.T) {
+			nodeHome := t.TempDir()
+			statusDir := filepath.Join(nodeHome, "data", "node_logs", "status", "hourly", "20260808")
+			if err := os.MkdirAll(statusDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			line := `["2026-08-08T01:00:00.000000000",{"home_validator":"` + pair[0] + `","round":1,"current_stakes":[["` + validator + `","` + pair[1] + `"]]}]` + "\n"
+			if err := os.WriteFile(filepath.Join(statusDir, "1"), []byte(line), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, isValidator := GetValidatorStatus(nodeHome)
+			if !isValidator || got != validator {
+				t.Fatalf("GetValidatorStatus = %q, %t; want %q, true", got, isValidator, validator)
+			}
+		})
+	}
+}
+
+func TestGetValidatorStatusDoesNotGuessAmbiguousTruncatedLegacySigner(t *testing.T) {
+	validatorOne := fmt.Sprintf("0x1111%032x1111", 1)
+	validatorTwo := fmt.Sprintf("0x2222%032x2222", 2)
+	signerOne := fmt.Sprintf("0xabcd%032x1234", 1)
+	signerTwo := fmt.Sprintf("0xabcd%032x1234", 2)
+	const truncatedSigner = "0xabcd..1234"
+
+	metrics.ClearAddressCache()
+	metrics.ReplaceValidatorSnapshot(nil)
+	t.Cleanup(func() {
+		metrics.ClearAddressCache()
+		metrics.ReplaceValidatorSnapshot(nil)
+	})
+
+	nodeHome := t.TempDir()
+	statusDir := filepath.Join(nodeHome, "data", "node_logs", "status", "hourly", "20260808")
+	if err := os.MkdirAll(statusDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(statusDir, "1")
+	write := func(home string) {
+		t.Helper()
+		line := fmt.Sprintf(`["2026-08-08T01:00:00.000000000",{"home_validator":%q,"round":1,"current_stakes":[[%q,%q],[%q,%q]]}]`+"\n",
+			home, validatorOne, signerOne, validatorTwo, signerTwo)
+		if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write(truncatedSigner)
+	if got, isValidator := GetValidatorStatus(nodeHome); !isValidator || got != "" {
+		t.Fatalf("ambiguous truncated home = %q, %t; want unknown validator, true role", got, isValidator)
+	}
+	write(signerTwo)
+	if got, isValidator := GetValidatorStatus(nodeHome); !isValidator || got != validatorTwo {
+		t.Fatalf("exact full home = %q, %t; want %q, true", got, isValidator, validatorTwo)
+	}
+}
+
 func TestReadValidatorStatusWithdrawsJailedRowsOnAbsenceAndStaleness(t *testing.T) {
 	oldJailed := jailedLocalPrev
 	oldAddress := lastValidatorAddress
@@ -248,4 +361,28 @@ func TestReadValidatorStatusWithdrawsJailedRowsOnAbsenceAndStaleness(t *testing.
 		t.Fatal(err)
 	}
 	assertWithdrawn()
+}
+
+func TestReadLastLineIgnoresUnterminatedSuffix(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "status")
+	first := `["2026-08-08T00:00:00.000000000",{"round":1}]`
+	second := `["2026-08-08T00:01:00.000000000",{"round":2}]`
+	if err := os.WriteFile(path, []byte(first+"\n"+second), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ReadLastLine(path); err != nil || got != first {
+		t.Fatalf("last committed line = %q, %v; want first", got, err)
+	}
+	if err := os.WriteFile(path, []byte(second), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ReadLastLine(path); err == nil || got != "" {
+		t.Fatalf("unterminated-only file returned %q, %v", got, err)
+	}
+	if err := os.WriteFile(path, []byte(first+"\n"+second+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ReadLastLine(path); err != nil || got != second {
+		t.Fatalf("completed second line = %q, %v", got, err)
+	}
 }

@@ -128,6 +128,20 @@ func TestCorrectedLogicalSourcesUseSnapshotBarrier(t *testing.T) {
 		})
 	})
 
+	t.Run("evm", func(t *testing.T) {
+		processor := newEVMProcessor(newRecordingEVMSink(), false, 0)
+		line := evmFixtureLine("2026-08-08T03:15:14.100000000", "0x2a", false, `[]`)
+		assertUsesSnapshotBarrier(t, func() {
+			if err := processor.processLine(line); err != nil {
+				t.Errorf("process EVM line: %v", err)
+			}
+		})
+	})
+
+	t.Run("replica", func(t *testing.T) {
+		assertUsesSnapshotBarrier(t, func() { commitReplicaGeneration(func() {}) })
+	})
+
 	t.Run("info_meta", func(t *testing.T) {
 		assertUsesSnapshotBarrier(t, func() {
 			recordMetaFailure(metrics.InfoProbeOutcomeDecode, metrics.SourceFailureDecode, time.Unix(100, 0))

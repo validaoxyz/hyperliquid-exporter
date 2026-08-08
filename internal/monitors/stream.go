@@ -31,6 +31,7 @@ type tailStreamOpts struct {
 	rescanEvery time.Duration
 	eofSleep    time.Duration
 	bufSize     int // bufio reader size; 0 means 64 KiB
+	recordCap   int // maximum committed record size; 0 means pendingLineCap
 	// consumeStartupRecords is reserved for a source/layout that was proven
 	// to appear after the exporter started. Ordinary startup files remain
 	// historical and are sought to EOF.
@@ -100,6 +101,10 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 	}
 	if o.eofSleep <= 0 {
 		o.eofSleep = 100 * time.Millisecond
+	}
+	recordCap := o.recordCap
+	if recordCap <= 0 {
+		recordCap = pendingLineCap
 	}
 
 	activate := func(path string, skipExisting bool) bool {
@@ -226,53 +231,54 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 
 		madeProgress := false
 		cleanEOF := false
+	readLoop:
 		for {
-			chunk, err := reader.ReadString('\n')
-			if err != nil {
-				if len(chunk) > 0 {
-					madeProgress = true
-					if discardedBytes > 0 {
-						discardedBytes += int64(len(chunk))
-					} else {
-						pending = append(pending, chunk...)
-						if len(pending) > pendingLineCap {
-							if o.onFailure != nil {
-								o.onFailure(tailStreamFailureRecord)
-							}
-							logger.WarningComponent(o.component, "%s: discarding oversized partial record (%d bytes)", o.name, len(pending))
-							discardedBytes = int64(len(pending))
-							pending = nil
-						}
-					}
-				}
-				if err != io.EOF {
+			// ReadSlice never grows the reader's buffer. Long records arrive as
+			// bounded ErrBufferFull fragments, so recordCap is a real memory bound
+			// rather than a check performed after an unbounded ReadString allocation.
+			fragment, err := reader.ReadSlice('\n')
+			if len(fragment) > 0 {
+				madeProgress = true
+				if discardedBytes > 0 {
+					discardedBytes += int64(len(fragment))
+				} else if len(pending) > recordCap-len(fragment) {
+					recordBytes := len(pending) + len(fragment)
 					if o.onFailure != nil {
-						o.onFailure(tailStreamFailureRead)
+						o.onFailure(tailStreamFailureRecord)
 					}
-					logger.WarningComponent(o.component, "%s: read error: %v", o.name, err)
+					logger.WarningComponent(o.component, "%s: discarding oversized record (%d+ bytes)", o.name, recordBytes)
+					discardedBytes = int64(recordBytes)
+					pending = nil
 				} else {
-					cleanEOF = true
+					pending = append(pending, fragment...)
 				}
-				break
 			}
 
-			madeProgress = true
-			if discardedBytes > 0 {
-				// The delimiter commits the deliberately discarded corrupt
-				// record and is the first point at which its cursor may move.
-				committedOffset += discardedBytes + int64(len(chunk))
-				discardedBytes = 0
-				continue
-			}
-
-			line := chunk
-			if len(pending) > 0 {
-				line = string(pending) + chunk
+			switch err {
+			case nil:
+				if discardedBytes > 0 {
+					// The delimiter commits the deliberately discarded corrupt
+					// record and is the first point at which its cursor may move.
+					committedOffset += discardedBytes
+					discardedBytes = 0
+					continue
+				}
 				committedOffset += int64(len(pending))
+				line := string(pending)
 				pending = pending[:0]
+				o.onLine(line)
+			case bufio.ErrBufferFull:
+				continue
+			case io.EOF:
+				cleanEOF = true
+				break readLoop
+			default:
+				if o.onFailure != nil {
+					o.onFailure(tailStreamFailureRead)
+				}
+				logger.WarningComponent(o.component, "%s: read error: %v", o.name, err)
+				break readLoop
 			}
-			committedOffset += int64(len(chunk))
-			o.onLine(line)
 		}
 
 		if cleanEOF && o.onIdle != nil {

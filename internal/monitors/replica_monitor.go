@@ -126,11 +126,7 @@ func (m *ReplicaMonitor) streamLoop(ctx context.Context) {
 			}
 			m.parser.ReturnBlock(block)
 
-			m.processBlock(blockMetrics)
-			metrics.MarkSourceValidObservation(metrics.SourceReplica, blockMetrics.Time)
-			metrics.MarkSourcePublication(metrics.SourceReplica)
-			metrics.MarkMonitorValidObservation("replica")
-			metrics.MarkMonitorPublication("replica")
+			m.commitBlock(blockMetrics)
 			blocksProcessed++
 		},
 		onIdle: func() {
@@ -151,6 +147,20 @@ func (m *ReplicaMonitor) streamLoop(ctx context.Context) {
 			metrics.IncMonitorError("replica")
 		},
 	})
+}
+
+func (m *ReplicaMonitor) commitBlock(block *replica.BlockMetrics) {
+	commitReplicaGeneration(func() {
+		m.processBlock(block)
+		metrics.MarkSourceValidObservation(metrics.SourceReplica, block.Time)
+		metrics.MarkSourcePublication(metrics.SourceReplica)
+		metrics.MarkMonitorValidObservation("replica")
+		metrics.MarkMonitorPublication("replica")
+	})
+}
+
+func commitReplicaGeneration(publish func()) {
+	metrics.WithPrometheusSnapshotUpdate(publish)
 }
 
 func (m *ReplicaMonitor) recordParseFailure(err error) {

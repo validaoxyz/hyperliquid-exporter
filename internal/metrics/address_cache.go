@@ -7,9 +7,12 @@ import (
 )
 
 var (
-	// stores mappings from truncated addresses to full addresses
-	addressCache   = make(map[string]string)
-	addressCacheMu sync.RWMutex
+	// stores only uniquely resolvable truncated addresses. If two full
+	// addresses share one truncated spelling, the spelling is moved to the
+	// ambiguous set and expansion deliberately stays unresolved.
+	addressCache          = make(map[string]string)
+	ambiguousAddressCache = make(map[string]struct{})
+	addressCacheMu        sync.RWMutex
 
 	// matches addresses in format "0x1234..5678"
 	truncatedAddressPattern = regexp.MustCompile(`^0x[a-fA-F0-9]{4,6}\.\.[a-fA-F0-9]{4}$`)
@@ -28,7 +31,14 @@ func RegisterFullAddress(fullAddress string) {
 	truncated := truncateAddress(fullAddress)
 
 	addressCacheMu.Lock()
-	addressCache[truncated] = fullAddress
+	if _, ambiguous := ambiguousAddressCache[truncated]; !ambiguous {
+		if existing, exists := addressCache[truncated]; exists && existing != fullAddress {
+			delete(addressCache, truncated)
+			ambiguousAddressCache[truncated] = struct{}{}
+		} else {
+			addressCache[truncated] = fullAddress
+		}
+	}
 	addressCacheMu.Unlock()
 }
 
@@ -82,5 +92,6 @@ func GetAddressCacheSize() int {
 func ClearAddressCache() {
 	addressCacheMu.Lock()
 	addressCache = make(map[string]string)
+	ambiguousAddressCache = make(map[string]struct{})
 	addressCacheMu.Unlock()
 }

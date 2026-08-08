@@ -347,12 +347,14 @@ func TestBlockTimePrecisionLagAndRequiredFields(t *testing.T) {
 }
 
 func TestParseStatusSnapshotPreservesNullZeroOmissionAndRounds(t *testing.T) {
+	const signerOne = "0x1111111111111111111111111111111111111111"
+	const signerTwo = "0x2222222222222222222222222222222222222222"
 	line := []byte(`["2026-08-08T00:00:00.000000000",{` +
 		`"round":100,"heartbeat_statuses":[` +
-		`["0xsig1",{"since_last_success":12.5,"last_ack_duration":0}],` +
-		`["0xsig2",{"since_last_success":20,"last_ack_duration":null}]],` +
-		`"disconnected_validators":[["0xsig1",[["0xsig2",42]]]],` +
-		`"validators_missing_heartbeat":["0xsig2"]}]`)
+		`["` + signerOne + `",{"since_last_success":12.5,"last_ack_duration":0}],` +
+		`["` + signerTwo + `",{"since_last_success":20,"last_ack_duration":null}]],` +
+		`"disconnected_validators":[["` + signerOne + `",[["` + signerTwo + `",42]]]],` +
+		`"validators_missing_heartbeat":["` + signerTwo + `"]}]`)
 	snapshot, err := parseStatusSnapshot(line)
 	if err != nil {
 		t.Fatal(err)
@@ -375,10 +377,10 @@ func TestParseStatusSnapshotPreservesNullZeroOmissionAndRounds(t *testing.T) {
 		`["2026-08-08T00:00:00.000000000",{"round":1,"heartbeat_statuses":null}]`,
 		`["2026-08-08T00:00:00.000000000",{"round":1,"disconnected_validators":null}]`,
 		`["2026-08-08T00:00:00.000000000",{"heartbeat_statuses":[]}]`,
-		`["2026-08-08T00:00:00.000000000",{"round":1,"heartbeat_statuses":[["x",{"last_ack_duration":-1}]]}]`,
-		`["2026-08-08T00:00:00.000000000",{"round":1,"heartbeat_statuses":[["x",{"since_last_success":null}]]}]`,
-		`["2026-08-08T00:00:00.000000000",{"round":1,"disconnected_validators":[["x",null]]}]`,
-		`["2026-08-08T00:00:00.000000000",{"round":1,"disconnected_validators":[["x",[["y",null]]]]}]`,
+		`["2026-08-08T00:00:00.000000000",{"round":1,"heartbeat_statuses":[["` + signerOne + `",{"last_ack_duration":-1}]]}]`,
+		`["2026-08-08T00:00:00.000000000",{"round":1,"heartbeat_statuses":[["` + signerOne + `",{"since_last_success":null}]]}]`,
+		`["2026-08-08T00:00:00.000000000",{"round":1,"disconnected_validators":[["` + signerOne + `",null]]}]`,
+		`["2026-08-08T00:00:00.000000000",{"round":1,"disconnected_validators":[["` + signerOne + `",[["` + signerTwo + `",null]]]]}]`,
 	} {
 		if _, err := parseStatusSnapshot([]byte(invalid)); err == nil {
 			t.Fatalf("invalid status accepted: %s", invalid)
@@ -390,12 +392,144 @@ func TestInvalidStatusScalarRetainsLastAcceptedTimestamp(t *testing.T) {
 	m := NewConsensusMonitor(&config.Config{})
 	last := time.Unix(1_800_000_000, 0)
 	m.lastStatusSourceTime = last
-	line := `["2026-08-08T00:00:00.000000000",{"round":1,"disconnected_validators":[["x",[["y",null]]]]}]`
+	line := `["2026-08-08T00:00:00.000000000",{"round":1,"disconnected_validators":[["0x1111111111111111111111111111111111111111",[["0x2222222222222222222222222222222222222222",null]]]]}]`
 	if err := m.processStatusLine(line); err == nil {
 		t.Fatal("status with null since_round was accepted")
 	}
 	if !m.lastStatusSourceTime.Equal(last) {
 		t.Fatalf("invalid status advanced accepted timestamp to %v", m.lastStatusSourceTime)
+	}
+}
+
+func TestStatusSnapshotIdentityAndCardinalityBounds(t *testing.T) {
+	address := func(i int) string { return fmt.Sprintf("0x%040x", i+1) }
+	heartbeats := make([]any, validatorSummaryLimit+1)
+	missing := make([]string, validatorSummaryLimit+1)
+	reporters := make([]any, validatorSummaryLimit+1)
+	for i := 0; i <= validatorSummaryLimit; i++ {
+		heartbeats[i] = []any{address(i), map[string]any{"since_last_success": 1}}
+		missing[i] = address(i)
+		reporters[i] = []any{address(i), i}
+	}
+	encode := func(value any) string {
+		t.Helper()
+		data, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	for name, field := range map[string]string{
+		"heartbeat rows": `"heartbeat_statuses":` + encode(heartbeats),
+		"missing rows":   `"validators_missing_heartbeat":` + encode(missing),
+		"reporter rows":  `"disconnected_validators":[["` + address(validatorSummaryLimit+2) + `",` + encode(reporters) + `]]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			line := `["2026-08-08T00:00:00.000000000",{"round":1,` + field + `}]`
+			if _, err := parseStatusSnapshot([]byte(line)); err == nil {
+				t.Fatalf("accepted over-cap %s", name)
+			}
+		})
+	}
+
+	valid := address(700)
+	for name, field := range map[string]string{
+		"heartbeat signer":  `"heartbeat_statuses":[["bad",{}]]`,
+		"missing signer":    `"validators_missing_heartbeat":["bad"]`,
+		"subject signer":    `"disconnected_validators":[["bad",[]]]`,
+		"reporter signer":   `"disconnected_validators":[["` + valid + `",[["bad",1]]]]`,
+		"duplicate subject": `"disconnected_validators":[["` + valid + `",[["` + address(701) + `",1]]],["` + valid + `",[["` + address(702) + `",2]]]]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			line := `["2026-08-08T00:00:00.000000000",{"round":1,` + field + `}]`
+			if _, err := parseStatusSnapshot([]byte(line)); err == nil {
+				t.Fatalf("accepted invalid %s", name)
+			}
+		})
+	}
+
+	full := "0xabcdef1111111111111111111111111111111234"
+	if _, err := parseStatusHeartbeats(json.RawMessage(`[["` + full + `",{}],["0xabcd..1234",{}]]`)); err == nil {
+		t.Fatal("full/truncated alias duplicate was accepted")
+	}
+
+	// The wire form carries only the first and last four hex digits. Distinct
+	// full addresses with the same fingerprint remain distinct identities;
+	// only a mixed full/truncated spelling is ambiguous and rejected.
+	fullA := fmt.Sprintf("0xabcd%032x1234", 1)
+	fullB := fmt.Sprintf("0xabcd%032x1234", 2)
+	if wireAddressKey(fullA) != wireAddressKey(fullB) || fullA == fullB {
+		t.Fatal("test addresses do not exercise a wire-key collision")
+	}
+	collidingFulls := []any{
+		fullA,
+		fullB,
+	}
+	collidingHeartbeats := []any{
+		[]any{fullA, map[string]any{"since_last_success": 1}},
+		[]any{fullB, map[string]any{"since_last_success": 2}},
+	}
+	collidingDisconnected := []any{
+		[]any{fullA, []any{[]any{address(800), 1}}},
+		[]any{fullB, []any{[]any{address(801), 2}}},
+	}
+	line := `["2026-08-08T00:00:00.000000000",{"round":1,"heartbeat_statuses":` + encode(collidingHeartbeats) +
+		`,"validators_missing_heartbeat":` + encode(collidingFulls) +
+		`,"disconnected_validators":` + encode(collidingDisconnected) + `}]`
+	if _, err := parseStatusSnapshot([]byte(line)); err != nil {
+		t.Fatalf("distinct full addresses sharing one wire key were rejected: %v", err)
+	}
+}
+
+func TestHeartbeatJoinKeyIsStableAcrossAddressCachePopulation(t *testing.T) {
+	sentCounter, err := otel.Meter("consensus-heartbeat-cache-order-test").Int64Counter("test_heartbeat_cache_order_sent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSentCounter := metrics.HLConsensusHeartbeatSentCounter
+	metrics.HLConsensusHeartbeatSentCounter = sentCounter
+	metrics.ClearAddressCache()
+	t.Cleanup(func() {
+		metrics.HLConsensusHeartbeatSentCounter = oldSentCounter
+		metrics.ClearAddressCache()
+	})
+
+	const full = "0x3333333333333333333333333333333333333333"
+	const truncated = "0x3333..3333"
+	m := NewConsensusMonitor(&config.Config{})
+	base := time.Now()
+	if err := m.processHeartbeatOut(&HeartbeatMessage{Validator: truncated, RandomID: 900, Round: 77}, base); err != nil {
+		t.Fatal(err)
+	}
+	metrics.RegisterFullAddress(full)
+	before := validatorMetricValue(t, metrics.HLConsensusHeartbeatJoin.WithLabelValues("self", "matched"))
+	if err := m.processHeartbeatAck(&HeartbeatAckMessage{Validator: full, RandomID: 900, Round: 77}, full, base.Add(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if got := validatorMetricValue(t, metrics.HLConsensusHeartbeatJoin.WithLabelValues("self", "matched")) - before; got != 1 {
+		t.Fatalf("cache-order-stable self join delta = %v, want 1", got)
+	}
+}
+
+func TestWireAddressesConflictUsesEverySuppliedPrefixDigit(t *testing.T) {
+	fullA := fmt.Sprintf("0xabcde%031x1234", 1)
+	fullB := fmt.Sprintf("0xabcdf%031x1234", 2)
+	for name, tc := range map[string]struct {
+		left, right string
+		want        bool
+	}{
+		"exact":                 {"0xabcde..1234", "0xabcde..1234", true},
+		"overlapping prefixes":  {"0xabcd..1234", "0xabcde..1234", true},
+		"distinct prefixes":     {"0xabcde..1234", "0xabcdf..1234", false},
+		"full matching prefix":  {fullA, "0xabcde..1234", true},
+		"full distinct prefix":  {fullA, "0xabcdf..1234", false},
+		"distinct full address": {fullA, fullB, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := wireAddressesConflict(tc.left, tc.right); got != tc.want {
+				t.Fatalf("wireAddressesConflict(%q, %q) = %t, want %t", tc.left, tc.right, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -437,6 +571,88 @@ func TestEligibleStatusSummariesRequireFreshAPIGeneration(t *testing.T) {
 	publishEligibleStatusSummariesAt(snapshot, eligible, now.Add(2*time.Minute), now)
 	if rows := b03CollectorRows(t, metrics.HLConsensusStatusEligibleSummary); len(rows) != 0 {
 		t.Fatalf("future API generation published eligible summaries: %d rows", len(rows))
+	}
+}
+
+func TestValidatorAPICommitAndFreshnessRecomputeRetainedStatusJoin(t *testing.T) {
+	oldJailedPrev := jailedLocalPrev
+	oldJailedCurrent := append([]string(nil), jailedLocalCurrent...)
+	metrics.HLConsensusStatusEligibleSummary.Reset()
+	metrics.HLConsensusValidatorJailedLocal.Reset()
+	jailedLocalPrev = make(map[string][3]string)
+	jailedLocalCurrent = nil
+	clearLatestEligibleStatusSnapshot()
+	metrics.ReplaceValidatorSnapshot(nil)
+	t.Cleanup(func() {
+		metrics.HLConsensusStatusEligibleSummary.Reset()
+		metrics.HLConsensusValidatorJailedLocal.Reset()
+		jailedLocalPrev = oldJailedPrev
+		jailedLocalCurrent = oldJailedCurrent
+		clearLatestEligibleStatusSnapshot()
+		metrics.ReplaceValidatorSnapshot(nil)
+	})
+
+	const validator = "0x1111111111111111111111111111111111111111"
+	const signer = "0x2222222222222222222222222222222222222222"
+	snapshot := statusSnapshot{
+		HeartbeatFieldPresent: true,
+		Heartbeats: []statusHeartbeat{{
+			Signer: signer,
+			SinceLastSuccess: optionalStatusFloat{
+				Present: true, Value: 1,
+			},
+		}},
+		MissingHeartbeatPresent: true,
+		MissingHeartbeatSigners: []string{signer},
+		DisconnectedPresent:     true,
+		Disconnected: []statusDisconnectedPair{{
+			SubjectSigner: signer, ReporterSigner: signer, SinceRound: 1,
+		}},
+	}
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		replaceLatestEligibleStatusSnapshot(snapshot)
+		publishConsensusStatusDetailUnlocked(snapshot)
+		publishJailedLocal([]string{signer})
+	})
+	if !validatorCollectorHasLabels(metrics.HLConsensusValidatorJailedLocal, map[string]string{
+		"validator": "unknown", "signer": signer, "name": "unknown",
+	}) {
+		t.Fatal("pre-API jailed-local row did not retain explicit unknown identity")
+	}
+	now := time.Now()
+	apiRows := []metrics.ValidatorSummarySnapshot{{
+		Validator: validator, Signer: signer, Name: "validator", Active: true,
+	}}
+	commitValidatorAPISnapshot(nil, apiRows, now)
+	if validatorCollectorHasLabels(metrics.HLConsensusValidatorJailedLocal, map[string]string{
+		"validator": "unknown", "signer": signer, "name": "unknown",
+	}) {
+		t.Fatal("API commit retained stale unknown jailed-local labels")
+	}
+	if !validatorCollectorHasLabels(metrics.HLConsensusValidatorJailedLocal, map[string]string{
+		"validator": validator, "signer": signer, "name": "validator",
+	}) {
+		t.Fatal("API commit did not re-enrich retained jailed-local row")
+	}
+	for _, state := range []string{"missing_heartbeat", "disconnected"} {
+		value, ok := b03CollectorValue(t, metrics.HLConsensusStatusEligibleSummary, map[string]string{"state": state})
+		if !ok || value != 1 {
+			t.Fatalf("API commit did not refresh retained %s join: value=%v present=%v", state, value, ok)
+		}
+	}
+
+	commitValidatorAPISnapshot(nil, []metrics.ValidatorSummarySnapshot{}, now.Add(time.Second))
+	for _, state := range []string{"missing_heartbeat", "disconnected"} {
+		value, ok := b03CollectorValue(t, metrics.HLConsensusStatusEligibleSummary, map[string]string{"state": state})
+		if !ok || value != 0 {
+			t.Fatalf("API membership removal did not refresh %s join: value=%v present=%v", state, value, ok)
+		}
+	}
+
+	metrics.ReplaceValidatorSnapshot(apiRows)
+	refreshEligibleStatusSummariesAt(time.Now().Add(validatorAPITargetFreshness + time.Second))
+	if rows := b03CollectorRows(t, metrics.HLConsensusStatusEligibleSummary); len(rows) != 0 {
+		t.Fatalf("freshness expiry retained %d eligible status rows", len(rows))
 	}
 }
 
@@ -510,9 +726,62 @@ func TestHeartbeatJoinsSeparatePeerSelfDuplicateMismatchAndExpiry(t *testing.T) 
 		t.Fatalf("self histogram delta = %d", got)
 	}
 	if !validatorCollectorHasLabels(metrics.HLConsensusHeartbeatPeerAcks, map[string]string{
-		"validator": "unknown", "signer": peer, "name": "unknown",
+		"validator": "unknown", "signer": "unknown", "name": "unknown",
 	}) {
-		t.Fatal("unmapped peer acknowledgement lost explicit signer identity")
+		t.Fatal("unmapped peer acknowledgement was not aggregated into the bounded unknown series")
+	}
+	if err := m.processHeartbeatOut(&HeartbeatMessage{Validator: "not-an-address", RandomID: 500, Round: 101}, base); err == nil {
+		t.Fatal("heartbeat accepted an invalid validator identity")
+	}
+	if err := m.processHeartbeatAck(ack, "not-an-address", base.Add(time.Second)); err == nil {
+		t.Fatal("heartbeat acknowledgement accepted an invalid source identity")
+	}
+}
+
+func TestHeartbeatPeerAckDetailIsBoundedAcrossUnknownAndKnownChurn(t *testing.T) {
+	heartbeatPeerAckSeries.Lock()
+	oldSeen := heartbeatPeerAckSeries.seen
+	heartbeatPeerAckSeries.seen = make(map[[3]string]struct{}, validatorSummaryLimit)
+	heartbeatPeerAckSeries.Unlock()
+	metrics.HLConsensusHeartbeatPeerAcks.Reset()
+	t.Cleanup(func() {
+		heartbeatPeerAckSeries.Lock()
+		heartbeatPeerAckSeries.seen = oldSeen
+		heartbeatPeerAckSeries.Unlock()
+		metrics.HLConsensusHeartbeatPeerAcks.Reset()
+	})
+
+	m := NewConsensusMonitor(&config.Config{})
+	base := time.Now()
+	local := "0xffffffffffffffffffffffffffffffffffffffff"
+	key := heartbeatKey{validator: wireAddressKey(local), randomID: 700, round: 100}
+	m.heartbeats[key] = heartbeatInfo{timestamp: base}
+	ack := &HeartbeatAckMessage{Validator: local, RandomID: 700, Round: 100}
+	for i := 0; i < 100; i++ {
+		source := fmt.Sprintf("0x%040x", i+1)
+		if err := m.processHeartbeatAck(ack, source, base.Add(time.Duration(i+1)*time.Millisecond)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rows := b03CollectorRows(t, metrics.HLConsensusHeartbeatPeerAcks); len(rows) != 1 {
+		t.Fatalf("100 unknown peer identities produced %d detailed rows, want 1", len(rows))
+	}
+
+	for i := 0; i < validatorSummaryLimit; i++ {
+		labels := [3]string{fmt.Sprintf("validator-%d", i), fmt.Sprintf("signer-%d", i), fmt.Sprintf("name-%d", i)}
+		if i == 0 {
+			// The unknown row above already occupies one sticky slot.
+			continue
+		}
+		if !admitHeartbeatPeerAckSeries(labels) {
+			t.Fatalf("series %d rejected before cap", i)
+		}
+	}
+	if admitHeartbeatPeerAckSeries([3]string{"overflow", "overflow", "overflow"}) {
+		t.Fatal("peer acknowledgement detail admitted a series beyond the lifetime cap")
+	}
+	if !admitHeartbeatPeerAckSeries([3]string{"validator-1", "signer-1", "name-1"}) {
+		t.Fatal("existing peer acknowledgement detail row was rejected at cap")
 	}
 }
 

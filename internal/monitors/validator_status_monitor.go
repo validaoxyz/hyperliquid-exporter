@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,7 +21,7 @@ import (
 // hl-node schema generations. Builds before 2026-07 wrote a bare array of
 // rows; builds since wrap the rows as {"validator_to_stake": [...]}. The
 // row element types also changed over time ([validator, signer] address
-// pairs before, [validator, stake] after), so callers must type-check
+// pairs before, [signer, stake] after), so callers must type-check
 // row[1] before using it.
 func statusStakeRows(raw json.RawMessage) [][]interface{} {
 	rows, err := decodeStatusStakeRows(raw)
@@ -50,14 +52,26 @@ func decodeStatusStakeRows(raw json.RawMessage) ([][]interface{}, error) {
 	}
 
 	rows := make([][]interface{}, 0, len(rawRows))
+	seenIdentities := make([]string, 0, len(rawRows))
+	seenSigners := make([]string, 0, len(rawRows))
+	rowKind := ""
 	for i, rawRow := range rawRows {
 		var pair []json.RawMessage
 		if err := unmarshalRequiredJSON(rawRow, &pair); err != nil || len(pair) != 2 {
 			return nil, fmt.Errorf("invalid current_stakes row %d", i)
 		}
 		var identity string
-		if err := unmarshalRequiredJSON(pair[0], &identity); err != nil || strings.TrimSpace(identity) == "" {
+		if err := unmarshalRequiredJSON(pair[0], &identity); err != nil {
 			return nil, fmt.Errorf("invalid current_stakes identity at row %d", i)
+		}
+		identity, ok := normalizeWireAddress(identity)
+		if !ok {
+			return nil, fmt.Errorf("invalid current_stakes identity at row %d", i)
+		}
+		var unique bool
+		seenIdentities, unique = appendUniqueWireAddress(seenIdentities, identity)
+		if !unique {
+			return nil, fmt.Errorf("duplicate current_stakes identity at row %d", i)
 		}
 		var second interface{}
 		if err := unmarshalRequiredJSON(pair[1], &second); err != nil {
@@ -65,12 +79,29 @@ func decodeStatusStakeRows(raw json.RawMessage) ([][]interface{}, error) {
 		}
 		switch value := second.(type) {
 		case string:
-			if strings.TrimSpace(value) == "" {
-				return nil, fmt.Errorf("empty current_stakes signer at row %d", i)
+			if rowKind == "stake" {
+				return nil, fmt.Errorf("mixed current_stakes row schemas at row %d", i)
 			}
+			rowKind = "signer"
+			value, ok = normalizeWireAddress(value)
+			if !ok {
+				return nil, fmt.Errorf("invalid current_stakes signer at row %d", i)
+			}
+			seenSigners, unique = appendUniqueWireAddress(seenSigners, value)
+			if !unique {
+				return nil, fmt.Errorf("duplicate current_stakes signer at row %d", i)
+			}
+			second = value
 		case float64:
+			if rowKind == "signer" {
+				return nil, fmt.Errorf("mixed current_stakes row schemas at row %d", i)
+			}
+			rowKind = "stake"
 			// Modern status rows carry a JSON number. Units remain unresolved;
 			// shape validation deliberately does not reinterpret the value.
+			if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+				return nil, fmt.Errorf("invalid current_stakes value at row %d", i)
+			}
 		default:
 			return nil, fmt.Errorf("unsupported current_stakes value at row %d", i)
 		}
@@ -80,8 +111,9 @@ func decodeStatusStakeRows(raw json.RawMessage) ([][]interface{}, error) {
 }
 
 // registerStakeRows extracts whatever identity information the stake rows
-// carry: validator addresses always, signer->validator mappings only on the
-// legacy [validator, signer] shape. It deliberately does not mutate the
+// carry. Every address is registered only for full/truncated expansion;
+// signer->validator mappings exist only on the legacy [validator, signer]
+// shape, while modern numeric rows begin with a signer. It deliberately does not mutate the
 // canonical registry; the startup population path installs the complete local
 // generation once, and the API owns all later replacements.
 func registerStakeRows(rows [][]interface{}) (int, map[string]string) {
@@ -91,17 +123,51 @@ func registerStakeRows(rows [][]interface{}) (int, map[string]string) {
 		if len(row) < 2 {
 			continue
 		}
-		validatorAddr, _ := row[0].(string)
-		if validatorAddr == "" {
+		identityAddr, _ := row[0].(string)
+		if identityAddr == "" {
 			continue
 		}
-		metrics.RegisterFullAddress(strings.ToLower(validatorAddr))
+		identityAddr = strings.ToLower(identityAddr)
+		metrics.RegisterFullAddress(identityAddr)
 		if signerAddr, ok := row[1].(string); ok && signerAddr != "" {
-			signerToValidator[strings.ToLower(signerAddr)] = strings.ToLower(validatorAddr)
+			signerAddr = strings.ToLower(signerAddr)
+			metrics.RegisterFullAddress(signerAddr)
+			// Keep only the exact signer mapping. RegisterFullAddress makes a
+			// uniquely resolvable truncated home signer expand to this key; an
+			// ambiguous truncation must remain unknown instead of selecting one
+			// validator by insertion order.
+			signerToValidator[signerAddr] = identityAddr
 			count++
 		}
 	}
 	return count, signerToValidator
+}
+
+func resolveLegacySignerMapping(signerToValidator map[string]string, homeSigner string) (string, bool) {
+	homeSigner = strings.ToLower(strings.TrimSpace(homeSigner))
+	if validator, ok := signerToValidator[homeSigner]; ok {
+		return validator, true
+	}
+	if expanded := strings.ToLower(metrics.ExpandAddress(homeSigner)); expanded != homeSigner {
+		if validator, ok := signerToValidator[expanded]; ok {
+			return validator, true
+		}
+	}
+
+	// Historical status generations can mix a full home_validator with a
+	// truncated signer row. Resolve that constraint only when it selects one
+	// validator in this complete generation; ambiguity remains unknown.
+	var matched string
+	for signer, validator := range signerToValidator {
+		if !wireAddressesConflict(signer, homeSigner) {
+			continue
+		}
+		if matched != "" && matched != validator {
+			return "", false
+		}
+		matched = validator
+	}
+	return matched, matched != ""
 }
 
 // state tracking for reducing log spam
@@ -147,6 +213,12 @@ func parseValidatorStatusLine(line string) (parsedValidatorStatus, error) {
 	if err := unmarshalRequiredJSON(body["home_validator"], &parsed.HomeValidator); err != nil {
 		return parsedValidatorStatus{}, fmt.Errorf("invalid home_validator: %w", err)
 	}
+	parsed.HomeValidator = strings.ToLower(strings.TrimSpace(parsed.HomeValidator))
+	if normalized, ok := normalizeWireAddress(parsed.HomeValidator); ok {
+		parsed.HomeValidator = normalized
+	} else {
+		return parsedValidatorStatus{}, fmt.Errorf("invalid home_validator identity")
+	}
 	if err := unmarshalRequiredJSON(body["round"], &parsed.Round); err != nil || parsed.Round < 0 {
 		return parsedValidatorStatus{}, fmt.Errorf("invalid validator status round")
 	}
@@ -170,12 +242,15 @@ func parseValidatorStatusLine(line string) (parsedValidatorStatus, error) {
 
 // jailedLocalPrev tracks the signer-labelled rows currently published on
 // hl_consensus_validator_jailed_local so unjailed ones are removed.
-// Only touched from the validator_status goroutine.
+// Writes are serialized by the Prometheus snapshot barrier; API commits also
+// re-resolve the retained signers so startup unknown labels do not linger.
 var jailedLocalPrev = map[string][3]string{}
+var jailedLocalCurrent []string
 
 // publishJailedLocal reconciles the node-local jailed set gauge to the
 // current status line. An empty list clears every series.
 func publishJailedLocal(current []string) {
+	jailedLocalCurrent = append(jailedLocalCurrent[:0], current...)
 	identities := metrics.ResolveSignerSnapshot(current)
 	seen := make(map[string][3]string, len(current))
 	for _, signer := range current {
@@ -195,6 +270,13 @@ func publishJailedLocal(current []string) {
 		}
 	}
 	jailedLocalPrev = seen
+}
+
+func refreshJailedLocalLabelsUnlocked() {
+	if len(jailedLocalCurrent) == 0 {
+		return
+	}
+	publishJailedLocal(append([]string(nil), jailedLocalCurrent...))
 }
 
 func StartValidatorStatusMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
@@ -327,7 +409,7 @@ func commitValidatorStatus(data parsedValidatorStatus) validatorStatusLogEvent {
 
 		// map signer to validator address
 		// first try local mapping from current_stakes
-		if validatorAddr, ok := signerToValidator[homeSigner]; ok {
+		if validatorAddr, ok := resolveLegacySignerMapping(signerToValidator, homeSigner); ok {
 			metrics.SetIsValidator(true)
 
 			// register the full address for expansion
@@ -412,16 +494,18 @@ func validateStatusSignerSet(signers []string) ([]string, error) {
 		return nil, fmt.Errorf("current_jailed_validators count %d exceeds limit %d", len(signers), validatorSummaryLimit)
 	}
 	out := make([]string, 0, len(signers))
-	seen := make(map[string]struct{}, len(signers))
+	seen := make([]string, 0, len(signers))
 	for i, signer := range signers {
-		signer = strings.ToLower(strings.TrimSpace(signer))
-		if !isFullHexAddress(signer) && !metrics.IsAddressTruncated(signer) {
+		var ok bool
+		signer, ok = normalizeWireAddress(signer)
+		if !ok {
 			return nil, fmt.Errorf("invalid jailed signer at row %d", i)
 		}
-		if _, duplicate := seen[signer]; duplicate {
+		var unique bool
+		seen, unique = appendUniqueWireAddress(seen, signer)
+		if !unique {
 			return nil, fmt.Errorf("duplicate jailed signer at row %d", i)
 		}
-		seen[signer] = struct{}{}
 		out = append(out, signer)
 	}
 	return out, nil
@@ -434,18 +518,40 @@ func ReadLastLine(filePath string) (string, error) {
 	}
 	defer file.Close()
 
-	var lastLine string
-	scanner := bufio.NewScanner(file)
+	info, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	if info.Size() == 0 {
+		return "", fmt.Errorf("status file is empty")
+	}
+	var finalByte [1]byte
+	if _, err := file.ReadAt(finalByte[:], info.Size()-1); err != nil {
+		return "", err
+	}
+
+	var previousNonempty, lastNonempty, finalToken string
+	scanner := bufio.NewScanner(io.LimitReader(file, info.Size()))
 	// status lines carry per-validator maps for the whole validator set and
 	// regularly exceed bufio's default 64 KiB token limit
 	scanner.Buffer(make([]byte, 1<<20), 8<<20)
 	for scanner.Scan() {
-		lastLine = scanner.Text()
+		finalToken = scanner.Text()
+		if strings.TrimSpace(finalToken) != "" {
+			previousNonempty = lastNonempty
+			lastNonempty = finalToken
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		return "", err
 	}
-	return lastLine, nil
+	if finalByte[0] != '\n' && strings.TrimSpace(finalToken) != "" {
+		lastNonempty = previousNonempty
+	}
+	if lastNonempty == "" {
+		return "", fmt.Errorf("status file has no newline-committed record")
+	}
+	return lastNonempty, nil
 }
 
 func GetValidatorStatus(nodeHome string) (string, bool) {
@@ -490,16 +596,10 @@ func GetValidatorStatus(nodeHome string) (string, bool) {
 	}
 
 	// legacy rows map our signer to the validator address directly
+	_, signerToValidator := registerStakeRows(data.StakeRows)
 	homeSigner := strings.ToLower(data.HomeValidator)
-	for _, row := range data.StakeRows {
-		if len(row) < 2 {
-			continue
-		}
-		validatorAddr, _ := row[0].(string)
-		signerAddr, ok := row[1].(string)
-		if ok && strings.ToLower(signerAddr) == homeSigner && validatorAddr != "" {
-			return validatorAddr, true
-		}
+	if validatorAddr, ok := resolveLegacySignerMapping(signerToValidator, homeSigner); ok {
+		return validatorAddr, true
 	}
 
 	// newer builds don't carry signer info here; try the API-fed mapping

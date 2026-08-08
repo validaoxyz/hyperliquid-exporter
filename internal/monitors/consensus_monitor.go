@@ -40,6 +40,17 @@ type heartbeatAckKey struct {
 	source string
 }
 
+var latestEligibleStatus struct {
+	sync.RWMutex
+	snapshot statusSnapshot
+	valid    bool
+}
+
+var heartbeatPeerAckSeries = struct {
+	sync.Mutex
+	seen map[[3]string]struct{}
+}{seen: make(map[[3]string]struct{}, validatorSummaryLimit)}
+
 type boundedBlockDedupe struct {
 	max   int
 	seen  map[string]struct{}
@@ -286,17 +297,21 @@ func StartConsensusMonitor(ctx context.Context, cfg *config.Config, errCh chan<-
 	goSafe("consensus", func() { monitorConsensusRPCLogs(ctx, cfg, errCh) })
 	goSafe("consensus", func() { monitorValidatorConnectionLogs(ctx, cfg, errCh) })
 
-	// periodic housekeeping: trim validator maps every 10 min. Drops entries
-	// that haven't been seen in consensusValidatorTTL.
+	// Periodic housekeeping trims validator maps and also re-evaluates the
+	// status/API join so a quiet source cannot leave rows beyond API freshness.
 	goSafe("consensus", func() {
-		t := time.NewTicker(10 * time.Minute)
-		defer t.Stop()
+		trimTicker := time.NewTicker(10 * time.Minute)
+		joinTicker := time.NewTicker(30 * time.Second)
+		defer trimTicker.Stop()
+		defer joinTicker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-t.C:
+			case <-trimTicker.C:
 				m.trimStaleValidators()
+			case now := <-joinTicker.C:
+				refreshEligibleStatusSummariesAt(now)
 			}
 		}
 	})
@@ -864,11 +879,11 @@ func (m *ConsensusMonitor) processHeartbeatOut(hb *HeartbeatMessage, timestamp t
 	if hb.Validator == "" || hb.RandomID == 0 || hb.Round == 0 {
 		return fmt.Errorf("missing heartbeat fields")
 	}
-	wireValidator := strings.ToLower(strings.TrimSpace(hb.Validator))
-	if wireValidator == "" {
-		return fmt.Errorf("empty heartbeat validator")
+	wireValidator, ok := normalizeWireAddress(hb.Validator)
+	if !ok {
+		return fmt.Errorf("invalid heartbeat validator")
 	}
-	key := heartbeatKey{validator: wireValidator, randomID: hb.RandomID, round: hb.Round}
+	key := heartbeatKey{validator: wireAddressKey(wireValidator), randomID: hb.RandomID, round: hb.Round}
 
 	formattedValidator := m.formatValidatorAddress(hb.Validator)
 
@@ -911,13 +926,18 @@ func (m *ConsensusMonitor) processHeartbeatAck(ack *HeartbeatAckMessage, source 
 		return fmt.Errorf("missing source in ack")
 	}
 
-	source = strings.ToLower(strings.TrimSpace(source))
-	wireValidator := strings.ToLower(strings.TrimSpace(ack.Validator))
-	if source == "" || wireValidator == "" {
-		return fmt.Errorf("empty heartbeat acknowledgement identity")
+	var ok bool
+	source, ok = normalizeWireAddress(source)
+	if !ok {
+		return fmt.Errorf("invalid heartbeat acknowledgement source")
 	}
-	key := heartbeatKey{validator: wireValidator, randomID: ack.RandomID, round: ack.Round}
-	ackKey := heartbeatAckKey{heartbeatKey: key, source: source}
+	wireValidator, ok := normalizeWireAddress(ack.Validator)
+	if !ok {
+		return fmt.Errorf("invalid heartbeat acknowledgement validator")
+	}
+	sourceKey := wireAddressKey(source)
+	key := heartbeatKey{validator: wireAddressKey(wireValidator), randomID: ack.RandomID, round: ack.Round}
+	ackKey := heartbeatAckKey{heartbeatKey: key, source: sourceKey}
 
 	// Look up the original heartbeat and reject a duplicate acknowledgement
 	// without re-observing either latency distribution.
@@ -926,7 +946,7 @@ func (m *ConsensusMonitor) processHeartbeatAck(ack *HeartbeatAckMessage, source 
 	kind := "unknown"
 	if exists {
 		kind = "peer"
-		if source == key.validator {
+		if sourceKey == key.validator {
 			kind = "self"
 		}
 	}
@@ -967,7 +987,7 @@ func (m *ConsensusMonitor) processHeartbeatAck(ack *HeartbeatAckMessage, source 
 	hbInfo.matched = true
 	m.heartbeats[key] = hbInfo
 	m.heartbeatsMutex.Unlock()
-	if source == key.validator {
+	if sourceKey == key.validator {
 		metrics.HLConsensusHeartbeatJoin.WithLabelValues("self", "matched").Inc()
 		metrics.HLConsensusSelfHeartbeatLoopDuration.Observe(delay.Seconds())
 		return nil
@@ -976,9 +996,31 @@ func (m *ConsensusMonitor) processHeartbeatAck(ack *HeartbeatAckMessage, source 
 	metrics.HLConsensusHeartbeatJoin.WithLabelValues("peer", "matched").Inc()
 	metrics.HLConsensusHeartbeatPeerAckDelay.Observe(delay.Seconds())
 	identity := metrics.ResolveSignerSnapshot([]string{source})[source]
-	metrics.HLConsensusHeartbeatPeerAcks.WithLabelValues(identity.Validator, identity.Signer, identity.Name).Inc()
+	if identity.Validator == "unknown" {
+		// This is a process-lifetime CounterVec. Unknown wire identities must
+		// collapse to one bounded row instead of permanently admitting a new
+		// signer label for every unrecognized source.
+		identity = metrics.ValidatorIdentity{Validator: "unknown", Signer: "unknown", Name: "unknown", Kind: "signer"}
+	}
+	labels := [3]string{identity.Validator, identity.Signer, identity.Name}
+	if admitHeartbeatPeerAckSeries(labels) {
+		metrics.HLConsensusHeartbeatPeerAcks.WithLabelValues(labels[0], labels[1], labels[2]).Inc()
+	}
 
 	return nil
+}
+
+func admitHeartbeatPeerAckSeries(labels [3]string) bool {
+	heartbeatPeerAckSeries.Lock()
+	defer heartbeatPeerAckSeries.Unlock()
+	if _, exists := heartbeatPeerAckSeries.seen[labels]; exists {
+		return true
+	}
+	if len(heartbeatPeerAckSeries.seen) >= validatorSummaryLimit {
+		return false
+	}
+	heartbeatPeerAckSeries.seen[labels] = struct{}{}
+	return true
 }
 
 // calculates and updates QC participation rates for all validators
@@ -1069,6 +1111,23 @@ func (m *ConsensusMonitor) processStatusLine(line string) error {
 		return err
 	}
 
+	now := time.Now()
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		replaceLatestEligibleStatusSnapshot(snapshot)
+		publishConsensusStatusDetailUnlocked(snapshot)
+		eligible, apiUpdatedAt := metrics.GetAPIActiveAndUnjailedValidators()
+		publishEligibleStatusSummariesUnlocked(snapshot, eligible, apiUpdatedAt, now)
+		m.lastStatusSourceTime = snapshot.SourceTime
+		metrics.MarkSourceValidObservation(metrics.SourceConsensusStatus, snapshot.SourceTime)
+	})
+	return nil
+}
+
+// publishConsensusStatusDetailUnlocked resolves API-enriched labels and
+// replaces the entire status detail generation. Callers must hold the
+// Prometheus snapshot barrier so registry replacement and detail publication
+// cannot interleave.
+func publishConsensusStatusDetailUnlocked(snapshot statusSnapshot) {
 	signers := make([]string, 0, len(snapshot.Heartbeats)+2*len(snapshot.Disconnected))
 	for _, hb := range snapshot.Heartbeats {
 		signers = append(signers, hb.Signer)
@@ -1105,25 +1164,17 @@ func (m *ConsensusMonitor) processStatusLine(line string) error {
 		})
 	}
 
-	eligible, apiUpdatedAt := metrics.GetAPIActiveAndUnjailedValidators()
-	now := time.Now()
-	metrics.WithPrometheusSnapshotUpdate(func() {
-		metrics.ReplaceConsensusStatusSnapshot(heartbeats, disconnected)
-		if snapshot.HeartbeatFieldPresent {
-			metrics.HLConsensusStatusFieldReported.WithLabelValues("heartbeat_statuses").Set(1)
-		} else {
-			metrics.HLConsensusStatusFieldReported.WithLabelValues("heartbeat_statuses").Set(0)
-		}
-		if snapshot.DisconnectedPresent {
-			metrics.HLConsensusStatusFieldReported.WithLabelValues("disconnected_validators").Set(1)
-		} else {
-			metrics.HLConsensusStatusFieldReported.WithLabelValues("disconnected_validators").Set(0)
-		}
-		publishEligibleStatusSummariesUnlocked(snapshot, eligible, apiUpdatedAt, now)
-		m.lastStatusSourceTime = snapshot.SourceTime
-		metrics.MarkSourceValidObservation(metrics.SourceConsensusStatus, snapshot.SourceTime)
-	})
-	return nil
+	metrics.ReplaceConsensusStatusSnapshot(heartbeats, disconnected)
+	if snapshot.HeartbeatFieldPresent {
+		metrics.HLConsensusStatusFieldReported.WithLabelValues("heartbeat_statuses").Set(1)
+	} else {
+		metrics.HLConsensusStatusFieldReported.WithLabelValues("heartbeat_statuses").Set(0)
+	}
+	if snapshot.DisconnectedPresent {
+		metrics.HLConsensusStatusFieldReported.WithLabelValues("disconnected_validators").Set(1)
+	} else {
+		metrics.HLConsensusStatusFieldReported.WithLabelValues("disconnected_validators").Set(0)
+	}
 }
 
 func parseStatusSnapshot(line []byte) (statusSnapshot, error) {
@@ -1179,16 +1230,21 @@ func parseStatusSnapshot(line []byte) (statusSnapshot, error) {
 		if err := json.Unmarshal(raw, &snapshot.MissingHeartbeatSigners); err != nil {
 			return statusSnapshot{}, fmt.Errorf("invalid validators_missing_heartbeat: %w", err)
 		}
-		seen := make(map[string]struct{}, len(snapshot.MissingHeartbeatSigners))
+		if len(snapshot.MissingHeartbeatSigners) > validatorSummaryLimit {
+			return statusSnapshot{}, fmt.Errorf("validators_missing_heartbeat count %d exceeds limit %d", len(snapshot.MissingHeartbeatSigners), validatorSummaryLimit)
+		}
+		seen := make([]string, 0, len(snapshot.MissingHeartbeatSigners))
 		for i, signer := range snapshot.MissingHeartbeatSigners {
-			signer = strings.ToLower(strings.TrimSpace(signer))
-			if signer == "" {
-				return statusSnapshot{}, fmt.Errorf("empty missing-heartbeat signer at %d", i)
+			var ok bool
+			signer, ok = normalizeWireAddress(signer)
+			if !ok {
+				return statusSnapshot{}, fmt.Errorf("invalid missing-heartbeat signer at %d", i)
 			}
-			if _, duplicate := seen[signer]; duplicate {
+			var unique bool
+			seen, unique = appendUniqueWireAddress(seen, signer)
+			if !unique {
 				return statusSnapshot{}, fmt.Errorf("duplicate missing-heartbeat signer")
 			}
-			seen[signer] = struct{}{}
 			snapshot.MissingHeartbeatSigners[i] = signer
 		}
 	}
@@ -1203,22 +1259,29 @@ func parseStatusHeartbeats(raw json.RawMessage) ([]statusHeartbeat, error) {
 	if err := json.Unmarshal(raw, &entries); err != nil {
 		return nil, fmt.Errorf("invalid heartbeat_statuses: %w", err)
 	}
+	if len(entries) > validatorSummaryLimit {
+		return nil, fmt.Errorf("heartbeat_statuses count %d exceeds limit %d", len(entries), validatorSummaryLimit)
+	}
 	out := make([]statusHeartbeat, 0, len(entries))
-	seen := make(map[string]struct{}, len(entries))
+	seen := make([]string, 0, len(entries))
 	for i, rawEntry := range entries {
 		var entry []json.RawMessage
 		if err := json.Unmarshal(rawEntry, &entry); err != nil || len(entry) != 2 {
 			return nil, fmt.Errorf("invalid heartbeat row %d", i)
 		}
 		var signer string
-		if err := json.Unmarshal(entry[0], &signer); err != nil || strings.TrimSpace(signer) == "" {
+		if err := json.Unmarshal(entry[0], &signer); err != nil {
 			return nil, fmt.Errorf("invalid heartbeat signer %d", i)
 		}
-		signer = strings.ToLower(strings.TrimSpace(signer))
-		if _, duplicate := seen[signer]; duplicate {
+		var ok bool
+		signer, ok = normalizeWireAddress(signer)
+		if !ok {
+			return nil, fmt.Errorf("invalid heartbeat signer %d", i)
+		}
+		seen, ok = appendUniqueWireAddress(seen, signer)
+		if !ok {
 			return nil, fmt.Errorf("duplicate heartbeat signer")
 		}
-		seen[signer] = struct{}{}
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(entry[1], &fields); err != nil || fields == nil {
 			return nil, fmt.Errorf("invalid heartbeat body %d", i)
@@ -1263,24 +1326,39 @@ func parseStatusDisconnected(raw json.RawMessage) ([]statusDisconnectedPair, err
 	if err := json.Unmarshal(raw, &subjects); err != nil {
 		return nil, fmt.Errorf("invalid disconnected_validators: %w", err)
 	}
+	if len(subjects) > validatorSummaryLimit {
+		return nil, fmt.Errorf("disconnected subject count %d exceeds limit %d", len(subjects), validatorSummaryLimit)
+	}
 	out := make([]statusDisconnectedPair, 0)
-	seen := make(map[string]struct{})
+	seen := make([]wireAddressRelation, 0)
+	seenSubjects := make([]string, 0, len(subjects))
 	for i, rawSubject := range subjects {
 		var subject []json.RawMessage
 		if err := json.Unmarshal(rawSubject, &subject); err != nil || len(subject) != 2 {
 			return nil, fmt.Errorf("invalid disconnected subject row %d", i)
 		}
 		var subjectSigner string
-		if err := json.Unmarshal(subject[0], &subjectSigner); err != nil || strings.TrimSpace(subjectSigner) == "" {
+		if err := json.Unmarshal(subject[0], &subjectSigner); err != nil {
 			return nil, fmt.Errorf("invalid disconnected subject signer %d", i)
 		}
-		subjectSigner = strings.ToLower(strings.TrimSpace(subjectSigner))
+		var ok bool
+		subjectSigner, ok = normalizeWireAddress(subjectSigner)
+		if !ok {
+			return nil, fmt.Errorf("invalid disconnected subject signer %d", i)
+		}
+		seenSubjects, ok = appendUniqueWireAddress(seenSubjects, subjectSigner)
+		if !ok {
+			return nil, fmt.Errorf("duplicate disconnected subject signer %d", i)
+		}
 		if !isJSONArray(subject[1]) {
 			return nil, fmt.Errorf("invalid disconnected reporter list %d", i)
 		}
 		var reporters []json.RawMessage
 		if err := json.Unmarshal(subject[1], &reporters); err != nil {
 			return nil, fmt.Errorf("invalid disconnected reporter list %d", i)
+		}
+		if len(reporters) > validatorSummaryLimit || len(out) > validatorSummaryLimit-len(reporters) {
+			return nil, fmt.Errorf("disconnected reporter count exceeds limit %d", validatorSummaryLimit)
 		}
 		for j, rawReporter := range reporters {
 			var reporter []json.RawMessage
@@ -1289,18 +1367,21 @@ func parseStatusDisconnected(raw json.RawMessage) ([]statusDisconnectedPair, err
 			}
 			var reporterSigner string
 			var sinceRound int64
-			if err := json.Unmarshal(reporter[0], &reporterSigner); err != nil || strings.TrimSpace(reporterSigner) == "" {
+			if err := json.Unmarshal(reporter[0], &reporterSigner); err != nil {
 				return nil, fmt.Errorf("invalid reporter signer %d/%d", i, j)
 			}
 			if err := unmarshalRequiredJSON(reporter[1], &sinceRound); err != nil || sinceRound < 0 {
 				return nil, fmt.Errorf("invalid since_round %d/%d", i, j)
 			}
-			reporterSigner = strings.ToLower(strings.TrimSpace(reporterSigner))
-			key := subjectSigner + "\x00" + reporterSigner
-			if _, duplicate := seen[key]; duplicate {
+			reporterSigner, ok = normalizeWireAddress(reporterSigner)
+			if !ok {
+				return nil, fmt.Errorf("invalid reporter signer %d/%d", i, j)
+			}
+			candidate := wireAddressRelation{subject: subjectSigner, reporter: reporterSigner}
+			seen, ok = appendUniqueWireRelation(seen, candidate)
+			if !ok {
 				return nil, fmt.Errorf("duplicate disconnected reporter pair")
 			}
-			seen[key] = struct{}{}
 			out = append(out, statusDisconnectedPair{SubjectSigner: subjectSigner, ReporterSigner: reporterSigner, SinceRound: sinceRound})
 		}
 	}
@@ -1316,6 +1397,61 @@ func publishEligibleStatusSummariesAt(snapshot statusSnapshot, eligible []metric
 	metrics.WithPrometheusSnapshotUpdate(func() {
 		publishEligibleStatusSummariesUnlocked(snapshot, eligible, apiUpdatedAt, now)
 	})
+}
+
+func replaceLatestEligibleStatusSnapshot(snapshot statusSnapshot) {
+	copySnapshot := snapshot
+	copySnapshot.Heartbeats = append([]statusHeartbeat(nil), snapshot.Heartbeats...)
+	copySnapshot.Disconnected = append([]statusDisconnectedPair(nil), snapshot.Disconnected...)
+	copySnapshot.MissingHeartbeatSigners = append([]string(nil), snapshot.MissingHeartbeatSigners...)
+	latestEligibleStatus.Lock()
+	latestEligibleStatus.snapshot = copySnapshot
+	latestEligibleStatus.valid = true
+	latestEligibleStatus.Unlock()
+}
+
+func clearLatestEligibleStatusSnapshot() {
+	latestEligibleStatus.Lock()
+	latestEligibleStatus.snapshot = statusSnapshot{}
+	latestEligibleStatus.valid = false
+	latestEligibleStatus.Unlock()
+}
+
+func currentEligibleStatusSnapshot() (statusSnapshot, bool) {
+	latestEligibleStatus.RLock()
+	snapshot := latestEligibleStatus.snapshot
+	valid := latestEligibleStatus.valid
+	latestEligibleStatus.RUnlock()
+	return snapshot, valid
+}
+
+func refreshEligibleStatusSummariesAt(now time.Time) {
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		refreshEligibleStatusSummariesUnlocked(now)
+	})
+}
+
+func refreshEligibleStatusSummariesUnlocked(now time.Time) {
+	snapshot, ok := currentEligibleStatusSnapshot()
+	if !ok {
+		metrics.HLConsensusStatusEligibleSummary.DeleteLabelValues("missing_heartbeat")
+		metrics.HLConsensusStatusEligibleSummary.DeleteLabelValues("disconnected")
+		return
+	}
+	eligible, apiUpdatedAt := metrics.GetAPIActiveAndUnjailedValidators()
+	publishEligibleStatusSummariesUnlocked(snapshot, eligible, apiUpdatedAt, now)
+}
+
+func refreshRetainedConsensusStatusUnlocked(now time.Time) {
+	snapshot, ok := currentEligibleStatusSnapshot()
+	if !ok {
+		metrics.HLConsensusStatusEligibleSummary.DeleteLabelValues("missing_heartbeat")
+		metrics.HLConsensusStatusEligibleSummary.DeleteLabelValues("disconnected")
+		return
+	}
+	publishConsensusStatusDetailUnlocked(snapshot)
+	eligible, apiUpdatedAt := metrics.GetAPIActiveAndUnjailedValidators()
+	publishEligibleStatusSummariesUnlocked(snapshot, eligible, apiUpdatedAt, now)
 }
 
 func publishEligibleStatusSummariesUnlocked(snapshot statusSnapshot, eligible []metrics.EligibleValidator, apiUpdatedAt, now time.Time) {
