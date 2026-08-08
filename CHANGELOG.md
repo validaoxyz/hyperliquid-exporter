@@ -1,14 +1,14 @@
 # Changelog
 
-## [Unreleased]
+## [v4.0.0] - 2026-08-09
 
 ### Breaking
 
-- Fixed validator, EVM, peer, and stream metrics.
-- Added explicit source health and freshness reporting.
-- Breaking changes require migration; see [UPGRADING.md](UPGRADING.md).
+- Corrected EVM, validator, network, stream, process, disk, and snapshot metrics to match what their sources prove.
+- Added explicit source presence, read, schema, and freshness reporting.
+- Metric renames and removals require migration; see [UPGRADING.md](UPGRADING.md).
 
-> Entries below describe the behavior of their dated releases. Current metric semantics and migrations are defined by the Unreleased section, [UPGRADING.md](UPGRADING.md), and the generated [metrics reference](docs/metrics.md).
+> Entries below describe the behavior of their dated releases. Current metric semantics and migrations are defined by the v4.0.0 section, [UPGRADING.md](UPGRADING.md), and the generated [metrics reference](docs/metrics.md).
 
 ## [v3.1.0] - 2026-07-04
 
