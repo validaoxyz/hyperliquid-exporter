@@ -3,6 +3,7 @@ package monitors
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,6 +69,7 @@ type jailingConfigSnapshot struct {
 	absent                  bool
 	dryRun                  *bool
 	latencyThresholdSeconds *float64
+	failureStage            metrics.SourceFailureStage
 	err                     error
 }
 
@@ -152,6 +154,14 @@ func tickOperatorConfig(root string) bool {
 		snapshot.failed[file]++
 	}
 	jailing := scanJailingConfig(root)
+	if jailing.err != nil {
+		metrics.WithPrometheusSnapshotUpdate(func() {
+			metrics.MarkSourceError(metrics.SourceOperatorConfig, jailing.failureStage)
+			metrics.IncMonitorError("operator_config")
+		})
+		logger.DebugComponent("operator_config", "read heartbeat_jailing_config.json: %v", jailing.err)
+		return false
+	}
 
 	metrics.WithPrometheusSnapshotUpdate(func() {
 		for _, file := range operatorConfigFiles {
@@ -171,9 +181,6 @@ func tickOperatorConfig(root string) bool {
 		metrics.MarkMonitorValidObservation("operator_config")
 		metrics.MarkMonitorPublication("operator_config")
 	})
-	if jailing.err != nil {
-		logger.DebugComponent("operator_config", "read heartbeat_jailing_config.json: %v", jailing.err)
-	}
 	return true
 }
 
@@ -206,14 +213,20 @@ func scanJailingConfig(root string) jailingConfigSnapshot {
 		if os.IsNotExist(err) {
 			return jailingConfigSnapshot{absent: true}
 		}
-		return jailingConfigSnapshot{err: err}
+		return jailingConfigSnapshot{failureStage: metrics.SourceFailureRead, err: err}
 	}
 	var jcfg struct {
 		DryRun                  *bool    `json:"dry_run"`
 		LatencyEmaJailThreshold *float64 `json:"latency_ema_jail_threshold"`
 	}
 	if err := json.Unmarshal(raw, &jcfg); err != nil {
-		return jailingConfigSnapshot{err: err}
+		return jailingConfigSnapshot{failureStage: metrics.SourceFailureDecode, err: err}
+	}
+	if jcfg.DryRun == nil || jcfg.LatencyEmaJailThreshold == nil {
+		return jailingConfigSnapshot{
+			failureStage: metrics.SourceFailureSchema,
+			err:          errors.New("jailing config requires dry_run and latency_ema_jail_threshold"),
+		}
 	}
 	return jailingConfigSnapshot{
 		dryRun:                  jcfg.DryRun,
@@ -229,21 +242,17 @@ func applyJailingConfigSnapshot(snapshot jailingConfigSnapshot) {
 		withdrawJailingConfigSnapshot()
 		return
 	}
-	if snapshot.latencyThresholdSeconds == nil && snapshot.dryRun == nil {
+	if snapshot.latencyThresholdSeconds == nil || snapshot.dryRun == nil {
 		return
 	}
 
 	metrics.InitJailingConfigInstruments()
-	if snapshot.latencyThresholdSeconds != nil {
-		metrics.HLNodeJailingThresholdSeconds.WithLabelValues().Set(*snapshot.latencyThresholdSeconds)
+	metrics.HLNodeJailingThresholdSeconds.WithLabelValues().Set(*snapshot.latencyThresholdSeconds)
+	v := 0.0
+	if *snapshot.dryRun {
+		v = 1
 	}
-	if snapshot.dryRun != nil {
-		v := 0.0
-		if *snapshot.dryRun {
-			v = 1
-		}
-		metrics.HLNodeJailingDryRun.WithLabelValues().Set(v)
-	}
+	metrics.HLNodeJailingDryRun.WithLabelValues().Set(v)
 }
 
 func withdrawJailingConfigSnapshot() {
