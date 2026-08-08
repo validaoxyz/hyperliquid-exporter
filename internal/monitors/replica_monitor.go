@@ -184,8 +184,7 @@ func (m *ReplicaMonitor) processBlock(block *replica.BlockMetrics) {
 	metrics.HLReplicaActionBundlesTotal.Add(float64(block.TotalBundles))
 	metrics.HLReplicaLastProcessedHeight.Set(float64(block.Height))
 
-	// per-block round advance: 1 on a healthy chain, >1 means skipped
-	// (timed-out) rounds between this block and its parent
+	// Positive round - parent_round from the accepted replica record.
 	if block.ParentRound > 0 && block.Round > block.ParentRound {
 		metrics.HLCoreRoundAdvance.Observe(float64(block.Round - block.ParentRound))
 	}

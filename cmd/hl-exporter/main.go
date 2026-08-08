@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"runtime"
@@ -19,34 +20,76 @@ import (
 
 const metricsShutdownTimeout = 10 * time.Second
 
+type startOptions struct {
+	logLevel             *string
+	enableOTLP           *bool
+	otlpEndpoint         *string
+	nodeHome             *string
+	nodeBinary           *string
+	alias                *string
+	chain                *string
+	otlpInsecure         *bool
+	enableEVM            *bool
+	contractMetrics      *bool
+	contractLimit        *int
+	enableReplicaMetrics *bool
+	enableValidatorRTT   *bool
+	skipVersionCheck     *bool
+	skipUpdateCheck      *bool
+	metricsPort          *int
+	probeInfoEndpoint    *bool
+	infoEndpointURL      *string
+	enableExtended       *bool
+	enablePerPeer        *bool
+	tcpServicePorts      *string
+	disableTCP6          *bool
+	enablePprof          *bool
+}
+
+func newStartFlagSet(errorHandling flag.ErrorHandling, output io.Writer) (*flag.FlagSet, *startOptions) {
+	fs := flag.NewFlagSet("start", errorHandling)
+	fs.SetOutput(output)
+	o := &startOptions{}
+	o.logLevel = fs.String("log-level", "info", "Log level (debug, info, warning, error)")
+	o.enableOTLP = fs.Bool("otlp", false, "Enable OTLP export")
+	o.otlpEndpoint = fs.String("otlp-endpoint", "", "OTLP endpoint (required when OTLP is enabled)")
+	o.nodeHome = fs.String("node-home", "", "Node home directory (overrides env var)")
+	o.nodeBinary = fs.String("node-binary", "", "Node binary path (overrides env var)")
+	o.alias = fs.String("alias", "", "Node alias (required when OTLP is enabled)")
+	o.chain = fs.String("chain", "", "Chain type (required: 'mainnet' or 'testnet')")
+	o.otlpInsecure = fs.Bool("otlp-insecure", false, "Use insecure connection for OTLP")
+	o.enableEVM = fs.Bool("evm-metrics", false, "Enable EVM monitoring")
+	o.contractMetrics = fs.Bool("contract-metrics", false, "Enable canonical recipient-address diagnostics; no contract identity or enrichment is inferred")
+	o.contractLimit = fs.Int("contract-metrics-limit", 20, "Maximum canonical recipient addresses to retain before using address=other")
+	o.enableReplicaMetrics = fs.Bool("replica-metrics", false, "Enable replica commands transaction metrics")
+	o.enableValidatorRTT = fs.Bool("validator-rtt", false, "Enable outbound TCP-connect diagnostics for eligible validators; not protocol RTT")
+	o.skipVersionCheck = fs.Bool("skip-version-check", false, "Skip the local hl-node --version probe (use when running in a container without the binary)")
+	o.skipUpdateCheck = fs.Bool("skip-update-check", false, "Skip the periodic upstream binary download for the up-to-date check")
+	o.metricsPort = fs.Int("metrics-port", 8086, "Port to expose Prometheus metrics on")
+	o.probeInfoEndpoint = fs.Bool("probe-info-endpoint", false, "Actively HTTP-probe the node's --serve-info endpoint as a liveness check")
+	o.infoEndpointURL = fs.String("info-endpoint-url", "", "URL the info probe POSTs to (default http://127.0.0.1:3001/info)")
+	o.enableExtended = fs.Bool("extended-metrics", false, "Enable the extended monitor set (tcp_lz4, log lines, public IP, Tokio runtime, operator config, tmp dir)")
+	o.enablePerPeer = fs.Bool("per-peer-metrics", false, "Emit up to 16 current explicit child identities from child_peers status")
+	o.tcpServicePorts = fs.String("tcp-service-ports", config.DefaultTCPServicePorts, "Comma-separated tracked TCP service ports (1..16)")
+	o.disableTCP6 = fs.Bool("disable-tcp6", false, "Disable reading /proc/net/tcp6 (an unavailable enabled source is reported unhealthy)")
+	o.enablePprof = fs.Bool("pprof", false, "Expose Go profiling endpoints under /debug/pprof/ on the metrics listener")
+	return fs, o
+}
+
+func printRootUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage: hl_exporter <command> [options]")
+	fmt.Fprintln(w, "Commands:")
+	fmt.Fprintln(w, "  start    Start the Hyperliquid exporter")
+	fmt.Fprintln(w, "  vals     Validator CSV/IP utilities (hl_exporter vals -h)")
+	fmt.Fprintln(w, "  version  Print build information and exit")
+	fmt.Fprintln(w, "\nOptions for start:")
+	fs, _ := newStartFlagSet(flag.ContinueOnError, w)
+	fs.PrintDefaults()
+}
+
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: hl_exporter <command> [options]")
-		fmt.Println("Commands:")
-		fmt.Println("  start    Start the Hyperliquid exporter")
-		fmt.Println("  vals     Validator CSV/IP utilities (hl_exporter vals -h)")
-		fmt.Println("  version  Print build information and exit")
-		fmt.Println("\nOptions for start:")
-		fmt.Println("  --chain                   Chain: 'mainnet' or 'testnet' (required)")
-		fmt.Println("  --node-home               Node home directory (default $NODE_HOME or ~/hl)")
-		fmt.Println("  --node-binary             Node binary path (default $NODE_BINARY or $BINARY_HOME/hl-node)")
-		fmt.Println("  --metrics-port            Prometheus listen port (default 8086)")
-		fmt.Println("  --log-level               debug, info, warning, error (default info)")
-		fmt.Println("  --evm-metrics             Enable EVM monitoring")
-		fmt.Println("  --contract-metrics        Enable canonical recipient-address diagnostics (no contract inference)")
-		fmt.Println("  --contract-metrics-limit  Max recipient addresses; the rest use address=\"other\" (default 20)")
-		fmt.Println("  --replica-metrics         Enable replica-cmds transaction metrics")
-		fmt.Println("  --validator-rtt           Enable outbound TCP-connect diagnostics (not protocol RTT)")
-		fmt.Println("  --probe-info-endpoint     Actively probe the node's --serve-info endpoint")
-		fmt.Println("  --info-endpoint-url       Info probe URL (default http://127.0.0.1:3001/info)")
-		fmt.Println("  --extended-metrics        Enable the extended monitor bundle")
-		fmt.Println("  --per-peer-metrics        Emit up to 16 current explicit child identities")
-		fmt.Println("  --tcp-service-ports       Comma-separated tracked TCP service ports (max 16)")
-		fmt.Println("  --disable-tcp6            Disable reading /proc/net/tcp6")
-		fmt.Println("  --skip-version-check      Skip the local hl-node --version probe")
-		fmt.Println("  --skip-update-check       Skip the upstream hl-visor up-to-date check")
-		fmt.Println("  --otlp                    Enable OTLP export (with --otlp-endpoint, --otlp-insecure, --alias)")
-		fmt.Println("  --pprof                   Expose /debug/pprof/ on the metrics listener")
+		printRootUsage(os.Stdout)
 		os.Exit(1)
 	}
 
@@ -61,30 +104,7 @@ func main() {
 		return
 	}
 
-	startCmd := flag.NewFlagSet("start", flag.ExitOnError)
-	logLevel := startCmd.String("log-level", "info", "Log level (debug, info, warning, error)")
-	enableOTLP := startCmd.Bool("otlp", false, "Enable OTLP export")
-	otlpEndpoint := startCmd.String("otlp-endpoint", "", "OTLP endpoint (required when OTLP is enabled)")
-	nodeHome := startCmd.String("node-home", "", "Node home directory (overrides env var)")
-	nodeBinary := startCmd.String("node-binary", "", "Node binary path (overrides env var)")
-	alias := startCmd.String("alias", "", "Node alias (required when OTLP is enabled)")
-	chain := startCmd.String("chain", "", "Chain type (required: 'mainnet' or 'testnet')")
-	otlpInsecure := startCmd.Bool("otlp-insecure", false, "Use insecure connection for OTLP")
-	enableEVM := startCmd.Bool("evm-metrics", false, "Enable EVM monitoring")
-	contractMetrics := startCmd.Bool("contract-metrics", false, "Enable canonical recipient-address diagnostics; no contract identity or enrichment is inferred")
-	contractLimit := startCmd.Int("contract-metrics-limit", 20, "Maximum canonical recipient addresses to retain before using address=other")
-	enableReplicaMetrics := startCmd.Bool("replica-metrics", false, "Enable replica commands transaction metrics")
-	enableValidatorRTT := startCmd.Bool("validator-rtt", false, "Enable outbound TCP-connect diagnostics for eligible validators; not protocol RTT")
-	skipVersionCheck := startCmd.Bool("skip-version-check", false, "Skip the local hl-node --version probe (use when running in a container without the binary)")
-	skipUpdateCheck := startCmd.Bool("skip-update-check", false, "Skip the periodic upstream binary download for the up-to-date check")
-	metricsPort := startCmd.Int("metrics-port", 8086, "Port to expose Prometheus metrics on")
-	probeInfoEndpoint := startCmd.Bool("probe-info-endpoint", false, "Actively HTTP-probe the node's --serve-info endpoint as a liveness check")
-	infoEndpointURL := startCmd.String("info-endpoint-url", "", "URL the info probe POSTs to (default http://127.0.0.1:3001/info)")
-	enableExtendedMetrics := startCmd.Bool("extended-metrics", false, "Enable the extended monitor set (tcp_lz4, log lines, public IP, Tokio runtime, operator config, tmp dir)")
-	enablePerPeerMetrics := startCmd.Bool("per-peer-metrics", false, "Emit up to 16 current explicit child identities from child_peers status")
-	tcpServicePorts := startCmd.String("tcp-service-ports", config.DefaultTCPServicePorts, "Comma-separated tracked TCP service ports (1..16)")
-	disableTCP6 := startCmd.Bool("disable-tcp6", false, "Disable reading /proc/net/tcp6 (an unavailable enabled source is reported unhealthy)")
-	enablePprof := startCmd.Bool("pprof", false, "Expose Go profiling endpoints under /debug/pprof/ on the metrics listener")
+	startCmd, options := newStartFlagSet(flag.ExitOnError, os.Stderr)
 
 	switch os.Args[1] {
 	case "start":
@@ -94,33 +114,33 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := logger.SetLogLevel(*logLevel); err != nil {
+	if err := logger.SetLogLevel(*options.logLevel); err != nil {
 		fmt.Printf("Error setting log level: %v\n", err)
 		os.Exit(1)
 	}
 
 	flags := &config.Flags{
-		NodeHome:              *nodeHome,
-		NodeBinary:            *nodeBinary,
-		Chain:                 *chain,
-		EnableEVM:             *enableEVM,
-		EnableContractMetrics: *contractMetrics,
-		ContractMetricsLimit:  *contractLimit,
+		NodeHome:              *options.nodeHome,
+		NodeBinary:            *options.nodeBinary,
+		Chain:                 *options.chain,
+		EnableEVM:             *options.enableEVM,
+		EnableContractMetrics: *options.contractMetrics,
+		ContractMetricsLimit:  *options.contractLimit,
 		EnableCoreTxMetrics:   false,
 		UseLiveState:          false,
-		EnableReplicaMetrics:  *enableReplicaMetrics,
-		ReplicaDataDir:        "",                 // Always use default
-		ReplicaBufferSize:     8,                  // Always use default 8MB
-		EnableValidatorRTT:    enableValidatorRTT, // Use the bool pointer directly
-		SkipVersionCheck:      *skipVersionCheck,
-		SkipUpdateCheck:       *skipUpdateCheck,
-		ProbeInfoEndpoint:     *probeInfoEndpoint,
-		InfoEndpointURL:       *infoEndpointURL,
-		EnableExtendedMetrics: *enableExtendedMetrics,
-		EnablePerPeerMetrics:  *enablePerPeerMetrics,
-		TCPServicePorts:       *tcpServicePorts,
-		DisableTCP6:           *disableTCP6,
-		EnablePprof:           *enablePprof,
+		EnableReplicaMetrics:  *options.enableReplicaMetrics,
+		ReplicaDataDir:        "",                         // Always use default
+		ReplicaBufferSize:     8,                          // Always use default 8MB
+		EnableValidatorRTT:    options.enableValidatorRTT, // Use the bool pointer directly
+		SkipVersionCheck:      *options.skipVersionCheck,
+		SkipUpdateCheck:       *options.skipUpdateCheck,
+		ProbeInfoEndpoint:     *options.probeInfoEndpoint,
+		InfoEndpointURL:       *options.infoEndpointURL,
+		EnableExtendedMetrics: *options.enableExtended,
+		EnablePerPeerMetrics:  *options.enablePerPeer,
+		TCPServicePorts:       *options.tcpServicePorts,
+		DisableTCP6:           *options.disableTCP6,
+		EnablePprof:           *options.enablePprof,
 	}
 
 	cfg, err := config.LoadConfig(flags)
@@ -129,12 +149,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	if *enableOTLP {
-		if *alias == "" {
+	if *options.enableOTLP {
+		if *options.alias == "" {
 			logger.Error("--alias flag is required when OTLP is enabled. This can be whatever you choose and is just an identifier for your node.")
 			os.Exit(1)
 		}
-		if *otlpEndpoint == "" {
+		if *options.otlpEndpoint == "" {
 			logger.Error("--otlp-endpoint flag is required when OTLP is enabled")
 			os.Exit(1)
 		}
@@ -155,17 +175,17 @@ func main() {
 	// Initialize metrics configuration
 	metricsConfig := metrics.MetricsConfig{
 		EnablePrometheus: true, // Always enable Prometheus - it's the core functionality
-		EnableOTLP:       *enableOTLP,
-		OTLPEndpoint:     *otlpEndpoint,
-		OTLPInsecure:     *otlpInsecure,
-		Alias:            *alias,
+		EnableOTLP:       *options.enableOTLP,
+		OTLPEndpoint:     *options.otlpEndpoint,
+		OTLPInsecure:     *options.otlpInsecure,
+		Alias:            *options.alias,
 		Chain:            cfg.Chain,
 		NodeHome:         cfg.NodeHome,
 		ValidatorAddress: validatorAddress,
 		IsValidator:      isValidator,
-		EnableEVM:        *enableEVM,
-		PrometheusPort:   *metricsPort,
-		EnablePprof:      *enablePprof,
+		EnableEVM:        *options.enableEVM,
+		PrometheusPort:   *options.metricsPort,
+		EnablePprof:      *options.enablePprof,
 	}
 
 	providerOwner, err := metrics.InitMetrics(ctx, metricsConfig)

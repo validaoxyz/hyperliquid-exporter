@@ -566,8 +566,8 @@ func SetValidatorLastVoteRound(validator string, round int64) {
 // SetValidatorLastVoteTime records when a validator's vote was last
 // observed. The stored value is the vote's unix timestamp; the scrape
 // callback converts it to an age, so hl_consensus_vote_time_diff_seconds
-// climbs while a validator is silent (the previous implementation stored a
-// parse-time diff that froze at ~0 forever, useless for stall detection).
+// advances between this node's leadership-sampled observations. It is not a
+// continuous committee-liveness signal.
 func SetValidatorLastVoteTime(validator string, voteTime time.Time) {
 	labels := getValidatorLabels(validator)
 	identitySource := strings.ToLower(strings.TrimSpace(validator))

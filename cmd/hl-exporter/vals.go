@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -42,39 +43,59 @@ import (
 
 const stateSubdir = "data/periodic_abci_states"
 
+type valsOptions struct {
+	nodeHome       *string
+	chain          *string
+	out            *string
+	serve          *bool
+	addr           *string
+	interval       *time.Duration
+	peerCounterURL *string
+	backfill       *bool
+	since          *string
+	sleep          *time.Duration
+}
+
+func newValsFlagSet(errorHandling flag.ErrorHandling, output io.Writer) (*flag.FlagSet, *valsOptions) {
+	fs := flag.NewFlagSet("vals", errorHandling)
+	fs.SetOutput(output)
+	o := &valsOptions{}
+	o.nodeHome = fs.String("node-home", defaultNodeHome(), "Node home directory (contains data/periodic_abci_states)")
+	o.chain = fs.String("chain", "testnet", "Chain label, used only in the --serve route path")
+	o.out = fs.String("out", "", "Output file (default stdout)")
+	o.serve = fs.Bool("serve", false, "Run an HTTP server exposing the CSV at /vals/<chain>")
+	o.addr = fs.String("addr", "0.0.0.0:8087", "Listen address for --serve")
+	o.interval = fs.Duration("interval", time.Hour, "Regeneration interval for --serve")
+	o.peerCounterURL = fs.String("peer-counter-url", "http://127.0.0.1:19046/snapshot", "Local peer-counter snapshot URL feeding /nodes in --serve")
+	o.backfill = fs.Bool("backfill", false, "Emit one validator-count row per day from historical state files (JSONL)")
+	o.since = fs.String("since", "2025-05-31", "Backfill start date (YYYY-MM-DD)")
+	o.sleep = fs.Duration("sleep", 2*time.Second, "Sleep between files during --backfill (be gentle on the validator)")
+	return fs, o
+}
+
 func runVals(args []string) {
-	fs := flag.NewFlagSet("vals", flag.ExitOnError)
-	nodeHome := fs.String("node-home", defaultNodeHome(), "Node home directory (contains data/periodic_abci_states)")
-	chain := fs.String("chain", "testnet", "Chain label, used only in the --serve route path")
-	out := fs.String("out", "", "Output file (default stdout)")
-	serve := fs.Bool("serve", false, "Run an HTTP server exposing the CSV at /vals/<chain>")
-	addr := fs.String("addr", "0.0.0.0:8087", "Listen address for --serve")
-	interval := fs.Duration("interval", time.Hour, "Regeneration interval for --serve")
-	peerCounterURL := fs.String("peer-counter-url", "http://127.0.0.1:19046/snapshot", "Local peer-counter snapshot URL feeding /nodes in --serve")
-	backfill := fs.Bool("backfill", false, "Emit one validator-count row per day from historical state files (JSONL)")
-	since := fs.String("since", "2025-05-31", "Backfill start date (YYYY-MM-DD)")
-	sleep := fs.Duration("sleep", 2*time.Second, "Sleep between files during --backfill (be gentle on the validator)")
+	fs, options := newValsFlagSet(flag.ExitOnError, os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
 	}
 
-	stateDir := filepath.Join(*nodeHome, stateSubdir)
+	stateDir := filepath.Join(*options.nodeHome, stateSubdir)
 
 	switch {
-	case *backfill:
-		if err := runBackfill(stateDir, *since, *out, *sleep); err != nil {
+	case *options.backfill:
+		if err := runBackfill(stateDir, *options.since, *options.out, *options.sleep); err != nil {
 			fmt.Fprintf(os.Stderr, "backfill: %v\n", err)
 			os.Exit(1)
 		}
-	case *serve:
-		runServe(stateDir, *chain, *addr, *interval, *peerCounterURL)
+	case *options.serve:
+		runServe(stateDir, *options.chain, *options.addr, *options.interval, *options.peerCounterURL)
 	default:
 		csvBytes, err := buildCSV(stateDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "extract: %v\n", err)
 			os.Exit(1)
 		}
-		if err := writeOut(*out, csvBytes); err != nil {
+		if err := writeOut(*options.out, csvBytes); err != nil {
 			fmt.Fprintf(os.Stderr, "write: %v\n", err)
 			os.Exit(1)
 		}

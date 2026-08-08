@@ -650,7 +650,7 @@ func createInstruments() error {
 	// efficiency
 	HLConsensusRoundsPerBlockGauge, err = meter.Float64ObservableGauge(
 		"hl_consensus_rounds_per_block",
-		api.WithDescription("Rounds consumed by the most recent block (single sample, ~1 on a healthy chain; not an average)"),
+		api.WithDescription("Most recent positive difference between consecutive accepted consensus Block round values; a single observed value, not an average"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create consensus rounds per block gauge: %w", err)
@@ -658,7 +658,7 @@ func createInstruments() error {
 
 	HLConsensusQCRoundLagGauge, err = meter.Float64ObservableGauge(
 		"hl_consensus_qc_round_lag",
-		api.WithDescription("Round lag (block round - QC round) of the most recent block; 1 on a healthy chain (not an average)"),
+		api.WithDescription("Nonnegative block round minus embedded QC round for the latest accepted Block carrying a QC; a single observed value, not an average"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create consensus QC round lag gauge: %w", err)

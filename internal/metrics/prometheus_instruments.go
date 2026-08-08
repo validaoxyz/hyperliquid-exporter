@@ -120,11 +120,11 @@ var (
 var (
 	HLNodeBugsTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_node_bugs",
-		Help: "Cumulative count of bug! events since the source process started. Any non-zero value is page-someone severity.",
+		Help: "Cumulative bug! event count reported by the source process generation.",
 	}, []string{"source"})
 	HLNodeCritsTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_node_crits",
-		Help: "Cumulative count of crit! events since the source process started. Sustained growth = ongoing incident.",
+		Help: "Cumulative crit! event count reported by the source process generation.",
 	}, []string{"source"})
 	HLNodeCritLocations = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_node_crit_locations",
@@ -892,13 +892,11 @@ func InitJailingConfigInstruments() {
 	})
 }
 
-// Per-block consensus round advance from replica data. Round - ParentRound
-// is exactly 1 on a healthy chain; higher values are skipped (timed-out)
-// rounds, so bucketed counts give the true timeout-round rate.
+// Per-block consensus round advance from validated replica records.
 var (
 	HLCoreRoundAdvance = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "hl_core_round_advance",
-		Help:    "Distribution of round - parent_round per block (1 = healthy; >1 = skipped/timed-out rounds).",
+		Help:    "Distribution of positive round - parent_round values in accepted replica block records.",
 		Buckets: []float64{1, 2, 3, 4, 5, 10, 25, 50, 100},
 	})
 )
@@ -970,24 +968,19 @@ var HLP2PNonValConnections = promauto.NewGauge(prometheus.GaugeOpts{
 // a drift baseline for the windowed mean.
 var HLNodeSubsystemLatencyLifetimeMean = promauto.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "hl_node_subsystem_latency_lifetime_mean_seconds",
-	Help: "Mean per-sample latency since the source process started (windowed mean drifting above this = degradation).",
+	Help: "Source-reported total_mean latency for the subsystem's current process generation.",
 }, subsystemLabels)
 
-// Rate-limiter tripwire: hl-node writes per-offender files under
-// data/rate_limited_ips/<stream>/hourly/<date>/ only when it actually
-// rate-limits someone. Zero on a healthy node.
+// Deprecated projection of retained non-empty files in the newest source-date
+// directory. The file schema and any offender/event meaning are unproven.
 var HLNodeRateLimitedFiles = promauto.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "hl_node_rate_limited_files",
 	Help: "Deprecated alias: non-empty regular files retained in the lexicographically newest rate_limited_ips date directory per fixed stream; evidence is not active rate limiting or an offender count.",
 }, []string{"stream"})
 
-// Restart/crash taxonomy from data/visor_child_stderr: hl-visor drops one
-// file per hl-node child start, empty on a clean start and holding the
-// dying output otherwise. This is where app-hash mismatches (consensus
-// divergence) and rejected configs surface; crit_msg_stats never sees
-// them because the process is already dead. Counts reflect the files
-// still retained on disk (hl-node prunes old ones), so alert on
-// last_crash recency, not on rate().
+// Compatibility projections from retained data/visor_child_stderr artifacts.
+// Empty, material, unreadable, truncated, and unknown evidence remain distinct
+// in the replacement families; retained counts are prune-aware snapshots.
 var (
 	HLNodeChildStarts = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_node_child_starts",
@@ -1003,11 +996,8 @@ var (
 	}, []string{"reason"})
 )
 
-// Freshness of opt-in hl-node data streams (--write-fills,
-// --write-misc-events, TWAP streaming, system_and_core_writer_actions).
-// The content is bulk data and out of metric scope, but these streams
-// exist to feed downstream consumers and nothing else notices when one
-// silently stops writing.
+// Freshness of four fixed opt-in hl-node streams. Their payload semantics and
+// producer cadence remain outside this metric contract.
 var HLNodeStreamAgeSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "hl_node_stream_age_seconds",
 	Help: "Wall-clock age of the latest valid committed record observed in each fixed opt-in stream; no writer cadence, consumer, or stall is inferred.",

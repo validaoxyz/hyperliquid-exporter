@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Breaking
+
+- Fixed validator, EVM, peer, and stream metrics.
+- Added explicit source health and freshness reporting.
+- Breaking changes require migration; see [UPGRADING.md](UPGRADING.md).
+
+> Entries below describe the behavior of their dated releases. Current metric semantics and migrations are defined by the Unreleased section, [UPGRADING.md](UPGRADING.md), and the generated [metrics reference](docs/metrics.md).
+
 ## [v3.1.0] - 2026-07-04
 
 ### Fixed
@@ -124,23 +134,6 @@ The per-step latency gauges carried a `quantile="work_frac"` series - a unitless
 `hl_core_operations_per_block` now uses wider bucket boundaries above 2000 so high-operation blocks no longer collapse directly into `+Inf`.
 `hl_core_orders_per_block` now has finer bucket boundaries between 100 and 2000 orders per block so dashboard heatmaps do not collapse the common range into a few wide bands.
 
-## [Unreleased]
-
-### Fixed (metrics audit)
-
-Non-breaking correctness pass. No metric renamed; no instrument type changed.
-
-- `internal/monitors/validator_ip_monitor.go`: `hl_consensus_validator_rtt` now reports **milliseconds** (was raw microseconds, i.e. ~1000x larger numbers). NOTE: RTT values are now ~1000x smaller - adjust any RTT-based alert thresholds.
-- `internal/monitors/validator_latency_monitor.go`: `hl_consensus_validator_latency_ema_seconds` no longer drops genuine latencies >=0.4s; the no-data filter now skips only the exact 0.4 sentinel (was `>= 0.4`), unfreezing the gauge that read a stuck ~400ms.
-- `proposer_count`: the `name` label is now always set, so the series no longer disappears for proposers seen before their name resolves.
-- tx/operations per-block histograms: corrected bucket boundaries so per-block counts land in meaningful buckets.
-- Removed the fictional `--evm-block-type-metrics` usage line (no such flag exists).
-- docs: added a gauge-vs-counter convention legend noting that several `_total`-suffixed metrics are gauges (reset to 0 on source/exporter restart) and must be queried with `delta()`/`changes()`, not `rate()`/`increase()`.
-- `internal/monitors/node_state_monitor.go`: `hl_visor_blocks_above_freeze` now floors at 0 (was emitting a negative value when the freeze height led the visor height).
-- `internal/monitors/visor_monitor.go`: tolerate the legacy `reference_lag` field (in addition to `reference_lag_seconds`); added companion gauge `hl_visor_reference_lag_populated` (1 if the sample carried a reference_lag field, else 0).
-- `cmd/hl-exporter/vals.go`: `--peer-counter-url` flag makes the `/nodes` peer-counter snapshot endpoint configurable (default `http://127.0.0.1:19046/snapshot`). `--backfill` now derives each row's `legacy` flag from the ABCI state schema (`c_staking` vs the older `consensus` fallback) instead of hardcoding `true`.
-- docs: documented the four OTLP-path consensus-monitor health metrics (`hl_timeout_rounds_total`, `hl_consensus_monitor_last_processed`, `hl_consensus_monitor_lines_processed_total`, `hl_consensus_monitor_errors_total`); reworded `hl_consensus_rounds_per_block` (single inter-block round delta, not a moving average); merged the duplicated `hl_consensus_validator_latency_seconds` row; clarified `hl_core_block_height` (fast-state-only) + `state_type` (dual-state only), network-wide stake/status source, `hl_software_up_to_date` UNSET-until-both-checks, and the LZ4 `_total` "since source start" qualifiers.
-
 ## [3.0.0] - 2026-05-26
 
 Strict superset of v2.0.0. Same metric names, labels, semantics. Existing dashboards work without modification.
@@ -228,6 +221,8 @@ Upstream had zero Go unit tests. Parser tests added for the new monitors:
 `go test ./internal/monitors/` runs in under a second.
 
 ### Operator alert recipes
+
+> **Superseded historical examples — do not copy for current releases.** Several expressions below rely on interpretations retired by the current metrics contract. Use the tested opt-in rules in [`alerts/`](alerts/) and the current mapping in [UPGRADING.md](UPGRADING.md).
 
 | symptom | metric expression |
 |---|---|

@@ -32,8 +32,8 @@ var logTargets = []struct {
 }
 
 // StartLogLinesMonitor counts lines and bytes in
-// $NODE_HOME/data/log/<stream>/<level>/<YYYYMMDD>. Both files are
-// empty on a healthy node; any non-zero line count is operator-relevant.
+// $NODE_HOME/data/log/<stream>/<level>/<YYYYMMDD>. A valid empty file is
+// distinct from absence; the exporter does not assign incident severity.
 //
 // Modeled as a gauge that resets at the day boundary because the day-file
 // rotation cleanly zeroes the series; treating it as a counter would

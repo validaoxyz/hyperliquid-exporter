@@ -2,9 +2,9 @@
 .env
 
 # Ignore any binaries
-hl_exporter
-hl-exporter
-hl-exporter-*
+/hl_exporter
+/hl-exporter
+/hl-exporter-*
 bin/
 
 # Ignore hl-python-venv directory
