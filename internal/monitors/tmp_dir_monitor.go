@@ -50,7 +50,6 @@ func StartTmpDirMonitor(ctx context.Context, cfg config.Config, errCh chan<- err
 	defer ticker.Stop()
 
 	tickTmpDir(root)
-	metrics.MarkMonitorTick("tmp_dir")
 
 	for {
 		select {
@@ -58,7 +57,6 @@ func StartTmpDirMonitor(ctx context.Context, cfg config.Config, errCh chan<- err
 			return
 		case <-ticker.C:
 			tickTmpDir(root)
-			metrics.MarkMonitorTick("tmp_dir")
 		}
 	}
 }
@@ -140,9 +138,9 @@ func scanTmpDirWith(root string, now time.Time, walk tmpWalkDirFunc) (tmpDirSnap
 			snapshot.staleFiles++
 		}
 		// Sub-bucket: count files under tmp/shell_rs_out/ separately.
-		// Each visor shell-exec drops a (usually empty) file here; a
-		// healthy node should keep this count low. Sustained growth
-		// means the visor's cleanup pass is broken.
+		// Each visor shell-exec can leave a usually empty receipt here.
+		// Keep the compatibility count, while material-class metrics
+		// distinguish retained payload from expected empty receipts.
 		underShellExec := strings.HasPrefix(path, shellExecDir+string(filepath.Separator))
 		if underShellExec {
 			snapshot.shellExecFiles++

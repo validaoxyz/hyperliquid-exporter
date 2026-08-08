@@ -62,6 +62,24 @@ func TestOperatorConfigKnownFilesPresenceAndRemoval(t *testing.T) {
 	}
 }
 
+func TestOperatorConfigDiscoversLateRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "file_mod_time_tracker")
+	if tickOperatorConfig(root) {
+		t.Fatal("missing operator-config root was reported valid")
+	}
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !tickOperatorConfig(root) {
+		t.Fatal("late-created operator-config root was not activated")
+	}
+	for _, file := range operatorConfigFiles {
+		if got := b04MetricValue(t, metrics.HLNodeOperatorConfigPresent.WithLabelValues(file)); got != 0 {
+			t.Fatalf("late empty root presence{%q} = %v, want 0", file, got)
+		}
+	}
+}
+
 func TestOperatorConfigFailedLoadIdentityIsBoundedAndReconciled(t *testing.T) {
 	root := t.TempDir()
 	for _, file := range operatorConfigFiles {

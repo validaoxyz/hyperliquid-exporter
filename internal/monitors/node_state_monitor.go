@@ -35,17 +35,18 @@ func SetLatestVisorHeight(h int64) {
 
 func latestVisorHeight() int64 { return atomic.LoadInt64(&visorHeightForLag) }
 
-// StartNodeStateMonitor publishes three tiny gauges sourced from single
-// files under $NODE_HOME/hyperliquid_data:
+// StartNodeStateMonitor publishes persisted core/ABCI values from three
+// single-integer files under $NODE_HOME/hyperliquid_data:
 //
 //   - freeze_abci_height          → hl_visor_freeze_abci_height
 //     plus hl_visor_blocks_above_freeze
 //     when the visor monitor has reported
 //     a current height.
-//   - evm_db_hub_fast/cp_checkpoint_height → hl_evm_db_checkpoint_height{tier="fast"}
-//   - evm_db_hub_slow/cp_checkpoint_height → hl_evm_db_checkpoint_height{tier="slow"}
-//     plus hl_evm_db_checkpoint_lag_blocks
-//     (fast - slow).
+//   - evm_db_hub_fast/cp_checkpoint_height and
+//     evm_db_hub_slow/cp_checkpoint_height →
+//     hl_node_persisted_abci_height{source_class=...} plus their
+//     fast-minus-slow file-value gap. Legacy EVM-named gauges are
+//     compatibility projections, not current EVM head state.
 //
 // Each file holds a single ASCII integer; the cost of reading all three
 // per tick is negligible compared to any other monitor.
@@ -61,7 +62,6 @@ func StartNodeStateMonitor(ctx context.Context, cfg config.Config, errCh chan<- 
 	defer ticker.Stop()
 
 	tickNodeState(freezePath, fastPath, slowPath)
-	metrics.MarkMonitorTick("node_state")
 
 	for {
 		select {
@@ -69,12 +69,12 @@ func StartNodeStateMonitor(ctx context.Context, cfg config.Config, errCh chan<- 
 			return
 		case <-ticker.C:
 			tickNodeState(freezePath, fastPath, slowPath)
-			metrics.MarkMonitorTick("node_state")
 		}
 	}
 }
 
-func tickNodeState(freezePath, fastPath, slowPath string) {
+func tickNodeState(freezePath, fastPath, slowPath string) bool {
+	metrics.MarkMonitorAttempt("node_state")
 	metrics.MarkSourceAttempt(metrics.SourceNodeState)
 	published := false
 	if freeze, ok := readSingleInt(freezePath); ok {
@@ -137,9 +137,12 @@ func tickNodeState(freezePath, fastPath, slowPath string) {
 	if published {
 		metrics.MarkSourceValidObservation(metrics.SourceNodeState, time.Time{})
 		metrics.MarkSourcePublication(metrics.SourceNodeState)
+		metrics.MarkMonitorValidObservation("node_state")
+		metrics.MarkMonitorPublication("node_state")
 	} else {
 		metrics.MarkSourceAbsent(metrics.SourceNodeState)
 	}
+	return published
 }
 
 // readSingleInt parses the entire file as a single ASCII integer. Whitespace

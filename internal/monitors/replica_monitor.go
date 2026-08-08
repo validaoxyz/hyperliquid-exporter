@@ -189,10 +189,6 @@ func (m *ReplicaMonitor) processBlock(block *replica.BlockMetrics) {
 	if block.ParentRound > 0 && block.Round > block.ParentRound {
 		metrics.HLCoreRoundAdvance.Observe(float64(block.Round - block.ParentRound))
 	}
-	if block.HardforkVersion > 0 {
-		metrics.HLCoreHardforkVersion.Set(float64(block.HardforkVersion))
-	}
-
 	// update proposer counter
 	if block.Proposer != "" {
 		metrics.IncrementProposerCounter(block.Proposer)

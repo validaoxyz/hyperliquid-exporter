@@ -1,9 +1,13 @@
 package monitors
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -13,6 +17,102 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 	"go.opentelemetry.io/otel"
 )
+
+func TestConsensusEOFDoesNotAdvanceObservation(t *testing.T) {
+	const childEnv = "HL_EXPORTER_TEST_CONSENSUS_EOF_CHILD"
+	if os.Getenv(childEnv) == "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestConsensusEOFDoesNotAdvanceObservation$")
+		cmd.Env = append(os.Environ(), childEnv+"=1")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("isolated consensus lifecycle test failed: %v\n%s", err, output)
+		}
+		return
+	}
+
+	nodeHome := t.TempDir()
+	logDir := filepath.Join(nodeHome, "data", "node_logs", "consensus", "hourly", "20260808")
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(logDir, "0")
+	if err := os.WriteFile(logPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	lineCounter, err := otel.Meter("consensus-eof-lifecycle-test").Int64Counter("test_consensus_lines")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldLineCounter := metrics.HLConsensusMonitorLinesCounter
+	metrics.HLConsensusMonitorLinesCounter = lineCounter
+	defer func() { metrics.HLConsensusMonitorLinesCounter = oldLineCounter }()
+	metrics.RegisterSource(metrics.SourceConsensus, true)
+	m := NewConsensusMonitor(&config.Config{NodeHome: nodeHome})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		m.monitorConsensusLogs(ctx, make(chan error, 1))
+	}()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("consensus tailer did not stop")
+		}
+	}()
+
+	openDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(openDeadline) {
+		metrics.PublishMonitorHealthSnapshot()
+		if value, ok := b03CollectorValue(t, metrics.HLExporterSourcePresent, map[string]string{"source": "consensus"}); ok && value == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if value, ok := b03CollectorValue(t, metrics.HLExporterSourcePresent, map[string]string{"source": "consensus"}); !ok || value != 1 {
+		t.Fatal("consensus tailer did not open the empty startup file")
+	}
+
+	// Give the open tailer several EOF pauses. Merely polling an empty
+	// committed file must not manufacture a valid observation.
+	time.Sleep(175 * time.Millisecond)
+	metrics.PublishMonitorHealthSnapshot()
+	labels := map[string]string{"monitor": "consensus"}
+	if validatorCollectorHasLabels(metrics.HLExporterMonitorLastValidSeconds, labels) {
+		t.Fatal("EOF-only consensus stream advanced last-valid observation")
+	}
+	if validatorCollectorHasLabels(metrics.HLExporterMonitorLastPublicationSeconds, labels) {
+		t.Fatal("EOF-only consensus stream advanced last publication")
+	}
+
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, writeErr := f.WriteString("[\"2026-08-08T00:00:00.000000000\",[\"round advance\",{\"prev_round\":1,\"round\":2,\"reason\":\"Qc\"}]]\n")
+	closeErr := f.Close()
+	if writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		metrics.PublishMonitorHealthSnapshot()
+		if validatorCollectorHasLabels(metrics.HLExporterMonitorLastValidSeconds, labels) &&
+			validatorCollectorHasLabels(metrics.HLExporterMonitorLastPublicationSeconds, labels) {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("valid committed consensus record did not advance progress")
+}
 
 func TestConsensusBlockTypedNullAndBoundedDeduplication(t *testing.T) {
 	for name, tc := range map[string]struct {

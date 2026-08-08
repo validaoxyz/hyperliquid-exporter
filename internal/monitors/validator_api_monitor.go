@@ -59,6 +59,7 @@ func StartValidatorMonitor(ctx context.Context, cfg config.Config, errCh chan<- 
 }
 
 func updateValidatorMetrics(ctx context.Context, cfg config.Config) error {
+	metrics.MarkMonitorAttempt("validator_api")
 	metrics.MarkSourceAttempt(metrics.SourceValidatorAPI)
 	// use resolver to get val summaries
 	result, err := hlResolver.GetValidatorSummaries(ctx, false)
@@ -110,7 +111,8 @@ func updateValidatorMetrics(ctx context.Context, cfg config.Config) error {
 	metrics.MarkSourceValidObservation(metrics.SourceValidatorAPI, time.Time{})
 	metrics.MarkSourcePublication(metrics.SourceValidatorAPI)
 
-	metrics.MarkMonitorTick("validator_api")
+	metrics.MarkMonitorValidObservation("validator_api")
+	metrics.MarkMonitorPublication("validator_api")
 	return nil
 }
 

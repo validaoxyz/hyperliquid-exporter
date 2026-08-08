@@ -333,6 +333,7 @@ func (m *ConsensusMonitor) monitorConsensusLogs(ctx context.Context, errCh chan<
 		eofSleep:    50 * time.Millisecond,
 		bufSize:     1 << 20,
 		onLine: func(line string) {
+			metrics.MarkMonitorAttempt("consensus")
 			if err := m.processConsensusLine(line); err != nil {
 				metrics.MarkSourceError(metrics.SourceConsensus, metrics.SourceFailureSchema)
 				logger.DebugComponent("consensus", "Error processing consensus line: %v", err)
@@ -347,7 +348,6 @@ func (m *ConsensusMonitor) monitorConsensusLogs(ctx context.Context, errCh chan<
 		// mutex several times per line at full consensus volume; flush once
 		// per EOF pause instead
 		onIdle: func() {
-			metrics.MarkMonitorTick("consensus")
 			if errLines > 0 {
 				metrics.AddConsensusMonitorErrors("consensus", errLines)
 				m.statsMutex.Lock()
@@ -363,6 +363,8 @@ func (m *ConsensusMonitor) monitorConsensusLogs(ctx context.Context, errCh chan<
 				m.verificationStats.LastProcessedAt = time.Now()
 				m.statsMutex.Unlock()
 				metrics.MarkSourcePublication(metrics.SourceConsensus)
+				metrics.MarkMonitorValidObservation("consensus")
+				metrics.MarkMonitorPublication("consensus")
 				okLines = 0
 			}
 		},

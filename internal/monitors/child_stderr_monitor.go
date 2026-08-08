@@ -121,7 +121,6 @@ func StartChildStderrMonitor(ctx context.Context, cfg config.Config) {
 	defer ticker.Stop()
 
 	tickChildStderr(root, seen)
-	metrics.MarkMonitorTick("child_stderr")
 
 	for {
 		select {
@@ -129,7 +128,6 @@ func StartChildStderrMonitor(ctx context.Context, cfg config.Config) {
 			return
 		case <-ticker.C:
 			tickChildStderr(root, seen)
-			metrics.MarkMonitorTick("child_stderr")
 		}
 	}
 }

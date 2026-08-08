@@ -559,7 +559,7 @@ func createInstruments() error {
 
 	HLConsensusConnectivityGauge, err = meter.Float64ObservableGauge(
 		"hl_consensus_validator_connectivity",
-		api.WithDescription("Connectivity status between validators (0=disconnected, 1=connected)"),
+		api.WithDescription("Value 0 for each subject and reporter relation in the latest complete disconnected_validators status snapshot; absence is not connected=1"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create consensus connectivity gauge: %w", err)

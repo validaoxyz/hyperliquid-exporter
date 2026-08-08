@@ -54,7 +54,6 @@ func StartInfoProbeMonitor(ctx context.Context, cfg config.Config, errCh chan<- 
 	defer ticker.Stop()
 
 	probeOnce(ctx, client, url)
-	metrics.MarkMonitorTick("info_probe")
 
 	for {
 		select {
@@ -62,22 +61,28 @@ func StartInfoProbeMonitor(ctx context.Context, cfg config.Config, errCh chan<- 
 			return
 		case <-ticker.C:
 			probeOnce(ctx, client, url)
-			metrics.MarkMonitorTick("info_probe")
 		}
 	}
 }
 
-func probeOnce(ctx context.Context, client *http.Client, url string) {
-	probeOnceAt(ctx, client, url, time.Now)
+func probeOnce(ctx context.Context, client *http.Client, url string) bool {
+	return probeOnceAt(ctx, client, url, time.Now)
 }
 
-func probeOnceAt(ctx context.Context, client *http.Client, url string, now func() time.Time) {
+func probeOnceAt(ctx context.Context, client *http.Client, url string, now func() time.Time) bool {
+	metrics.MarkMonitorAttempt("info_probe")
 	metrics.InitInfoProbeStatusInstruments()
-	probeMeta(ctx, client, url, now)
-	probeExchangeStatus(ctx, client, url, now)
+	metaOK := probeMeta(ctx, client, url, now)
+	exchangeOK := probeExchangeStatus(ctx, client, url, now)
+	if metaOK || exchangeOK {
+		metrics.MarkMonitorValidObservation("info_probe")
+		metrics.MarkMonitorPublication("info_probe")
+		return true
+	}
+	return false
 }
 
-func probeMeta(ctx context.Context, client *http.Client, url string, now func() time.Time) {
+func probeMeta(ctx context.Context, client *http.Client, url string, now func() time.Time) bool {
 	metrics.MarkSourceAttempt(metrics.SourceInfoMeta)
 	start := now()
 
@@ -85,7 +90,7 @@ func probeMeta(ctx context.Context, client *http.Client, url string, now func() 
 	if err != nil {
 		recordMetaFailure(metrics.InfoProbeOutcomeBuild, metrics.SourceFailureRequest, now())
 		logger.DebugComponent("info_probe", "build request: %v", err)
-		return
+		return false
 	}
 	req.Header.Set("Content-Type", "application/json")
 
@@ -99,7 +104,7 @@ func probeMeta(ctx context.Context, client *http.Client, url string, now func() 
 	if err != nil {
 		recordMetaFailure(metrics.InfoProbeOutcomeRequest, metrics.SourceFailureRequest, now())
 		logger.DebugComponent("info_probe", "POST %s: %v", url, err)
-		return
+		return false
 	}
 	defer resp.Body.Close()
 
@@ -119,7 +124,7 @@ func probeMeta(ctx context.Context, client *http.Client, url string, now func() 
 		infoMetaLastSuccessNanos.Store(successAt.UnixNano())
 		metrics.MarkSourceValidObservation(metrics.SourceInfoMeta, time.Time{})
 		metrics.MarkSourcePublication(metrics.SourceInfoMeta)
-		return
+		return true
 	}
 
 	outcome := metrics.InfoProbeOutcomeEmpty
@@ -130,18 +135,19 @@ func probeMeta(ctx context.Context, client *http.Client, url string, now func() 
 	}
 	recordMetaFailure(outcome, stage, now())
 	logger.DebugComponent("info_probe", "POST %s -> %d body_len=%d", url, resp.StatusCode, n)
+	return false
 }
 
 // probeExchangeStatus asks the node's own info endpoint for exchangeStatus
 // and publishes local_wall_clock - exchange_time. The node README's
 // recommended health check is exactly this comparison: a node can serve
 // 200s while its exchange state has stopped advancing.
-func probeExchangeStatus(ctx context.Context, client *http.Client, url string, now func() time.Time) {
+func probeExchangeStatus(ctx context.Context, client *http.Client, url string, now func() time.Time) bool {
 	metrics.MarkSourceAttempt(metrics.SourceInfoExchange)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBufferString(`{"type":"exchangeStatus"}`))
 	if err != nil {
 		recordExchangeFailure(metrics.InfoProbeOutcomeBuild, metrics.SourceFailureRequest, now())
-		return
+		return false
 	}
 	req.Header.Set("Content-Type", "application/json")
 
@@ -149,13 +155,13 @@ func probeExchangeStatus(ctx context.Context, client *http.Client, url string, n
 	if err != nil {
 		recordExchangeFailure(metrics.InfoProbeOutcomeRequest, metrics.SourceFailureRequest, now())
 		logger.DebugComponent("info_probe", "exchangeStatus: %v", err)
-		return
+		return false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		recordExchangeFailure(metrics.InfoProbeOutcomeStatus, metrics.SourceFailureStatus, now())
-		return
+		return false
 	}
 
 	var body struct {
@@ -163,7 +169,7 @@ func probeExchangeStatus(ctx context.Context, client *http.Client, url string, n
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil || body.Time <= 0 {
 		recordExchangeFailure(metrics.InfoProbeOutcomeDecode, metrics.SourceFailureDecode, now())
-		return
+		return false
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 
@@ -177,6 +183,7 @@ func probeExchangeStatus(ctx context.Context, client *http.Client, url string, n
 	infoExchangeLastSuccessNanos.Store(successAt.UnixNano())
 	metrics.MarkSourceValidObservation(metrics.SourceInfoExchange, time.Time{})
 	metrics.MarkSourcePublication(metrics.SourceInfoExchange)
+	return true
 }
 
 func recordMetaFailure(outcome string, stage metrics.SourceFailureStage, now time.Time) {

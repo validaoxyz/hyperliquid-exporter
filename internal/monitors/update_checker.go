@@ -37,10 +37,7 @@ var (
 func StartUpdateChecker(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	metrics.RegisterSource(metrics.SourceUpdate, true)
 	goSafe("update_checker", func() {
-		if err := checkSoftwareUpdate(ctx, cfg); err != nil {
-			ReportError(ctx, "update_checker", errCh, fmt.Errorf("update checker error: %w", err))
-		}
-		metrics.MarkMonitorTick("update_checker")
+		tickSoftwareUpdate(ctx, cfg, errCh)
 
 		ticker := time.NewTicker(updateCheckInterval)
 		defer ticker.Stop()
@@ -50,42 +47,62 @@ func StartUpdateChecker(ctx context.Context, cfg config.Config, errCh chan<- err
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := checkSoftwareUpdate(ctx, cfg); err != nil {
-					ReportError(ctx, "update_checker", errCh, fmt.Errorf("update checker error: %w", err))
-				}
-				metrics.MarkMonitorTick("update_checker")
+				tickSoftwareUpdate(ctx, cfg, errCh)
 			}
 		}
 	})
 }
 
-func checkSoftwareUpdate(ctx context.Context, cfg config.Config) error {
+func tickSoftwareUpdate(ctx context.Context, cfg config.Config, errCh chan<- error) bool {
+	metrics.MarkMonitorAttempt("update_checker")
+	metrics.MarkSourceAttempt(metrics.SourceUpdate)
+	observed, err := checkSoftwareUpdate(ctx, cfg)
+	if err != nil {
+		metrics.MarkSourceError(metrics.SourceUpdate, metrics.SourceFailureRequest)
+		ReportError(ctx, "update_checker", errCh, fmt.Errorf("update checker error: %w", err))
+		return false
+	}
+	if !observed {
+		metrics.MarkSourceAbsent(metrics.SourceUpdate)
+		return false
+	}
+	metrics.MarkSourceValidObservation(metrics.SourceUpdate, time.Time{})
+	metrics.MarkSourcePublication(metrics.SourceUpdate)
+	metrics.MarkMonitorValidObservation("update_checker")
+	metrics.MarkMonitorPublication("update_checker")
+	return true
+}
+
+func checkSoftwareUpdate(ctx context.Context, cfg config.Config) (bool, error) {
 	visorPath := filepath.Join(cfg.BinaryHome, "hl-visor")
 	info, err := os.Stat(visorPath)
 	if err != nil {
-		if !visorMissingLogged {
+		if os.IsNotExist(err) && !visorMissingLogged {
 			logger.InfoComponent("system",
 				"No hl-visor at %s; update check disabled (hl_software_up_to_date stays unset). Set BINARY_HOME if the visor lives elsewhere.", visorPath)
 			visorMissingLogged = true
 		}
-		return nil
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat local hl-visor: %w", err)
 	}
 
 	if localVisorHash == "" || info.ModTime().After(localVisorMtime) {
 		commit, _, err := binaryVersionViaCopy(ctx, visorPath)
 		if err != nil {
-			return fmt.Errorf("local hl-visor version: %w", err)
+			return false, fmt.Errorf("local hl-visor version: %w", err)
 		}
 		localVisorHash = commit
 		localVisorMtime = info.ModTime()
 	}
 
 	if err := refreshLatestVisorHash(ctx, cfg.Chain); err != nil {
-		return err
+		return false, err
 	}
 
 	updateUpToDateStatus()
-	return nil
+	return true, nil
 }
 
 // refreshLatestVisorHash resolves the commit hash of the newest hl-visor on

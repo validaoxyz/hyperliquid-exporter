@@ -572,11 +572,11 @@ var (
 var (
 	HLNodeTmpBytes = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_node_tmp_bytes",
-		Help: "Total size of files under $NODE_HOME/tmp. Persistent growth indicates orphaned writes from past crashes.",
+		Help: "Apparent bytes across all files in the last complete $NODE_HOME/tmp scan; no cause is inferred from growth.",
 	})
 	HLNodeTmpStaleFiles = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_node_tmp_stale_files",
-		Help: "Number of files under $NODE_HOME/tmp older than 24h (orphaned write candidates).",
+		Help: "Files older than 24 hours in the last complete $NODE_HOME/tmp scan, including empty shell_rs_out receipts and material files.",
 	})
 )
 
@@ -659,7 +659,7 @@ var (
 var (
 	HLNodeShellExecPending = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_node_shell_exec_pending",
-		Help: "Count of files under $NODE_HOME/tmp/shell_rs_out/. Each visor shell-exec leaves one; sustained growth indicates the visor's cleanup pass is broken.",
+		Help: "Compatibility count of regular files retained under $NODE_HOME/tmp/shell_rs_out/, including expected empty receipts; use material-class metrics for stale payload evidence.",
 	})
 )
 
@@ -678,19 +678,19 @@ var (
 var (
 	HLConsensusCommittedBlocks = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "hl_consensus_committed_blocks_total",
-		Help: "Blocks committed by this validator since the exporter started observing. Counter; use rate().",
+		Help: "Accepted CommittedBlocks source-window delta accumulated since exporter start; source n is an observation count and is not exported here.",
 	})
 	HLConsensusCommittedTxs = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "hl_consensus_committed_txs_total",
-		Help: "Transactions committed by this validator since the exporter started observing. Counter; use rate().",
+		Help: "Accepted CommittedTxs source-window delta accumulated since exporter start; source n is an observation count and is not exported here.",
 	})
 	HLConsensusCommittedTxBytes = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "hl_consensus_committed_tx_bytes_total",
-		Help: "Bytes of committed transactions since the exporter started observing. Counter; use rate().",
+		Help: "Accepted CommittedTxBytes source-window delta accumulated since exporter start; source n is an observation count and is not exported here.",
 	})
 	HLConsensusDroppedTxs = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "hl_consensus_dropped_txs_total",
-		Help: "Transactions dropped by this validator's mempool / consensus pipeline since the exporter started observing. Any non-zero rate is operator-actionable: the validator is shedding load.",
+		Help: "Accepted DroppedTxs source-window delta accumulated since exporter start; no cause or severity is inferred.",
 	})
 	HLConsensusRoundCatchup = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "hl_consensus_round_catchup_total",
@@ -698,19 +698,19 @@ var (
 	})
 	HLConsensusRoundQC = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "hl_consensus_round_qc_total",
-		Help: "Quorum Certificate rounds since the exporter started observing. In a healthy network this tracks committed_blocks closely.",
+		Help: "Accepted RoundQc source-window delta accumulated since exporter start; no relationship to committed blocks is inferred.",
 	})
 	HLConsensusRoundTC = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "hl_consensus_round_tc_total",
-		Help: "Timeout Certificate rounds (view changes) since the exporter started observing. Sustained rate = network instability.",
+		Help: "Accepted RoundTc source-window delta accumulated since exporter start; no cause or network-health conclusion is inferred.",
 	})
 	HLConsensusRPCRequestsRegistered = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "hl_consensus_rpc_requests_registered_total",
-		Help: "Validator-RPC requests served since the exporter started observing.",
+		Help: "Accepted RpcRequestsRegistered delta for outbound local accumulator work since exporter start; not a served-request count.",
 	})
 	HLConsensusRPCRequestsSent = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "hl_consensus_rpc_requests_sent_total",
-		Help: "Validator-RPC requests initiated since the exporter started observing.",
+		Help: "Accepted RpcRequestsSent delta for outbound local accumulator work since exporter start; no request-lifecycle stage is inferred.",
 	})
 )
 
@@ -896,10 +896,6 @@ var (
 		Help:    "Distribution of round - parent_round per block (1 = healthy; >1 = skipped/timed-out rounds).",
 		Buckets: []float64{1, 2, 3, 4, 5, 10, 25, 50, 100},
 	})
-	HLCoreHardforkVersion = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "hl_core_hardfork_version",
-		Help: "Hardfork version stamped on the latest replica block. Steps up when a hardfork activates; explains restart clusters on version pushes. Requires --replica-metrics.",
-	})
 )
 
 // Extra per-validator facts from the validatorSummaries poll. Vectors carry
@@ -909,7 +905,7 @@ var (
 
 	HLConsensusValidatorRecentBlocks = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_consensus_validator_recent_blocks",
-		Help: "nRecentBlocks from validatorSummaries: blocks this validator proposed in the API's recent window. 0 on a jailed or stalled validator.",
+		Help: "Raw nRecentBlocks field from the latest complete validatorSummaries response; the API window is upstream-defined and zero has no inferred cause.",
 	}, validatorInfoLabels)
 	HLConsensusValidatorCommissionRate = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_consensus_validator_commission_rate",
@@ -990,15 +986,15 @@ var HLNodeRateLimitedFiles = promauto.NewGaugeVec(prometheus.GaugeOpts{
 var (
 	HLNodeChildStarts = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_node_child_starts",
-		Help: "hl-node child starts retained in visor_child_stderr (clean starts + crashes). Retained-history count; prune-aware, do not rate().",
+		Help: "Compatibility projection of artifacts retained in visor_child_stderr; includes readable empty start receipts and material artifacts, is prune-aware, and must not be rated.",
 	})
 	HLNodeChildCrashes = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_node_child_crashes",
-		Help: "Retained hl-node child crashes by reason (app_hash_mismatch, hardfork_upgrade, sync_overflow, config_error, network, panic). app_hash_mismatch is page-immediately severity.",
+		Help: "Compatibility projection of retained material child-stderr artifacts by bounded evidence reason; a reason is not a guaranteed crash or upgrade cause.",
 	}, []string{"reason"})
 	HLNodeChildLastCrashSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_node_child_last_crash_seconds",
-		Help: "Unix timestamp of the newest retained crash per reason; time() - value < threshold is the alert shape.",
+		Help: "Compatibility timestamp of the newest retained material child-stderr artifact per bounded evidence reason.",
 	}, []string{"reason"})
 )
 
@@ -1009,5 +1005,5 @@ var (
 // silently stops writing.
 var HLNodeStreamAgeSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "hl_node_stream_age_seconds",
-	Help: "Age of the newest file in each present opt-in data stream (node_fills_streaming, node_twap_statuses_streaming, misc_events, system_and_core_writer_actions). Climbing while the node runs = the stream (and whatever consumes it) is stalled.",
+	Help: "Wall-clock age of the latest valid committed record observed in each fixed opt-in stream; no writer cadence, consumer, or stall is inferred.",
 }, []string{"stream"})

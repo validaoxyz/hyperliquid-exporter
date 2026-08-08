@@ -40,20 +40,12 @@ var operatorConfigFiles = []string{
 func StartOperatorConfigMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	metrics.RegisterSource(metrics.SourceOperatorConfig, true)
 	root := filepath.Join(cfg.NodeHome, "file_mod_time_tracker")
-	if _, err := os.Stat(root); err != nil {
-		logger.InfoComponent("operator_config",
-			"file_mod_time_tracker directory not present (%s); monitor idle", root)
-		<-ctx.Done()
-		return
-	}
-
-	logger.InfoComponent("operator_config", "watching %s", root)
+	logger.InfoComponent("operator_config", "watching %s with late-source discovery", root)
 
 	ticker := time.NewTicker(operatorConfigPollInterval)
 	defer ticker.Stop()
 
 	tickOperatorConfig(root)
-	metrics.MarkMonitorTick("operator_config")
 
 	for {
 		select {
@@ -61,68 +53,108 @@ func StartOperatorConfigMonitor(ctx context.Context, cfg config.Config, errCh ch
 			return
 		case <-ticker.C:
 			tickOperatorConfig(root)
-			metrics.MarkMonitorTick("operator_config")
 		}
 	}
 }
 
-func tickOperatorConfig(root string) {
+type operatorConfigSnapshot struct {
+	present    map[string]float64
+	ageSeconds map[string]*float64
+	failed     map[string]int64
+	failedAll  int64
+}
+
+func tickOperatorConfig(root string) bool {
+	metrics.MarkMonitorAttempt("operator_config")
+	metrics.MarkSourceAttempt(metrics.SourceOperatorConfig)
 	now := time.Now()
-	for _, f := range operatorConfigFiles {
-		info, err := os.Stat(filepath.Join(root, f))
+	if info, err := os.Stat(root); err != nil {
+		if os.IsNotExist(err) {
+			metrics.MarkSourceAbsent(metrics.SourceOperatorConfig)
+		} else {
+			metrics.MarkSourceError(metrics.SourceOperatorConfig, metrics.SourceFailureStat)
+		}
+		return false
+	} else if !info.IsDir() {
+		metrics.MarkSourceError(metrics.SourceOperatorConfig, metrics.SourceFailureSchema)
+		return false
+	}
+
+	snapshot := operatorConfigSnapshot{
+		present:    make(map[string]float64, len(operatorConfigFiles)),
+		ageSeconds: make(map[string]*float64, len(operatorConfigFiles)),
+		failed:     make(map[string]int64, len(operatorConfigFiles)+1),
+	}
+	for _, file := range operatorConfigFiles {
+		info, err := os.Stat(filepath.Join(root, file))
 		if err != nil {
 			if os.IsNotExist(err) {
-				metrics.HLNodeOperatorConfigPresent.WithLabelValues(f).Set(0)
-			} else {
-				metrics.HLNodeOperatorConfigPresent.WithLabelValues(f).Set(-1)
+				snapshot.present[file] = 0
+				continue
 			}
-			metrics.HLNodeOperatorConfigAgeSeconds.DeleteLabelValues(f)
-			continue
+			metrics.MarkSourceError(metrics.SourceOperatorConfig, metrics.SourceFailureStat)
+			return false
 		}
-		metrics.HLNodeOperatorConfigPresent.WithLabelValues(f).Set(1)
+		if !info.Mode().IsRegular() {
+			metrics.MarkSourceError(metrics.SourceOperatorConfig, metrics.SourceFailureSchema)
+			return false
+		}
+		snapshot.present[file] = 1
 		age := now.Sub(info.ModTime()).Seconds()
 		if age < 0 {
 			age = 0
 		}
-		metrics.HLNodeOperatorConfigAgeSeconds.WithLabelValues(f).
-			Set(age)
+		ageCopy := age
+		snapshot.ageSeconds[file] = &ageCopy
 	}
 
 	// Count *_FAILED_LOAD sidecars hl-node leaves when it rejects an
 	// operator-pushed config. Any non-zero count = silent
 	// misconfiguration; the operator pushed firewall_ips.json or
 	// similar and it never actually loaded.
-	var failed int64
-	if entries, err := os.ReadDir(root); err == nil {
-		known := make(map[string]struct{}, len(operatorConfigFiles))
-		counts := make(map[string]int64, len(operatorConfigFiles)+1)
-		for _, file := range operatorConfigFiles {
-			known[file] = struct{}{}
-			counts[file] = 0
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		metrics.MarkSourceError(metrics.SourceOperatorConfig, metrics.SourceFailureRead)
+		return false
+	}
+	known := make(map[string]struct{}, len(operatorConfigFiles))
+	for _, file := range operatorConfigFiles {
+		known[file] = struct{}{}
+		snapshot.failed[file] = 0
+	}
+	snapshot.failed["unknown"] = 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), "_FAILED_LOAD") {
+			continue
 		}
-		counts["unknown"] = 0
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			if !strings.HasSuffix(e.Name(), "_FAILED_LOAD") {
-				continue
-			}
-			failed++
-			file := strings.TrimSuffix(e.Name(), "_FAILED_LOAD")
-			if _, ok := known[file]; !ok {
-				file = "unknown"
-			}
-			counts[file]++
+		snapshot.failedAll++
+		file := strings.TrimSuffix(entry.Name(), "_FAILED_LOAD")
+		if _, ok := known[file]; !ok {
+			file = "unknown"
 		}
-		for _, file := range operatorConfigFiles {
-			metrics.HLNodeOperatorConfigFailedLoad.WithLabelValues(file).Set(float64(counts[file]))
-		}
-		metrics.HLNodeOperatorConfigFailedLoad.WithLabelValues("unknown").Set(float64(counts["unknown"]))
-		metrics.HLNodeOperatorConfigFailedLoads.Set(float64(failed))
+		snapshot.failed[file]++
 	}
 
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		for _, file := range operatorConfigFiles {
+			metrics.HLNodeOperatorConfigPresent.WithLabelValues(file).Set(snapshot.present[file])
+			if age := snapshot.ageSeconds[file]; age == nil {
+				metrics.HLNodeOperatorConfigAgeSeconds.DeleteLabelValues(file)
+			} else {
+				metrics.HLNodeOperatorConfigAgeSeconds.WithLabelValues(file).Set(*age)
+			}
+			metrics.HLNodeOperatorConfigFailedLoad.WithLabelValues(file).Set(float64(snapshot.failed[file]))
+		}
+		metrics.HLNodeOperatorConfigFailedLoad.WithLabelValues("unknown").Set(float64(snapshot.failed["unknown"]))
+		metrics.HLNodeOperatorConfigFailedLoads.Set(float64(snapshot.failedAll))
+		metrics.MarkSourceValidObservation(metrics.SourceOperatorConfig, time.Time{})
+		metrics.MarkSourcePublication(metrics.SourceOperatorConfig)
+		metrics.MarkMonitorValidObservation("operator_config")
+		metrics.MarkMonitorPublication("operator_config")
+	})
+
 	readJailingConfig(root)
+	return true
 }
 
 // readJailingConfig publishes the contents of heartbeat_jailing_config.json:

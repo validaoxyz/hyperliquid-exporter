@@ -301,7 +301,8 @@ func parseBlockTimeLine(line string, stateType string) error {
 
 	// record apply duration with state type label
 	metrics.RecordApplyDurationWithLabel(applyDurationMs, stateType)
-	metrics.MarkMonitorTick("block")
+	metrics.MarkMonitorValidObservation("block")
+	metrics.MarkMonitorPublication("block")
 	metrics.MarkSourceValidObservation(blockSourceID(stateType), parsedTime)
 	metrics.MarkSourceValidObservation(metrics.SourceBlock, parsedTime)
 
@@ -486,7 +487,8 @@ func parseLegacyBlockTimeLine(line string) error {
 	metrics.SetBlockHeight(*data.Height)
 	metrics.RecordApplyDuration(applyDurationMs)
 	metrics.SetLatestBlockTime(parsedTime.Unix())
-	metrics.MarkMonitorTick("block")
+	metrics.MarkMonitorValidObservation("block")
+	metrics.MarkMonitorPublication("block")
 	metrics.MarkSourceValidObservation(metrics.SourceBlockLegacy, parsedTime)
 	metrics.MarkSourceValidObservation(metrics.SourceBlock, parsedTime)
 

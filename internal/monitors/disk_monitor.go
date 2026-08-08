@@ -98,7 +98,6 @@ func StartDiskMonitor(ctx context.Context, cfg config.Config, errCh chan<- error
 	defer ticker.Stop()
 
 	tickDisk(cfg.NodeHome)
-	metrics.MarkMonitorTick("disk")
 
 	for {
 		select {
@@ -106,7 +105,6 @@ func StartDiskMonitor(ctx context.Context, cfg config.Config, errCh chan<- error
 			return
 		case <-ticker.C:
 			tickDisk(cfg.NodeHome)
-			metrics.MarkMonitorTick("disk")
 		}
 	}
 }

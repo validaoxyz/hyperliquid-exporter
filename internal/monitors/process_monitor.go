@@ -54,7 +54,6 @@ func StartProcessMonitor(ctx context.Context, cfg config.Config, errCh chan<- er
 	state := newProcessMonitorState()
 
 	tickProcesses(state)
-	metrics.MarkMonitorTick("process")
 
 	for {
 		select {
@@ -62,7 +61,6 @@ func StartProcessMonitor(ctx context.Context, cfg config.Config, errCh chan<- er
 			return
 		case <-ticker.C:
 			tickProcesses(state)
-			metrics.MarkMonitorTick("process")
 		}
 	}
 }

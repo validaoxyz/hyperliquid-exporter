@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
 func TestCountLinesAndBytes(t *testing.T) {
@@ -66,5 +68,36 @@ func TestCountLinesAndBytes_LargeBody(t *testing.T) {
 	}
 	if size != 400_000 {
 		t.Errorf("size=%d want 400000", size)
+	}
+}
+
+func TestTickLogLinesDiscoversLateRootAndRetainsOnRemoval(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "log")
+	if tickLogLines(root) {
+		t.Fatal("missing log root was reported as a valid observation")
+	}
+	if err := os.MkdirAll(filepath.Join(root, "infra", "error"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "infra", "error", "20260808")
+	if err := os.WriteFile(path, []byte("one\ntwo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !tickLogLines(root) {
+		t.Fatal("late-created log root was not activated")
+	}
+	labels := map[string]string{"stream": "infra", "level": "error"}
+	if got, ok := b03CollectorValue(t, metrics.HLNodeLogLinesTotal, labels); !ok || got != 2 {
+		t.Fatalf("late log line count = %v, %v; want 2, true", got, ok)
+	}
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+	if tickLogLines(root) {
+		t.Fatal("removed log root advanced a valid observation")
+	}
+	if got, ok := b03CollectorValue(t, metrics.HLNodeLogLinesTotal, labels); !ok || got != 2 {
+		t.Fatalf("transient removal changed last complete count = %v, %v", got, ok)
 	}
 }

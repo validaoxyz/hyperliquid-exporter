@@ -110,6 +110,7 @@ func reportValidatorIPError(ctx context.Context, errCh chan<- error, err error) 
 }
 
 func processLatestState(ctx context.Context, stateDir string, currentFile *string, reader *abci.Reader) error {
+	metrics.MarkMonitorAttempt("validator_ip")
 	metrics.MarkSourceAttempt(metrics.SourceValidatorIP)
 	latestFile, err := utils.LatestDateNumericFile(stateDir)
 	if err != nil {
@@ -157,7 +158,8 @@ func processLatestState(ctx context.Context, stateDir string, currentFile *strin
 	*currentFile = latestFile
 	metrics.MarkSourceValidObservation(metrics.SourceValidatorIP, sampleTime)
 	metrics.MarkSourcePublication(metrics.SourceValidatorIP)
-	metrics.MarkMonitorTick("validator_ip")
+	metrics.MarkMonitorValidObservation("validator_ip")
+	metrics.MarkMonitorPublication("validator_ip")
 	return nil
 }
 
@@ -171,12 +173,12 @@ func monitorValidatorTCPConnect(ctx context.Context, _ chan<- error) {
 			return
 		case now := <-ticker.C:
 			runValidatorProbeCycle(ctx, now)
-			metrics.MarkMonitorTick("validator_ip")
 		}
 	}
 }
 
 func runValidatorProbeCycle(ctx context.Context, now time.Time) bool {
+	metrics.MarkMonitorAttempt("validator_ip")
 	if !validatorProbeCycleMu.TryLock() {
 		return false
 	}
@@ -265,6 +267,8 @@ func probeValidatorTarget(ctx context.Context, target validatorProbeTarget, now 
 	duration, outcome := connectToValidator(probeCtx, target.ip)
 	labels := []string{target.identity.Validator, target.identity.Signer, target.identity.Name, outcome}
 	metrics.HLConsensusValidatorTCPConnectOutcomes.WithLabelValues(labels...).Inc()
+	metrics.MarkMonitorValidObservation("validator_ip")
+	metrics.MarkMonitorPublication("validator_ip")
 
 	validatorProbeMu.Lock()
 	state := validatorProbeStates[target.identity.Validator]

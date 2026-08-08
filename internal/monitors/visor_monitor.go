@@ -59,7 +59,6 @@ func StartVisorMonitor(ctx context.Context, cfg config.Config, errCh chan<- erro
 
 	// Run once immediately so the first scrape isn't empty.
 	tickVisor(snapshotPath, historicalDir, errCh)
-	metrics.MarkMonitorTick("visor")
 
 	for {
 		select {
@@ -67,12 +66,12 @@ func StartVisorMonitor(ctx context.Context, cfg config.Config, errCh chan<- erro
 			return
 		case <-ticker.C:
 			tickVisor(snapshotPath, historicalDir, errCh)
-			metrics.MarkMonitorTick("visor")
 		}
 	}
 }
 
-func tickVisor(snapshotPath, historicalDir string, errCh chan<- error) {
+func tickVisor(snapshotPath, historicalDir string, errCh chan<- error) bool {
+	metrics.MarkMonitorAttempt("visor")
 	metrics.MarkSourceAttempt(metrics.SourceVisor)
 	state, ts, err := readLatestVisorState(snapshotPath, historicalDir)
 	if err != nil {
@@ -84,11 +83,14 @@ func tickVisor(snapshotPath, historicalDir string, errCh chan<- error) {
 		} else {
 			metrics.MarkSourceError(metrics.SourceVisor, metrics.SourceFailureRead)
 		}
-		return
+		return false
 	}
 	publishVisorState(state, ts)
 	metrics.MarkSourceValidObservation(metrics.SourceVisor, ts)
 	metrics.MarkSourcePublication(metrics.SourceVisor)
+	metrics.MarkMonitorValidObservation("visor")
+	metrics.MarkMonitorPublication("visor")
+	return true
 }
 
 func readLatestVisorState(snapshotPath, historicalDir string) (visorState, time.Time, error) {

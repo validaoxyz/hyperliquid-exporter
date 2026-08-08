@@ -76,7 +76,8 @@ func StartEVMMonitor(ctx context.Context, cfg config.Config, errCh chan<- error)
 			}
 			metrics.MarkSourceValidObservation(metrics.SourceEVM, processor.lastSourceTime())
 			metrics.MarkSourcePublication(metrics.SourceEVM)
-			metrics.MarkMonitorTick("evm")
+			metrics.MarkMonitorValidObservation("evm")
+			metrics.MarkMonitorPublication("evm")
 		},
 		onFailure: func(failure tailStreamFailure) {
 			switch failure {

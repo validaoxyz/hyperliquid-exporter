@@ -218,7 +218,6 @@ func StartValidatorStatusMonitor(ctx context.Context, cfg config.Config, errCh c
 					logger.ErrorComponent("consensus", "Validator Status Monitor error: %v", err)
 					ReportError(ctx, "validator_status", errCh, err)
 				}
-				metrics.MarkMonitorTick("validator_status")
 			}
 		}
 	})
@@ -226,6 +225,7 @@ func StartValidatorStatusMonitor(ctx context.Context, cfg config.Config, errCh c
 
 func readValidatorStatus(nodeHome string) error {
 	statusDir := filepath.Join(nodeHome, "data/node_logs/status/hourly")
+	metrics.MarkMonitorAttempt("validator_status")
 	metrics.MarkSourceAttempt(metrics.SourceValidatorStatus)
 
 	// check if status directory exists first - if not, this isn't a validator node
@@ -278,6 +278,8 @@ func readValidatorStatus(nodeHome string) error {
 
 	metrics.MarkSourceValidObservation(metrics.SourceValidatorStatus, time.Time{})
 	metrics.MarkSourcePublication(metrics.SourceValidatorStatus)
+	metrics.MarkMonitorValidObservation("validator_status")
+	metrics.MarkMonitorPublication("validator_status")
 	return nil
 }
 

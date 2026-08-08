@@ -42,10 +42,7 @@ func StartVersionMonitor(ctx context.Context, cfg config.Config, errCh chan<- er
 	metrics.RegisterSource(metrics.SourceVersion, true)
 	goSafe("version", func() {
 		// run immediately on startup
-		if err := updateVersionInfo(ctx, cfg); err != nil {
-			ReportError(ctx, "version", errCh, fmt.Errorf("version monitor error: %w", err))
-		}
-		metrics.MarkMonitorTick("version")
+		tickVersionInfo(ctx, cfg, errCh)
 
 		ticker := time.NewTicker(30 * time.Minute)
 		defer ticker.Stop()
@@ -55,37 +52,52 @@ func StartVersionMonitor(ctx context.Context, cfg config.Config, errCh chan<- er
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := updateVersionInfo(ctx, cfg); err != nil {
-					ReportError(ctx, "version", errCh, fmt.Errorf("version monitor error: %w", err))
-				}
-				metrics.MarkMonitorTick("version")
+				tickVersionInfo(ctx, cfg, errCh)
 			}
 		}
 	})
 }
 
-func updateVersionInfo(ctx context.Context, cfg config.Config) error {
+func tickVersionInfo(ctx context.Context, cfg config.Config, errCh chan<- error) bool {
+	metrics.MarkMonitorAttempt("version")
+	metrics.MarkSourceAttempt(metrics.SourceVersion)
+	published, sourceTime, err := updateVersionInfo(ctx, cfg)
+	if err != nil {
+		metrics.MarkSourceError(metrics.SourceVersion, metrics.SourceFailureRead)
+		ReportError(ctx, "version", errCh, fmt.Errorf("version monitor error: %w", err))
+		return false
+	}
+	metrics.MarkSourceValidObservation(metrics.SourceVersion, sourceTime)
+	metrics.MarkMonitorValidObservation("version")
+	if published {
+		metrics.MarkSourcePublication(metrics.SourceVersion)
+		metrics.MarkMonitorPublication("version")
+	}
+	return true
+}
+
+func updateVersionInfo(ctx context.Context, cfg config.Config) (bool, time.Time, error) {
 	info, err := os.Stat(cfg.NodeBinary)
 	if err != nil {
-		return fmt.Errorf("error stating node binary: %w", err)
+		return false, time.Time{}, fmt.Errorf("error stating node binary: %w", err)
 	}
 
 	// the binary only changes when hl-visor swaps it; skip the copy+exec
 	// when the mtime hasn't moved since the last successful probe
 	if currentCommitHash != "" && !info.ModTime().After(lastNodeBinaryMtime) {
-		return nil
+		return false, info.ModTime(), nil
 	}
 
 	commit, date, err := binaryVersionViaCopy(ctx, cfg.NodeBinary)
 	if err != nil {
-		return err
+		return false, info.ModTime(), err
 	}
 
 	currentCommitHash = commit
 	lastNodeBinaryMtime = info.ModTime()
 	metrics.SetSoftwareVersion(currentCommitHash, date)
 	logger.InfoComponent("system", "Detected hl-node version: commit=%s, date=%s", currentCommitHash, date)
-	return nil
+	return true, info.ModTime(), nil
 }
 
 // binaryVersionViaCopy copies the binary to a temp file before running
