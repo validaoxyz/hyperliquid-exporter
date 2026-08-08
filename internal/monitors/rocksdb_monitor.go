@@ -208,9 +208,18 @@ func rocksDBStatsFailureStage(err error) metrics.SourceFailureStage {
 func publishRocksDBSnapshot(db string, sstFiles int, stats rocksDBStats) {
 	metrics.HLRocksDBSSTFiles.WithLabelValues(db).Set(float64(sstFiles))
 	for _, reason := range rocksDBStallReasons {
-		metrics.HLRocksDBWriteStallsTotal.WithLabelValues(db, reason).Set(float64(stats.writeStalls[reason]))
+		value, available := stats.writeStalls[reason]
+		if !available {
+			metrics.HLRocksDBWriteStallsTotal.DeleteLabelValues(db, reason)
+			continue
+		}
+		metrics.HLRocksDBWriteStallsTotal.WithLabelValues(db, reason).Set(float64(value))
 	}
-	metrics.HLRocksDBBlockCacheUsageBytes.WithLabelValues(db).Set(float64(stats.cacheUsageBytes))
+	if stats.cacheUsageBytes >= 0 {
+		metrics.HLRocksDBBlockCacheUsageBytes.WithLabelValues(db).Set(float64(stats.cacheUsageBytes))
+	} else {
+		metrics.HLRocksDBBlockCacheUsageBytes.DeleteLabelValues(db)
+	}
 }
 
 func withdrawRocksDBSnapshot(db string, state *rocksDBInstanceState) {
@@ -294,18 +303,20 @@ func readRocksDBStatsComplete(path string) (rocksDBStats, error) {
 			}
 		}
 		if strings.Contains(line, "Block cache LRUCache") {
-			if value := parseBlockCacheUsage(line); value >= 0 {
-				stats.cacheUsageBytes = value
+			value := parseBlockCacheUsage(line)
+			if value < 0 {
+				return rocksDBStats{}, fmt.Errorf("invalid block-cache usage")
 			}
+			stats.cacheUsageBytes = value
 		}
 	}
-	for _, reason := range rocksDBStallReasons {
-		if _, ok := stats.writeStalls[reason]; !ok {
-			return rocksDBStats{}, fmt.Errorf("incomplete stats block: missing stall reason %s", reason)
-		}
-	}
-	if stats.cacheUsageBytes < 0 {
-		return rocksDBStats{}, fmt.Errorf("incomplete stats block: missing cache usage")
+	// RocksDB emits different complete stats projections for different DB
+	// configurations. Some current instances expose only the global write-
+	// buffer-manager stall reason and no block cache. Missing optional fields
+	// withdraw their old series; a block with no recognized metric remains
+	// unusable rather than fabricating an all-zero snapshot.
+	if len(stats.writeStalls) == 0 && stats.cacheUsageBytes < 0 {
+		return rocksDBStats{}, fmt.Errorf("stats block contains no recognized metrics")
 	}
 	return stats, nil
 }

@@ -23,6 +23,10 @@ func completeRocksDBLog(at time.Time, stops int64, cache string) string {
 	return fmt.Sprintf("%s 1 [db/db_impl/db_impl.cc:1084] ------- DUMPING STATS -------\nWrite Stall (count): %s, Block cache LRUCache@0x1 capacity: 2.00 GB usage: %s\n", at.Format("2006/01/02-15:04:05.000000"), strings.Join(parts, ", "), cache)
 }
 
+func reducedRocksDBLog(at time.Time, bufferManagerStops int64) string {
+	return fmt.Sprintf("%s 1 [db/db_impl/db_impl.cc:1084] ------- DUMPING STATS -------\nWrite Stall (count): write-buffer-manager-limit-stops: %d\n", at.Format("2006/01/02-15:04:05.000000"), bufferManagerStops)
+}
+
 func TestParseWriteStallLine(t *testing.T) {
 	// Real line trimmed from a hl-node RocksDB LOG. Note the trailing
 	// "Block cache" content — must NOT bleed into the stall counters.
@@ -89,6 +93,29 @@ func TestReadRocksDBStats_RealSample(t *testing.T) {
 	}
 }
 
+func TestReadRocksDBStatsAcceptsReducedLiveProjection(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "LOG")
+	at := time.Date(2026, 8, 9, 3, 4, 5, 6000, time.UTC)
+	if err := os.WriteFile(logPath, []byte(reducedRocksDBLog(at, 7)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := readRocksDBStatsComplete(logPath)
+	if err != nil {
+		t.Fatalf("reduced live projection rejected: %v", err)
+	}
+	if got := stats.writeStalls["write-buffer-manager-limit-stops"]; got != 7 {
+		t.Fatalf("write-buffer-manager stalls = %d, want 7", got)
+	}
+	if len(stats.writeStalls) != 1 {
+		t.Fatalf("reduced projection published %d stall reasons, want 1", len(stats.writeStalls))
+	}
+	if stats.cacheUsageBytes != -1 {
+		t.Fatalf("missing cache usage = %d, want unavailable", stats.cacheUsageBytes)
+	}
+}
+
 func TestRocksDBCompleteSnapshotRollbackAbsenceAndRecovery(t *testing.T) {
 	nodeHome := t.TempDir()
 	now := time.Now().UTC().Truncate(time.Second)
@@ -113,8 +140,9 @@ func TestRocksDBCompleteSnapshotRollbackAbsenceAndRecovery(t *testing.T) {
 		t.Fatalf("sst count = %v, %v", value, ok)
 	}
 
-	// A syntactically present but incomplete block retains every prior child.
-	if err := os.WriteFile(logPath, []byte(fmt.Sprintf("%s 1 [x] ------- DUMPING STATS -------\nWrite Stall (count): l0-file-count-limit-stops: 99\n", now.Add(time.Minute).Format("2006/01/02-15:04:05.000000"))), 0o644); err != nil {
+	// A syntactically present block with a malformed recognized value retains
+	// every prior child.
+	if err := os.WriteFile(logPath, []byte(fmt.Sprintf("%s 1 [x] ------- DUMPING STATS -------\nWrite Stall (count): l0-file-count-limit-stops: nope\n", now.Add(time.Minute).Format("2006/01/02-15:04:05.000000"))), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	tickRocksDB(nodeHome, state, now.Add(2*time.Second))
@@ -122,7 +150,7 @@ func TestRocksDBCompleteSnapshotRollbackAbsenceAndRecovery(t *testing.T) {
 		t.Fatalf("incomplete block replaced last good = %v, %v", value, ok)
 	}
 	if value, ok := b03CollectorValue(t, metrics.HLRocksDBStatsParseOK, map[string]string{"db": "db_hub_rpc"}); !ok || value != 0 {
-		t.Fatalf("incomplete parse state = %v, %v", value, ok)
+		t.Fatalf("malformed parse state = %v, %v", value, ok)
 	}
 	failedLastValid := state.dbs["db_hub_rpc"].lastValid
 	// Re-validating the same retained stats generation is still a successful
@@ -165,6 +193,42 @@ func TestRocksDBCompleteSnapshotRollbackAbsenceAndRecovery(t *testing.T) {
 	tickRocksDB(nodeHome, state, now.Add(6*time.Second))
 	if value, ok := b03CollectorValue(t, metrics.HLRocksDBWriteStallsTotal, labels); !ok || value != 7 {
 		t.Fatalf("RocksDB recovery = %v, %v", value, ok)
+	}
+
+	// A complete reduced projection replaces the available-field set. It must
+	// not preserve omitted per-CF/cache values from the prior full projection.
+	if err := os.WriteFile(logPath, []byte(reducedRocksDBLog(now.Add(7*time.Second), 11)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tickRocksDB(nodeHome, state, now.Add(8*time.Second))
+	bufferLabels := map[string]string{"db": "db_hub_rpc", "reason": "write-buffer-manager-limit-stops"}
+	if value, ok := b03CollectorValue(t, metrics.HLRocksDBWriteStallsTotal, bufferLabels); !ok || value != 11 {
+		t.Fatalf("reduced write-buffer metric = %v, %v", value, ok)
+	}
+	if b03CollectorHasLabels(t, metrics.HLRocksDBWriteStallsTotal, labels) {
+		t.Fatal("reduced projection retained omitted per-CF stall value")
+	}
+	if b03CollectorHasLabels(t, metrics.HLRocksDBBlockCacheUsageBytes, map[string]string{"db": "db_hub_rpc"}) {
+		t.Fatal("reduced projection retained omitted cache value")
+	}
+	if value, ok := b03CollectorValue(t, metrics.HLRocksDBSSTFiles, map[string]string{"db": "db_hub_rpc"}); !ok || value != 1 {
+		t.Fatalf("reduced projection SST count = %v, %v", value, ok)
+	}
+	if value, ok := b03CollectorValue(t, metrics.HLRocksDBStatsParseOK, map[string]string{"db": "db_hub_rpc"}); !ok || value != 1 {
+		t.Fatalf("reduced projection parse state = %v, %v", value, ok)
+	}
+}
+
+func TestReadRocksDBStatsRejectsMalformedOptionalCache(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "LOG")
+	at := time.Date(2026, 8, 9, 3, 4, 5, 6000, time.UTC)
+	contents := fmt.Sprintf("%s 1 [x] ------- DUMPING STATS -------\nBlock cache LRUCache@0x1 usage: nope MB\n", at.Format("2006/01/02-15:04:05.000000"))
+	if err := os.WriteFile(logPath, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readRocksDBStatsComplete(logPath); err == nil {
+		t.Fatal("malformed present cache usage was treated as unavailable")
 	}
 }
 
