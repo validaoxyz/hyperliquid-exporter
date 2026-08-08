@@ -204,13 +204,13 @@ func validKnownGossipPayload(tag string, inner []json.RawMessage) bool {
 		var endpoint, stream string
 		return unmarshalRequiredJSON(inner[1], &endpoint) == nil && unmarshalRequiredJSON(inner[2], &stream) == nil
 	case "closing gossip stream because no quorum yet", "finished checks", "sending abci_state",
-		"successfully sent abci_state", "dropping connection after sending abci state",
-		"closing gossip stream because peer is already connected":
+		"successfully sent abci_state", "dropping connection after sending abci state":
 		return validGossipIPFlagPayload(inner, false)
-	case "sending evm kvs", "marking node_ip as verified":
-		// Current mainnet emits these as object-only events while the
-		// retained testnet generation includes a trailing bool. Both exact
-		// build-scoped projections carry the same bounded event identity.
+	case "sending evm kvs", "marking node_ip as verified",
+		"closing gossip stream because peer is already connected":
+		// Current mainnet emits these as object-only events while retained
+		// generations also include a trailing bool. Both exact build-scoped
+		// projections carry the same bounded event identity.
 		return validGossipIPFlagPayload(inner, true)
 	case "dropping connection":
 		return len(inner) == 5

@@ -51,6 +51,11 @@ func TestParseGossipConnectionLine_KnownEvents(t *testing.T) {
 			"marking_node_ip_verified",
 		},
 		{
+			"already connected current mainnet object-only",
+			`["2026-08-09T03:00:03",["closing gossip stream because peer is already connected",{"Ip":"203.0.113.5"}]]`,
+			"closing_gossip_stream_peer_already_connected",
+		},
+		{
 			"error checking connection historical",
 			`["2026-05-25T06:59:53.6",["error checking connection",{"err":"x"}]]`,
 			"error_checking_connection",
@@ -196,6 +201,7 @@ func TestParseGossipConnectionLine_ExactMatchingAndPayloadShape(t *testing.T) {
 		`["2026-08-08T03:00:03",["finished checks",{"Ip":"192.0.2.1"}]]`,
 		`["2026-08-09T03:00:03",["sending evm kvs",{}]]`,
 		`["2026-08-09T03:00:03",["marking node_ip as verified",{"Ip":"192.0.2.1","extra":true}]]`,
+		`["2026-08-09T03:00:03",["closing gossip stream because peer is already connected",{"Ip":"192.0.2.1","extra":true}]]`,
 		`["2026-08-08T03:00:03",["got tcp greeting",{"Ip":"192.0.2.1","extra":true},true]]`,
 		`["2026-08-08T03:00:03",["got tcp greeting",{"Ip":"192.0.2.1"},null]]`,
 		`["2026-08-08T03:00:03",["rejecting gossip stream because max peers reached","limit",{}]]`,
