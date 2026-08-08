@@ -16,62 +16,73 @@ import (
 type SourceID string
 
 const (
-	SourceBlock                SourceID = "block"
-	SourceProposal             SourceID = "proposal"
-	SourceValidatorAPI         SourceID = "validator_api"
-	SourceValidatorStatus      SourceID = "validator_status"
-	SourceValidatorIP          SourceID = "validator_ip"
-	SourceVersion              SourceID = "version"
-	SourceUpdate               SourceID = "update"
-	SourceEVM                  SourceID = "evm"
-	SourceConsensus            SourceID = "consensus"
-	SourceConsensusStatus      SourceID = "consensus_status"
-	SourceValidatorLatency     SourceID = "validator_latency"
-	SourceValidatorLatencyEMA  SourceID = "validator_latency_ema"
-	SourceGossip               SourceID = "gossip"
-	SourceVisor                SourceID = "visor"
-	SourceSubsystemLatency     SourceID = "subsystem_latency"
-	SourceCriticalMessages     SourceID = "critical_messages"
-	SourceTCPTraffic           SourceID = "tcp_traffic"
-	SourceTCPLZ4               SourceID = "tcp_lz4"
-	SourceGossipConnections    SourceID = "gossip_connections"
-	SourceGossipChildren       SourceID = "gossip_children"
-	SourceDisk                 SourceID = "disk"
-	SourceProcess              SourceID = "process"
-	SourceChildStderr          SourceID = "child_stderr"
-	SourceSnapshotStatus       SourceID = "snapshot_status"
-	SourceNodeState            SourceID = "node_state"
-	SourceInfoMeta             SourceID = "info_meta"
-	SourceInfoExchange         SourceID = "info_exchange"
-	SourceLogLines             SourceID = "log_lines"
-	SourcePublicIP             SourceID = "public_ip"
-	SourceTokioRuntime         SourceID = "tokio_runtime"
-	SourceOperatorConfig       SourceID = "operator_config"
-	SourceTmpDir               SourceID = "tmp_dir"
-	SourceTCPConnections       SourceID = "tcp_connections"
-	SourceReplica              SourceID = "replica"
-	SourceReplicaRuns          SourceID = "replica_runs"
-	SourceReplay               SourceID = "replay"
-	SourceRocksDB              SourceID = "rocksdb"
-	SourceSubsystemSteps       SourceID = "subsystem_steps"
-	SourceCriticalLocations    SourceID = "critical_locations"
-	SourceAccumulatorConsensus SourceID = "accumulator_consensus"
-	SourceMempool              SourceID = "mempool"
-	SourceMempoolSizeStats     SourceID = "mempool_size_stats"
-	SourceMempoolTxs           SourceID = "mempool_txs"
-	SourceOptionalFills        SourceID = "optional_fills"
-	SourceOptionalTWAP         SourceID = "optional_twap"
-	SourceOptionalMisc         SourceID = "optional_misc"
-	SourceOptionalEvents       SourceID = "optional_events"
-	SourceRateLimitABCI        SourceID = "rate_limit_abci_stream"
-	SourceRateLimitBlocks      SourceID = "rate_limit_gossip_blocks"
-	SourceRateLimitRequests    SourceID = "rate_limit_gossip_requests"
+	SourceBlock                 SourceID = "block"
+	SourceBlockFast             SourceID = "block_fast"
+	SourceBlockSlow             SourceID = "block_slow"
+	SourceBlockLegacy           SourceID = "block_legacy"
+	SourceProposal              SourceID = "proposal"
+	SourceValidatorAPI          SourceID = "validator_api"
+	SourceValidatorStatus       SourceID = "validator_status"
+	SourceValidatorIP           SourceID = "validator_ip"
+	SourceVersion               SourceID = "version"
+	SourceUpdate                SourceID = "update"
+	SourceEVM                   SourceID = "evm"
+	SourceConsensus             SourceID = "consensus"
+	SourceConsensusStatus       SourceID = "consensus_status"
+	SourceConsensusRoundAdvance SourceID = "consensus_round_advance"
+	SourceConsensusLocalStatus  SourceID = "consensus_local_status"
+	SourceConsensusExecution    SourceID = "consensus_execution_state"
+	SourceConsensusRPC          SourceID = "consensus_rpc"
+	SourceValidatorConnections  SourceID = "validator_connections"
+	SourceValidatorLatency      SourceID = "validator_latency"
+	SourceValidatorLatencyEMA   SourceID = "validator_latency_ema"
+	SourceGossip                SourceID = "gossip"
+	SourceVisor                 SourceID = "visor"
+	SourceSubsystemLatency      SourceID = "subsystem_latency"
+	SourceCriticalMessages      SourceID = "critical_messages"
+	SourceTCPTraffic            SourceID = "tcp_traffic"
+	SourceTCPLZ4                SourceID = "tcp_lz4"
+	SourceGossipConnections     SourceID = "gossip_connections"
+	SourceGossipChildren        SourceID = "gossip_children"
+	SourceDisk                  SourceID = "disk"
+	SourceProcess               SourceID = "process"
+	SourceChildStderr           SourceID = "child_stderr"
+	SourceSnapshotStatus        SourceID = "snapshot_status"
+	SourceNodeState             SourceID = "node_state"
+	SourceInfoMeta              SourceID = "info_meta"
+	SourceInfoExchange          SourceID = "info_exchange"
+	SourceLogLines              SourceID = "log_lines"
+	SourcePublicIP              SourceID = "public_ip"
+	SourceTokioRuntime          SourceID = "tokio_runtime"
+	SourceOperatorConfig        SourceID = "operator_config"
+	SourceTmpDir                SourceID = "tmp_dir"
+	SourceTCPConnections        SourceID = "tcp_connections"
+	SourceReplica               SourceID = "replica"
+	SourceReplicaRuns           SourceID = "replica_runs"
+	SourceReplay                SourceID = "replay"
+	SourceRocksDB               SourceID = "rocksdb"
+	SourceSubsystemSteps        SourceID = "subsystem_steps"
+	SourceCriticalLocations     SourceID = "critical_locations"
+	SourceAccumulatorConsensus  SourceID = "accumulator_consensus"
+	SourceMempool               SourceID = "mempool"
+	SourceMempoolSizeStats      SourceID = "mempool_size_stats"
+	SourceMempoolTxs            SourceID = "mempool_txs"
+	SourceOptionalFills         SourceID = "optional_fills"
+	SourceOptionalTWAP          SourceID = "optional_twap"
+	SourceOptionalMisc          SourceID = "optional_misc"
+	SourceOptionalEvents        SourceID = "optional_events"
+	SourceRateLimitABCI         SourceID = "rate_limit_abci_stream"
+	SourceRateLimitBlocks       SourceID = "rate_limit_gossip_blocks"
+	SourceRateLimitRequests     SourceID = "rate_limit_gossip_requests"
 )
 
 var sourceIDs = []SourceID{
-	SourceBlock, SourceProposal, SourceValidatorAPI, SourceValidatorStatus,
+	SourceBlock, SourceBlockFast, SourceBlockSlow, SourceBlockLegacy,
+	SourceProposal, SourceValidatorAPI, SourceValidatorStatus,
 	SourceValidatorIP, SourceVersion, SourceUpdate, SourceEVM, SourceConsensus,
-	SourceConsensusStatus, SourceValidatorLatency, SourceValidatorLatencyEMA,
+	SourceConsensusStatus, SourceConsensusRoundAdvance, SourceConsensusLocalStatus,
+	SourceConsensusExecution, SourceConsensusRPC, SourceValidatorConnections,
+	SourceValidatorLatency, SourceValidatorLatencyEMA,
 	SourceGossip, SourceVisor, SourceSubsystemLatency, SourceCriticalMessages,
 	SourceTCPTraffic, SourceTCPLZ4, SourceGossipConnections, SourceGossipChildren,
 	SourceDisk, SourceProcess, SourceChildStderr, SourceSnapshotStatus,
@@ -112,6 +123,7 @@ var sourceFailureStages = map[SourceFailureStage]struct{}{
 const sourceStateUnknown int64 = -1
 
 type sourceState struct {
+	mu                  sync.RWMutex
 	registered          int64
 	enabled             int64
 	present             int64
@@ -206,6 +218,8 @@ func RegisterSource(id SourceID, enabled bool) bool {
 	if state == nil {
 		return false
 	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
 	atomic.StoreInt64(&state.registered, 1)
 	if enabled {
 		atomic.StoreInt64(&state.enabled, 1)
@@ -227,6 +241,8 @@ func markSourceAttemptAt(id SourceID, now int64) bool {
 	if state == nil {
 		return false
 	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
 	atomic.StoreInt64(&state.lastAttemptUnix, now)
 	return true
 }
@@ -238,6 +254,8 @@ func MarkSourceAbsent(id SourceID) bool {
 	if state == nil {
 		return false
 	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
 	atomic.StoreInt64(&state.lastAttemptUnix, time.Now().Unix())
 	atomic.StoreInt64(&state.present, 0)
 	atomic.StoreInt64(&state.readOK, sourceStateUnknown)
@@ -252,6 +270,8 @@ func MarkSourceAvailable(id SourceID) bool {
 	if state == nil {
 		return false
 	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
 	atomic.StoreInt64(&state.lastAttemptUnix, time.Now().Unix())
 	atomic.StoreInt64(&state.present, 1)
 	atomic.StoreInt64(&state.readOK, 1)
@@ -264,6 +284,8 @@ func MarkSourceReadOutcome(id SourceID, ok bool) bool {
 	if state == nil {
 		return false
 	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
 	atomic.StoreInt64(&state.lastAttemptUnix, time.Now().Unix())
 	if ok {
 		atomic.StoreInt64(&state.present, 1)
@@ -280,6 +302,8 @@ func MarkSourceSchemaOutcome(id SourceID, ok bool) bool {
 	if state == nil {
 		return false
 	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
 	atomic.StoreInt64(&state.lastAttemptUnix, time.Now().Unix())
 	atomic.StoreInt64(&state.present, 1)
 	atomic.StoreInt64(&state.readOK, 1)
@@ -303,6 +327,8 @@ func markSourceValidObservationAt(id SourceID, sourceTime, observedAt time.Time)
 	if state == nil {
 		return false
 	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
 	now := observedAt.Unix()
 	atomic.StoreInt64(&state.lastAttemptUnix, now)
 	atomic.StoreInt64(&state.lastValidUnix, now)
@@ -321,6 +347,8 @@ func MarkSourcePublication(id SourceID) bool {
 	if state == nil {
 		return false
 	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
 	atomic.StoreInt64(&state.lastPublicationUnix, time.Now().Unix())
 	return true
 }
@@ -334,9 +362,11 @@ func MarkSourceError(id SourceID, stage SourceFailureStage) bool {
 		HLExporterSourceInvalidUpdatesTotal.WithLabelValues("stage").Inc()
 		return false
 	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
 	atomic.StoreInt64(&state.lastAttemptUnix, time.Now().Unix())
 	switch stage {
-	case SourceFailureOpen, SourceFailureRead, SourceFailureWalk, SourceFailureRequest, SourceFailureStatus:
+	case SourceFailureDiscovery, SourceFailureStat, SourceFailureOpen, SourceFailureRead, SourceFailureWalk, SourceFailureRequest, SourceFailureStatus:
 		atomic.StoreInt64(&state.readOK, 0)
 		atomic.StoreInt64(&state.schemaOK, sourceStateUnknown)
 	case SourceFailureDecode, SourceFailureSchema:
@@ -366,10 +396,12 @@ func snapshotSources() []SourceSnapshot {
 	defer sourcesMu.RUnlock()
 	out := make([]SourceSnapshot, 0, len(sources))
 	for id, state := range sources {
+		state.mu.RLock()
 		if atomic.LoadInt64(&state.registered) == 0 {
+			state.mu.RUnlock()
 			continue
 		}
-		out = append(out, SourceSnapshot{
+		snapshot := SourceSnapshot{
 			ID:                  id,
 			Registered:          true,
 			Enabled:             atomic.LoadInt64(&state.enabled) == 1,
@@ -381,7 +413,9 @@ func snapshotSources() []SourceSnapshot {
 			LastValidUnix:       atomic.LoadInt64(&state.lastValidUnix),
 			LastPublicationUnix: atomic.LoadInt64(&state.lastPublicationUnix),
 			SourceTimeUnix:      atomic.LoadInt64(&state.sourceTimeUnix),
-		})
+		}
+		state.mu.RUnlock()
+		out = append(out, snapshot)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out

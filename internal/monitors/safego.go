@@ -2,10 +2,13 @@ package monitors
 
 import (
 	"runtime/debug"
+	"sync"
 
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
+
+var safeWorkers sync.WaitGroup
 
 // goSafe runs fn in a new goroutine with panic recovery. Monitors that
 // spawn additional internal goroutines (e.g. consensus_monitor launches
@@ -22,7 +25,9 @@ func goSafe(component string, fn func()) {
 	// cannot transiently mark the logical monitor exited between spawning an
 	// inner reader and returning.
 	metrics.MarkMonitorStarted(component)
+	safeWorkers.Add(1)
 	go func() {
+		defer safeWorkers.Done()
 		defer metrics.MarkMonitorStopped(component)
 		defer func() {
 			if r := recover(); r != nil {
@@ -32,4 +37,11 @@ func goSafe(component string, fn func()) {
 		}()
 		fn()
 	}()
+}
+
+// WaitForWorkers waits until every sub-goroutine started through goSafe has
+// exited. Exporter shutdown calls this only after all outer monitor functions
+// have returned, so no new root worker can be registered after the wait.
+func WaitForWorkers() {
+	safeWorkers.Wait()
 }

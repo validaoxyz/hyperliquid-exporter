@@ -1,14 +1,11 @@
 package monitors
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
@@ -16,148 +13,216 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
-// gossipConnectionEvents lists the event tag names the node emits to
-// gossip_connections logs. The mapping was derived from a live mainnet
-// peer's most recent hour-file. New tags appearing in the future will
-// still be counted but will land in an "other" bucket so cardinality
-// stays predictable.
-//
-// Operator semantics:
-//   - rejecting_gossip_stream_max_peers_reached: capacity exhausted!
-//   - error_checking_connection: peer churn / unreliable peers
-//   - verified_gossip_rpc:       healthy handshake (counter rate = arrival rate)
 var gossipConnectionAllowlist = map[string]string{
-	"verified gossip rpc":                               "verified_gossip_rpc",
-	"handle_stream_connection":                          "handle_stream_connection",
-	"performing checks on stream":                       "performing_checks_on_stream",
-	"got tcp greeting":                                  "got_tcp_greeting",
-	"error checking connection":                         "error_checking_connection",
-	"rejecting gossip stream because max peers reached": "rejecting_gossip_stream_max_peers_reached",
+	"verified gossip rpc":                                     "verified_gossip_rpc",
+	"handle_stream_connection":                                "handle_stream_connection",
+	"performing checks on stream":                             "performing_checks_on_stream",
+	"got tcp greeting":                                        "got_tcp_greeting",
+	"error checking connection":                               "error_checking_connection",
+	"rejecting gossip stream because max peers reached":       "rejecting_gossip_stream_max_peers_reached",
+	"closing gossip stream because no quorum yet":             "closing_gossip_stream_no_quorum_yet",
+	"finished checks":                                         "finished_checks",
+	"sending abci_state":                                      "sending_abci_state",
+	"successfully sent abci_state":                            "successfully_sent_abci_state",
+	"sending evm kvs":                                         "sending_evm_kvs",
+	"dropping connection after sending abci state":            "dropping_connection_after_sending_abci_state",
+	"marking node_ip as verified":                             "marking_node_ip_verified",
+	"dropping connection":                                     "dropping_connection",
+	"closing gossip stream because peer is already connected": "closing_gossip_stream_peer_already_connected",
 }
 
-// gossipConnectionsPollInterval is short because the file is append-only
-// and operators want to see peer-rejection events promptly.
 const gossipConnectionsPollInterval = 10 * time.Second
 
-// StartGossipConnectionsMonitor watches
-// $NODE_HOME/data/node_logs/gossip_connections/hourly. Each line is of
-// the form ["<iso>", ["<event_tag>", {<event_specific_payload>}]]. We
-// extract only the tag and count occurrences, keeping cardinality flat.
+type gossipConnectionParseResult struct {
+	event      string
+	known      bool
+	reason     string
+	sourceTime time.Time
+}
+
 func StartGossipConnectionsMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	root := filepath.Join(cfg.NodeHome, "data", "node_logs", "gossip_connections", "hourly")
+	metrics.RegisterSource(metrics.SourceGossipConnections, true)
+	logger.InfoComponent("gossip_connections", "watching %s (committed stream, no startup replay)", root)
 
-	if _, err := os.Stat(root); err != nil {
-		logger.InfoComponent("gossip_connections",
-			"gossip_connections directory not present (%s); monitor idle", root)
-		<-ctx.Done()
-		return
-	}
-
-	logger.InfoComponent("gossip_connections", "watching %s", root)
-
-	var currentFile string
-	var currentOffset int64
-
-	tick := func() {
-		latest, err := latestHourlyFile(root)
+	resolveOK := false
+	resolve := func() (string, error) {
+		path, err := latestHourlyFile(root)
+		publishGossipConnectionResolution(&resolveOK, err)
 		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				logger.DebugComponent("gossip_connections", "find latest: %v", err)
+			if errors.Is(err, os.ErrNotExist) {
+				// A clean empty startup scan is semantically different from a
+				// discovery failure: tailStream will read the first file later
+				// created from byte zero instead of treating it as history.
+				return "", nil
 			}
-			return
+			return "", err
 		}
-		if latest != currentFile {
-			// On startup or rotation, jump to end so we don't replay history
-			// (counters would otherwise spike on every restart).
-			info, err := os.Stat(latest)
-			if err != nil {
-				return
-			}
-			logger.InfoComponent("gossip_connections", "switched to %s (starting at EOF=%d)", latest, info.Size())
-			currentFile = latest
-			currentOffset = info.Size()
-			return
-		}
-		newOffset, _, err := readGossipConnectionEvents(currentFile, currentOffset)
-		if err != nil {
-			logger.DebugComponent("gossip_connections", "read %s: %v", currentFile, err)
-			return
-		}
-		currentOffset = newOffset
-		// a cycle with zero new events is still a healthy cycle; gating the
-		// tick on n>0 made last_tick look stale on quiet nodes
-		metrics.MarkMonitorTick("gossip_connections")
+		return path, nil
 	}
 
-	ticker := time.NewTicker(gossipConnectionsPollInterval)
-	defer ticker.Stop()
-	tick()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			tick()
-		}
-	}
+	tailStream(ctx, tailStreamOpts{
+		component:   "gossip_connections",
+		name:        "gossip connection events",
+		resolve:     resolve,
+		rescanEvery: gossipConnectionsPollInterval,
+		eofSleep:    250 * time.Millisecond,
+		bufSize:     1 << 20,
+		onLine: func(line string) {
+			result := parseGossipConnectionRecord([]byte(line))
+			publishGossipConnectionLine(&resolveOK, result, time.Now())
+		},
+		onIdle: func() {
+			publishGossipConnectionIdle(&resolveOK, time.Now())
+		},
+		onFailure: func(failure tailStreamFailure) {
+			markGossipConnectionTailFailure(failure, &resolveOK)
+		},
+	})
 }
 
-// readGossipConnectionEvents reads any new bytes appended to path since
-// offset and increments the gauge counter for each parseable event. Returns
-// the new file offset and the number of lines processed.
-func readGossipConnectionEvents(path string, offset int64) (int64, int, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return offset, 0, err
-	}
-	defer f.Close()
-	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		return offset, 0, err
-	}
-	reader := bufio.NewReaderSize(f, 1<<20)
-	processed := 0
-	for {
-		line, err := reader.ReadBytes('\n')
-		if err != nil {
-			if err == io.EOF {
-				// a partial trailing line stays unconsumed so a torn write
-				// is re-read complete on the next tick, never half-parsed
-				break
-			}
-			return offset, processed, err
+func publishGossipConnectionResolution(resolveOK *bool, resolveErr error) {
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		metrics.MarkMonitorAttempt("gossip_connections")
+		metrics.MarkSourceAttempt(metrics.SourceGossipConnections)
+		if resolveErr == nil {
+			*resolveOK = true
+			return
 		}
-		if event, ok := parseGossipConnectionLine(line); ok {
-			metrics.HLP2PGossipEventsTotal.WithLabelValues(event).Inc()
-			processed++
+
+		*resolveOK = false
+		metrics.HLP2PGossipSourceUp.Set(0)
+		if errors.Is(resolveErr, os.ErrNotExist) {
+			metrics.MarkSourceAbsent(metrics.SourceGossipConnections)
+			return
 		}
-		offset += int64(len(line))
-	}
-	return offset, processed, nil
+		metrics.MarkSourceError(metrics.SourceGossipConnections, metrics.SourceFailureDiscovery)
+		metrics.IncMonitorError("gossip_connections")
+	})
 }
 
-// parseGossipConnectionLine returns the sanitized event-type label, or
-// ok=false when the line is unparseable. Untracked tags are returned as
-// "other" so total event volume is still visible.
-func parseGossipConnectionLine(line []byte) (string, bool) {
-	line = []byte(strings.TrimSpace(string(line)))
-	if len(line) == 0 || line[0] != '[' {
-		return "", false
-	}
-	var outer [2]json.RawMessage
+func publishGossipConnectionLine(resolveOK *bool, result gossipConnectionParseResult, now time.Time) {
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		// Reaching onLine proves that the selected file was opened and read,
+		// even when the complete record fails its bounded schema.
+		*resolveOK = true
+		metrics.HLP2PGossipSourceUp.Set(1)
+		metrics.HLP2PGossipLastReadSuccessTimestampSeconds.Set(float64(now.Unix()))
+		if result.reason != "" {
+			metrics.HLP2PGossipParseErrorsTotal.WithLabelValues(result.reason).Inc()
+			metrics.MarkSourceReadOutcome(metrics.SourceGossipConnections, true)
+			metrics.MarkSourceError(metrics.SourceGossipConnections, metrics.SourceFailureSchema)
+			metrics.IncMonitorError("gossip_connections")
+			return
+		}
+
+		metrics.HLP2PGossipEventsTotal.WithLabelValues(result.event).Inc()
+		if !result.known {
+			metrics.HLP2PGossipUnknownEventsTotal.Inc()
+		}
+		metrics.MarkSourceValidObservation(metrics.SourceGossipConnections, result.sourceTime)
+		metrics.MarkSourcePublication(metrics.SourceGossipConnections)
+		metrics.MarkMonitorValidObservation("gossip_connections")
+		metrics.MarkMonitorPublication("gossip_connections")
+	})
+}
+
+func publishGossipConnectionIdle(resolveOK *bool, now time.Time) {
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		if !*resolveOK {
+			return
+		}
+		metrics.HLP2PGossipSourceUp.Set(1)
+		metrics.HLP2PGossipLastReadSuccessTimestampSeconds.Set(float64(now.Unix()))
+		// A quiet successful poll proves presence/readability, not that a
+		// previously rejected record suddenly became schema-valid.
+		metrics.MarkSourceReadOutcome(metrics.SourceGossipConnections, true)
+	})
+}
+
+func markGossipConnectionTailFailure(failure tailStreamFailure, resolveOK *bool) {
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		if failure == tailStreamFailureRecord {
+			// The file was opened and read successfully; only record framing
+			// failed. Keep transport health up and invalidate schema separately.
+			*resolveOK = true
+			metrics.HLP2PGossipSourceUp.Set(1)
+			metrics.HLP2PGossipLastReadSuccessTimestampSeconds.Set(float64(time.Now().Unix()))
+			metrics.HLP2PGossipParseErrorsTotal.WithLabelValues("shape").Inc()
+			metrics.MarkSourceReadOutcome(metrics.SourceGossipConnections, true)
+			metrics.MarkSourceError(metrics.SourceGossipConnections, metrics.SourceFailureSchema)
+		} else {
+			*resolveOK = false
+			metrics.HLP2PGossipSourceUp.Set(0)
+			metrics.MarkSourceError(metrics.SourceGossipConnections, metrics.SourceFailureRead)
+		}
+		metrics.IncMonitorError("gossip_connections")
+	})
+}
+
+func parseGossipConnectionRecord(line []byte) gossipConnectionParseResult {
+	var outer []json.RawMessage
 	if err := json.Unmarshal(line, &outer); err != nil {
-		return "", false
+		return gossipConnectionParseResult{reason: "json"}
+	}
+	if len(outer) != 2 {
+		return gossipConnectionParseResult{reason: "shape"}
+	}
+	var timestampString string
+	if err := unmarshalRequiredJSON(outer[0], &timestampString); err != nil {
+		return gossipConnectionParseResult{reason: "timestamp"}
+	}
+	timestamp, ok := parseVisorTime(timestampString)
+	if !ok {
+		return gossipConnectionParseResult{reason: "timestamp"}
 	}
 	var inner []json.RawMessage
-	if err := json.Unmarshal(outer[1], &inner); err != nil || len(inner) < 1 {
-		return "", false
+	if err := json.Unmarshal(outer[1], &inner); err != nil || len(inner) == 0 {
+		return gossipConnectionParseResult{reason: "shape"}
 	}
 	var tag string
-	if err := json.Unmarshal(inner[0], &tag); err != nil {
-		return "", false
+	if err := unmarshalRequiredJSON(inner[0], &tag); err != nil {
+		return gossipConnectionParseResult{reason: "shape"}
 	}
-	if name, known := gossipConnectionAllowlist[tag]; known {
-		return name, true
+	event, known := gossipConnectionAllowlist[tag]
+	if !known {
+		return gossipConnectionParseResult{event: "other", known: false, sourceTime: timestamp}
 	}
-	return "other", true
+	if !validKnownGossipPayload(tag, inner) {
+		return gossipConnectionParseResult{reason: "payload"}
+	}
+	return gossipConnectionParseResult{event: event, known: true, sourceTime: timestamp}
+}
+
+func validKnownGossipPayload(tag string, inner []json.RawMessage) bool {
+	switch tag {
+	case "handle_stream_connection", "performing checks on stream":
+		if len(inner) != 3 {
+			return false
+		}
+		var endpoint, stream string
+		return unmarshalRequiredJSON(inner[1], &endpoint) == nil && unmarshalRequiredJSON(inner[2], &stream) == nil
+	case "closing gossip stream because no quorum yet", "finished checks", "sending abci_state",
+		"successfully sent abci_state", "sending evm kvs", "dropping connection after sending abci state",
+		"marking node_ip as verified", "closing gossip stream because peer is already connected":
+		if len(inner) != 3 || !rawJSONObject(inner[1]) {
+			return false
+		}
+		var flag bool
+		return unmarshalRequiredJSON(inner[2], &flag) == nil
+	case "dropping connection":
+		return len(inner) == 5
+	default:
+		return len(inner) == 2 && rawJSONObject(inner[1])
+	}
+}
+
+func rawJSONObject(raw json.RawMessage) bool {
+	var object map[string]json.RawMessage
+	return json.Unmarshal(raw, &object) == nil && object != nil
+}
+
+func parseGossipConnectionLine(line []byte) (string, bool) {
+	result := parseGossipConnectionRecord(line)
+	return result.event, result.reason == ""
 }

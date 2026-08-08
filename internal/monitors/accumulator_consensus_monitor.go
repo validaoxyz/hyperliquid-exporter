@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"time"
@@ -53,6 +55,20 @@ type accumulatorBucketState struct {
 	offset int64
 }
 
+type accumulatorMonitorState struct {
+	initialized bool
+	buckets     map[string]*accumulatorBucketState
+	published   map[string]float64
+}
+
+type accumulatorDrainResult struct {
+	sum          float64
+	validRecords int
+	invalid      bool
+	overflow     bool
+	latestTime   time.Time
+}
+
 // StartAccumulatorConsensusMonitor watches the per-bucket accumulator files
 // and accumulates their per-window deltas into Prometheus counters.
 // Validator-only: silently idles on non-validator nodes.
@@ -62,53 +78,126 @@ type accumulatorBucketState struct {
 // RoundCatchUp are the next most operator-actionable.
 func StartAccumulatorConsensusMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	root := filepath.Join(cfg.NodeHome, "data", "accumulator_buckets", "consensus")
-	if _, err := os.Stat(root); err != nil {
-		logger.InfoComponent("accumulator_consensus",
-			"accumulator_buckets/consensus not present (%s); monitor idle (non-validator node)", root)
-		<-ctx.Done()
-		return
-	}
-
 	logger.InfoComponent("accumulator_consensus", "watching %s (%d buckets)", root, len(accumulatorConsensusBuckets))
-
-	// Initialize offsets at the current end of each existing bucket file so
-	// history written before the exporter started is not replayed into the
-	// counters (same no-replay rule as the streaming monitors).
-	states := make(map[string]*accumulatorBucketState, len(accumulatorConsensusBuckets))
-	for dirName := range accumulatorConsensusBuckets {
-		st := &accumulatorBucketState{}
-		if path, err := latestHourlyFile(filepath.Join(root, dirName, "hourly")); err == nil {
-			if info, err := os.Stat(path); err == nil {
-				st.path, st.offset = path, info.Size()
-			}
-		}
-		states[dirName] = st
-	}
+	metrics.RegisterSource(metrics.SourceAccumulatorConsensus, true)
+	state := newAccumulatorMonitorState()
 
 	ticker := time.NewTicker(accumulatorConsensusPollInterval)
 	defer ticker.Stop()
 
-	tickAccumulator(root, states)
-	metrics.MarkMonitorTick("accumulator_consensus")
+	if err := tickAccumulator(root, state); err != nil {
+		logger.DebugComponent("accumulator_consensus", "initial poll: %v", err)
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			tickAccumulator(root, states)
-			metrics.MarkMonitorTick("accumulator_consensus")
+			if err := tickAccumulator(root, state); err != nil {
+				logger.DebugComponent("accumulator_consensus", "poll: %v", err)
+			}
 		}
 	}
 }
 
-func tickAccumulator(root string, states map[string]*accumulatorBucketState) {
+func newAccumulatorMonitorState() *accumulatorMonitorState {
+	state := &accumulatorMonitorState{
+		buckets:   make(map[string]*accumulatorBucketState, len(accumulatorConsensusBuckets)),
+		published: make(map[string]float64, len(accumulatorConsensusBuckets)),
+	}
+	for dirName := range accumulatorConsensusBuckets {
+		state.buckets[dirName] = &accumulatorBucketState{}
+	}
+	return state
+}
+
+func tickAccumulator(root string, state *accumulatorMonitorState) error {
+	metrics.MarkMonitorAttempt("accumulator_consensus")
+	metrics.MarkSourceAttempt(metrics.SourceAccumulatorConsensus)
+	if _, err := os.Stat(root); err != nil {
+		if os.IsNotExist(err) {
+			state.initialized = false
+			state.buckets = newAccumulatorMonitorState().buckets
+			metrics.MarkSourceAbsent(metrics.SourceAccumulatorConsensus)
+			return nil
+		}
+		metrics.MarkSourceError(metrics.SourceAccumulatorConsensus, metrics.SourceFailureStat)
+		return fmt.Errorf("stat accumulator root: %w", err)
+	}
+	if !state.initialized {
+		if err := initializeAccumulatorOffsets(root, state); err != nil {
+			metrics.MarkSourceError(metrics.SourceAccumulatorConsensus, metrics.SourceFailureRead)
+			return err
+		}
+		state.initialized = true
+		metrics.MarkSourceReadOutcome(metrics.SourceAccumulatorConsensus, true)
+		return nil
+	}
+
+	var newest time.Time
+	validRecords := 0
+	invalid := false
+	var firstErr error
 	for dirName, metricSuffix := range accumulatorConsensusBuckets {
-		sum := drainAccumulatorBucket(filepath.Join(root, dirName, "hourly"), states[dirName])
-		if sum > 0 {
-			addAccumulatorDelta(metricSuffix, sum)
+		result, err := drainAccumulatorBucketResult(filepath.Join(root, dirName, "hourly"), state.buckets[dirName])
+		if result.sum > 0 && !result.overflow {
+			next := state.published[metricSuffix] + result.sum
+			if math.IsInf(next, 0) || math.IsNaN(next) {
+				result.overflow = true
+				result.invalid = true
+			} else {
+				addAccumulatorDelta(metricSuffix, result.sum)
+				state.published[metricSuffix] = next
+			}
+		}
+		if !result.overflow {
+			validRecords += result.validRecords
+			if result.latestTime.After(newest) {
+				newest = result.latestTime
+			}
+		}
+		invalid = invalid || result.invalid
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 	}
+	if validRecords > 0 {
+		metrics.MarkSourceValidObservation(metrics.SourceAccumulatorConsensus, newest)
+		metrics.MarkSourcePublication(metrics.SourceAccumulatorConsensus)
+		metrics.MarkMonitorValidObservation("accumulator_consensus")
+		metrics.MarkMonitorPublication("accumulator_consensus")
+	}
+	if invalid {
+		metrics.MarkSourceError(metrics.SourceAccumulatorConsensus, metrics.SourceFailureSchema)
+	}
+	if firstErr != nil {
+		metrics.MarkSourceError(metrics.SourceAccumulatorConsensus, metrics.SourceFailureRead)
+		return firstErr
+	}
+	return nil
+}
+
+func initializeAccumulatorOffsets(root string, state *accumulatorMonitorState) error {
+	for dirName := range accumulatorConsensusBuckets {
+		st := state.buckets[dirName]
+		path, err := latestHourlyFile(filepath.Join(root, dirName, "hourly"))
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("discover %s: %w", dirName, err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("stat %s: %w", dirName, err)
+		}
+		st.path, st.offset = path, info.Size()
+	}
+	return nil
 }
 
 // drainAccumulatorBucket reads every complete line appended to the bucket
@@ -116,12 +205,20 @@ func tickAccumulator(root string, states map[string]*accumulatorBucketState) {
 // rolled to a new hourly file, the tail of the previous file is drained
 // first so no window is skipped or double-counted.
 func drainAccumulatorBucket(hourlyRoot string, st *accumulatorBucketState) float64 {
+	result, _ := drainAccumulatorBucketResult(hourlyRoot, st)
+	return result.sum
+}
+
+func drainAccumulatorBucketResult(hourlyRoot string, st *accumulatorBucketState) (accumulatorDrainResult, error) {
 	latest, err := latestHourlyFile(hourlyRoot)
 	if err != nil {
-		return 0
+		if os.IsNotExist(err) {
+			return accumulatorDrainResult{}, nil
+		}
+		return accumulatorDrainResult{}, err
 	}
 
-	var sum float64
+	var result accumulatorDrainResult
 	switch {
 	case st.path == "":
 		// bucket file appeared after startup: everything in it is new
@@ -131,20 +228,45 @@ func drainAccumulatorBucket(hourlyRoot string, st *accumulatorBucketState) float
 		// one from the beginning. A pause spanning several rollovers skips
 		// the intermediate files; with a 30s tick that only happens when
 		// the exporter itself was down, where the no-replay rule applies.
-		sum += drainAccumulatorFile(st)
+		old, err := drainAccumulatorFileResult(st)
+		if err != nil {
+			// The retained old inode disappeared before it could be drained.
+			// Report the gap once, but adopt the successor so the bucket does
+			// not retry the vanished path forever.
+			st.path, st.offset = latest, 0
+			current, currentErr := drainAccumulatorFileResult(st)
+			if currentErr == nil {
+				mergeAccumulatorResult(&result, current)
+			}
+			if currentErr != nil {
+				return result, currentErr
+			}
+			return result, fmt.Errorf("drain prior accumulator file: %w", err)
+		}
+		mergeAccumulatorResult(&result, old)
 		st.path, st.offset = latest, 0
 	}
-	sum += drainAccumulatorFile(st)
-	return sum
+	current, err := drainAccumulatorFileResult(st)
+	if err != nil {
+		return result, err
+	}
+	mergeAccumulatorResult(&result, current)
+	return result, nil
 }
 
 // drainAccumulatorFile consumes complete lines from st.path starting at
 // st.offset, advances the offset, and returns the summed deltas. A torn
 // final line is left in place for the next pass.
 func drainAccumulatorFile(st *accumulatorBucketState) float64 {
+	result, _ := drainAccumulatorFileResult(st)
+	return result.sum
+}
+
+func drainAccumulatorFileResult(st *accumulatorBucketState) (accumulatorDrainResult, error) {
+	var result accumulatorDrainResult
 	data, err := os.ReadFile(st.path)
 	if err != nil {
-		return 0
+		return result, err
 	}
 	if st.offset > int64(len(data)) {
 		// file was truncated or replaced under us; start over
@@ -153,25 +275,74 @@ func drainAccumulatorFile(st *accumulatorBucketState) float64 {
 	chunk := data[st.offset:]
 	end := bytes.LastIndexByte(chunk, '\n')
 	if end < 0 {
-		return 0
+		return result, nil
 	}
 
-	var sum float64
 	for _, line := range bytes.Split(chunk[:end], []byte("\n")) {
 		line = bytes.TrimSpace(line)
-		if len(line) == 0 || line[0] != '{' {
+		if len(line) == 0 {
+			continue
+		}
+		if line[0] != '{' {
+			result.invalid = true
+			continue
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(line, &raw); err != nil {
+			result.invalid = true
 			continue
 		}
 		var s accumulatorSample
-		if err := json.Unmarshal(line, &s); err != nil || s.Time == "" {
+		if unmarshalRequiredJSON(raw["time"], &s.Time) != nil || unmarshalRequiredJSON(raw["n"], &s.N) != nil || unmarshalRequiredJSON(raw["delta"], &s.Delta) != nil ||
+			s.Time == "" || s.N < 0 || math.IsNaN(s.Delta) || math.IsInf(s.Delta, 0) {
+			result.invalid = true
 			continue
 		}
+		sampleTime, ok := parseVisorTime(s.Time)
+		if !ok {
+			result.invalid = true
+			continue
+		}
+		result.validRecords++
+		if sampleTime.After(result.latestTime) {
+			result.latestTime = sampleTime
+		}
 		if s.Delta > 0 {
-			sum += s.Delta
+			next := result.sum + s.Delta
+			if math.IsInf(next, 0) || math.IsNaN(next) {
+				result.invalid = true
+				result.overflow = true
+				result.sum = 0
+				continue
+			}
+			if !result.overflow {
+				result.sum = next
+			}
 		}
 	}
 	st.offset += int64(end + 1)
-	return sum
+	return result, nil
+}
+
+func mergeAccumulatorResult(dst *accumulatorDrainResult, src accumulatorDrainResult) {
+	dst.overflow = dst.overflow || src.overflow
+	if !dst.overflow {
+		next := dst.sum + src.sum
+		if math.IsInf(next, 0) || math.IsNaN(next) {
+			dst.overflow = true
+			dst.invalid = true
+			dst.sum = 0
+		} else {
+			dst.sum = next
+		}
+	} else {
+		dst.sum = 0
+	}
+	dst.validRecords += src.validRecords
+	dst.invalid = dst.invalid || src.invalid
+	if src.latestTime.After(dst.latestTime) {
+		dst.latestTime = src.latestTime
+	}
 }
 
 func addAccumulatorDelta(metricSuffix string, delta float64) {

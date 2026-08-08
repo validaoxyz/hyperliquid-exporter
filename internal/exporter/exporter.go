@@ -2,6 +2,7 @@ package exporter
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
@@ -16,6 +17,7 @@ func Start(ctx context.Context, cfg config.Config) {
 	// create context with cancellation for monitor goroutines
 	monitorCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	var backgroundWorkers sync.WaitGroup
 
 	// start monitors with error channels
 	blockErrCh := make(chan error, 1)
@@ -37,7 +39,7 @@ func Start(ctx context.Context, cfg config.Config) {
 	critMsgErrCh := make(chan error, 1)
 	tcpTrafficErrCh := make(chan error, 1)
 	peerSetErrCh := make(chan error, 1)
-	parentPeerErrCh := make(chan error, 1)
+	dominantInboundErrCh := make(chan error, 1)
 	diskErrCh := make(chan error, 1)
 	processErrCh := make(chan error, 1)
 	gossipConnectionsErrCh := make(chan error, 1)
@@ -72,12 +74,15 @@ func Start(ctx context.Context, cfg config.Config) {
 		logger.InfoComponent("consensus", "Initializing proposal monitor...")
 		runMonitor("proposal", func() { monitors.StartProposalMonitor(monitorCtx, cfg, proposalErrCh) })
 	} else {
+		metrics.RegisterSource(metrics.SourceProposal, false)
 		logger.InfoComponent("consensus", "Proposal monitor disabled - replica monitor will handle proposer counting")
 	}
 
 	if cfg.SkipVersionCheck {
+		metrics.RegisterSource(metrics.SourceVersion, false)
 		logger.InfoComponent("system", "Version monitor disabled by --skip-version-check")
 	} else if _, err := monitors.NodeBinaryReady(cfg); err != nil {
+		metrics.RegisterSource(metrics.SourceVersion, false)
 		logger.WarningComponent("system", "Skipping version monitor: %v (use --skip-version-check to silence)", err)
 	} else {
 		logger.InfoComponent("system", "Initializing version monitor...")
@@ -85,6 +90,7 @@ func Start(ctx context.Context, cfg config.Config) {
 	}
 
 	if cfg.SkipUpdateCheck {
+		metrics.RegisterSource(metrics.SourceUpdate, false)
 		logger.InfoComponent("system", "Update checker disabled by --skip-update-check")
 	} else {
 		logger.InfoComponent("system", "Initializing update checker...")
@@ -94,6 +100,8 @@ func Start(ctx context.Context, cfg config.Config) {
 	if cfg.EnableEVM {
 		logger.InfoComponent("evm", "Initializing EVM monitor (using evm_block_and_receipts)...")
 		runMonitor("evm", func() { monitors.StartEVMMonitor(monitorCtx, cfg, evmErrCh) })
+	} else {
+		metrics.RegisterSource(metrics.SourceEVM, false)
 	}
 
 	logger.InfoComponent("consensus", "Initializing Validator Status monitor...")
@@ -103,6 +111,7 @@ func Start(ctx context.Context, cfg config.Config) {
 		logger.InfoComponent("consensus", "Initializing validator IP monitor...")
 		runMonitor("validator_ip", func() { monitors.StartValidatorIPMonitor(monitorCtx, cfg, validatorIPErrCh) })
 	} else {
+		metrics.RegisterSource(metrics.SourceValidatorIP, false)
 		logger.InfoComponent("consensus", "Validator IP monitor disabled")
 	}
 
@@ -138,10 +147,10 @@ func Start(ctx context.Context, cfg config.Config) {
 	logger.InfoComponent("peer_set", "Initializing peer-set monitor...")
 	runMonitor("peer_set", func() { monitors.StartPeerSetMonitor(monitorCtx, cfg, peerSetErrCh) })
 
-	// parent peer detection — depends on the tcp_traffic monitor publishing
-	// its snapshot, so launched after it. No file IO of its own.
-	logger.InfoComponent("parent_peer", "Initializing parent peer monitor...")
-	runMonitor("parent_peer", func() { monitors.StartParentPeerMonitor(monitorCtx, cfg, parentPeerErrCh) })
+	// The dominant-inbound traffic heuristic depends on the tcp_traffic
+	// snapshot, so it launches after that monitor. It performs no file I/O.
+	logger.InfoComponent("dominant_inbound", "Initializing dominant-inbound endpoint monitor...")
+	runMonitor("dominant_inbound", func() { monitors.StartDominantInboundMonitor(monitorCtx, cfg, dominantInboundErrCh) })
 
 	// disk usage of NODE_HOME and its filesystem
 	logger.InfoComponent("disk", "Initializing disk usage monitor...")
@@ -203,6 +212,8 @@ func Start(ctx context.Context, cfg config.Config) {
 		logger.InfoComponent("info_probe", "Initializing info-endpoint probe...")
 		runMonitor("info_probe", func() { monitors.StartInfoProbeMonitor(monitorCtx, cfg, infoProbeErrCh) })
 	} else {
+		metrics.RegisterSource(metrics.SourceInfoMeta, false)
+		metrics.RegisterSource(metrics.SourceInfoExchange, false)
 		logger.InfoComponent("info_probe", "Info-endpoint probe disabled (--probe-info-endpoint to enable)")
 	}
 
@@ -235,6 +246,19 @@ func Start(ctx context.Context, cfg config.Config) {
 		logger.InfoComponent("crit_locations", "Initializing crit-locations monitor...")
 		runMonitor("crit_locations", func() { monitors.StartCritLocationsMonitor(monitorCtx, cfg, critLocationsErrCh) })
 	} else {
+		for _, source := range []metrics.SourceID{
+			metrics.SourceTCPLZ4,
+			metrics.SourceLogLines,
+			metrics.SourcePublicIP,
+			metrics.SourceTokioRuntime,
+			metrics.SourceOperatorConfig,
+			metrics.SourceTmpDir,
+			metrics.SourceRocksDB,
+			metrics.SourceSubsystemSteps,
+			metrics.SourceCriticalLocations,
+		} {
+			metrics.RegisterSource(source, false)
+		}
 		logger.InfoComponent("extended_metrics", "Extended metrics disabled (--extended-metrics to enable)")
 	}
 
@@ -243,9 +267,11 @@ func Start(ctx context.Context, cfg config.Config) {
 		replicaMonitor := monitors.NewReplicaMonitor(cfg.ReplicaDataDir, cfg.ReplicaBufferSize)
 		runMonitor("replica", func() {
 			if err := replicaMonitor.Start(monitorCtx); err != nil {
-				replicaErrCh <- err
+				monitors.ReportError(monitorCtx, "replica", replicaErrCh, err)
 			}
 		})
+	} else {
+		metrics.RegisterSource(metrics.SourceReplica, false)
 	}
 
 	logger.InfoComponent("system", "Exporter is now running")
@@ -257,7 +283,9 @@ func Start(ctx context.Context, cfg config.Config) {
 	// snapshot every 10s. Background goroutine so the values stay current
 	// without blocking the main error loop.
 	metrics.SetBuildInfo()
+	backgroundWorkers.Add(1)
 	go func() {
+		defer backgroundWorkers.Done()
 		t := time.NewTicker(10 * time.Second)
 		defer t.Stop()
 		metrics.PublishMonitorHealthSnapshot()
@@ -330,9 +358,9 @@ func Start(ctx context.Context, cfg config.Config) {
 		case err := <-tcpTrafficErrCh:
 			metrics.IncMonitorError("tcp_traffic")
 			logger.ErrorComponent("tcp_traffic", "TCP traffic monitor error: %v", err)
-		case err := <-parentPeerErrCh:
-			metrics.IncMonitorError("parent_peer")
-			logger.ErrorComponent("parent_peer", "Parent peer monitor error: %v", err)
+		case err := <-dominantInboundErrCh:
+			metrics.IncMonitorError("dominant_inbound")
+			logger.ErrorComponent("dominant_inbound", "Dominant-inbound monitor error: %v", err)
 		case err := <-diskErrCh:
 			metrics.IncMonitorError("disk")
 			logger.ErrorComponent("disk", "Disk monitor error: %v", err)
@@ -398,9 +426,11 @@ func Start(ctx context.Context, cfg config.Config) {
 			logger.ErrorComponent("mempool_txs", "mempool_txs monitor error: %v", err)
 		case <-ctx.Done():
 			logger.InfoComponent("system", "Shutting down monitors...")
+			cancel()
+			waitForMonitorWorkers()
+			monitors.WaitForWorkers()
+			backgroundWorkers.Wait()
 			return
 		}
-		// small sleep to prevent tight loop in case of repeated errors
-		time.Sleep(100 * time.Millisecond)
 	}
 }

@@ -1,5 +1,7 @@
 package metrics
 
+import "time"
+
 func IsValidator() bool {
 	metricsMutex.Lock()
 	defer metricsMutex.Unlock()
@@ -17,6 +19,40 @@ func GetValidatorStakes() map[string]float64 {
 		}
 	}
 	return stakes
+}
+
+// EligibleValidator is one target from the latest complete API snapshot. The
+// predicate is intentionally only API isActive && !isJailed; it must not be
+// presented as current committee membership.
+type EligibleValidator struct {
+	Validator string
+	Signer    string
+	Name      string
+	Stake     float64
+}
+
+func GetAPIActiveAndUnjailedValidators() ([]EligibleValidator, time.Time) {
+	metricsMutex.RLock()
+	defer metricsMutex.RUnlock()
+	out := make([]EligibleValidator, 0, len(validatorRegistry.validatorInfo))
+	for validator, info := range validatorRegistry.validatorInfo {
+		if !info.Active || info.Jailed {
+			continue
+		}
+		out = append(out, EligibleValidator{
+			Validator: validator,
+			Signer:    info.Signer,
+			Name:      normalizedValidatorName(info.Name),
+			Stake:     info.Stake,
+		})
+	}
+	return out, validatorRegistry.updatedAt
+}
+
+func ValidatorSnapshotState() (uint64, ValidatorAggregateSnapshot) {
+	metricsMutex.RLock()
+	defer metricsMutex.RUnlock()
+	return validatorSnapshotGeneration, validatorSnapshotAggregates
 }
 
 // returns name/moniker for a validator address

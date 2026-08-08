@@ -1,7 +1,16 @@
 package monitors
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
+	"github.com/validaoxyz/hyperliquid-exporter/internal/peerset"
 )
 
 func TestParseTCPTrafficLine_RealSample(t *testing.T) {
@@ -36,6 +45,31 @@ func TestParseTCPTrafficLine_RealSample(t *testing.T) {
 	}
 }
 
+func TestTrafficAdmissionRequiresTwoConsecutiveFreshTopSamples(t *testing.T) {
+	state := newTCPTrafficMonitorState()
+	state.registry = peerset.New(16, 24*time.Hour)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	record := tcpTrafficRecord{inbound: []peerSample{{ip: "192.0.2.1", value: 1}}}
+	advanceTrafficAdmissions(record, t0, state)
+	state.lastReceipt = t0
+	if state.registry.Len() != 0 {
+		t.Fatal("one observation admitted an endpoint")
+	}
+	advanceTrafficAdmissions(record, t0.Add(30*time.Second), state)
+	if state.registry.Len() != 1 {
+		t.Fatalf("two consecutive observations did not admit: len=%d", state.registry.Len())
+	}
+
+	state = newTCPTrafficMonitorState()
+	state.registry = peerset.New(16, 24*time.Hour)
+	advanceTrafficAdmissions(record, t0, state)
+	state.lastReceipt = t0
+	advanceTrafficAdmissions(record, t0.Add(91*time.Second), state)
+	if state.registry.Len() != 0 {
+		t.Fatal("a >90s gap did not reset the pending admission streak")
+	}
+}
+
 func TestParseTCPTrafficLine_Malformed(t *testing.T) {
 	cases := [][]byte{
 		[]byte(``),
@@ -54,7 +88,7 @@ func TestParseTCPTrafficLine_Malformed(t *testing.T) {
 
 func TestParseTCPTrafficLine_DedupesSameIPDifferentPorts(t *testing.T) {
 	// One peer IP, two ports (4001 + 4002). Must collapse into a
-	// single inbound row with summed bytes, otherwise parent_peer ends
+	// single inbound row with summed values, otherwise dominant_inbound ends
 	// up logging "ambiguous parent peer: top=X runner-up=X".
 	line := []byte(`["2026-05-25T10:00:00",[[["In","1.1.1.1",4001],0.4],[["In","1.1.1.1",4002],0.6]]]`)
 	_, in, _, ok := parseTCPTrafficLine(line)
@@ -73,19 +107,10 @@ func TestParseTCPTrafficLine_DedupesSameIPDifferentPorts(t *testing.T) {
 	}
 }
 
-func TestParseTCPTrafficLine_SkipsBadFlows(t *testing.T) {
-	// Two valid flows and one with a corrupted inner key shape; expect the
-	// good flows to land and the bad one to be silently skipped.
+func TestParseTCPTrafficLine_RejectsSnapshotWithBadFlow(t *testing.T) {
 	line := []byte(`["2026-05-25T10:00:00",[[["In","1.1.1.1",4001],0.5],"junk",[["Out","2.2.2.2",4001],1.5]]]`)
-	_, in, out, ok := parseTCPTrafficLine(line)
-	if !ok {
-		t.Fatalf("expected ok=true")
-	}
-	if len(in) != 1 || in[0].ip != "1.1.1.1" {
-		t.Errorf("in: %+v", in)
-	}
-	if len(out) != 1 || out[0].ip != "2.2.2.2" {
-		t.Errorf("out: %+v", out)
+	if _, _, _, ok := parseTCPTrafficLine(line); ok {
+		t.Fatal("one malformed flow must reject the whole snapshot")
 	}
 }
 
@@ -97,12 +122,12 @@ func TestLastFullLine(t *testing.T) {
 		wantOK bool
 	}{
 		{"trailing newline", "a\nb\nc\n", "c", true},
-		{"no trailing newline", "a\nb\nc", "c", true},
-		{"single line no newline", "alone", "alone", true},
+		{"no trailing newline", "a\nb\nc", "b", true},
+		{"single line no newline", "alone", "", false},
 		{"empty", "", "", false},
 		{"only newlines", "\n\n\n", "", false},
-		{"torn last", "good\nbad", "bad", true},
-		{"trailing whitespace", "x\n   \n", "", false},
+		{"torn last", "good\nbad", "good", true},
+		{"trailing whitespace", "x\n   \n", "x", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -114,5 +139,181 @@ func TestLastFullLine(t *testing.T) {
 				t.Errorf("got %q want %q", got, c.want)
 			}
 		})
+	}
+}
+
+func TestParseTCPTrafficRecord_StrictCanonicalAggregation(t *testing.T) {
+	line := []byte(`["2026-05-25T10:00:00",[[["In","::ffff:192.0.2.1",4001],0.4],[["In","192.0.2.1",4002],0.6],[["Out","2001:db8::2",6553],2.0]]]`)
+	record, err := parseTCPTrafficRecord(line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(record.inbound) != 1 || record.inbound[0].ip != "192.0.2.1" || record.inbound[0].value != 1 {
+		t.Fatalf("unexpected canonical aggregate: %+v", record.inbound)
+	}
+	if got := record.byPort["in"]["4001"]; got != 0.4 {
+		t.Fatalf("4001 aggregate=%v", got)
+	}
+	if got := record.byPort["in"]["4002"]; got != 0.6 {
+		t.Fatalf("4002 aggregate=%v", got)
+	}
+	if got := record.byPort["out"]["other"]; got != 2 {
+		t.Fatalf("other aggregate=%v", got)
+	}
+}
+
+func TestParseTCPTrafficRecord_UsesConfiguredServicePortVocabulary(t *testing.T) {
+	line := []byte(`["2026-05-25T10:00:00",[[["In","192.0.2.1",4001],1],[["In","192.0.2.2",5000],2]]]`)
+	record, err := parseTCPTrafficRecordWithPorts(line, []uint16{5000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := record.byPort["in"]["5000"]; got != 2 {
+		t.Fatalf("configured port aggregate=%v", got)
+	}
+	if got := record.byPort["in"]["other"]; got != 1 {
+		t.Fatalf("unconfigured port aggregate=%v", got)
+	}
+}
+
+func TestParseTCPTrafficRecord_DeterministicTieAndInvalidRows(t *testing.T) {
+	line := []byte(`["2026-05-25T10:00:00",[[["In","192.0.2.2",4001],1],[["In","192.0.2.1",4001],1]]]`)
+	record, err := parseTCPTrafficRecord(line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.inbound[0].ip != "192.0.2.1" || record.inbound[1].ip != "192.0.2.2" {
+		t.Fatalf("tie order is not canonical: %+v", record.inbound)
+	}
+	bad := []string{
+		`["2026-05-25T10:00:00",[[["In","not-ip",4001],1]]]`,
+		`["2026-05-25T10:00:00",[[["In","fe80::1%eth0",4001],1]]]`,
+		`["2026-05-25T10:00:00",[[["In","192.0.2.1",0],1]]]`,
+		`["2026-05-25T10:00:00",[[["Sideways","192.0.2.1",4001],1]]]`,
+		`["bad-time",[]]`,
+		`["2026-05-25T10:00:00",[[["In","192.0.2.1",4001],1e308],[["In","192.0.2.1",4002],1e308]]]`,
+		`["2026-05-25T10:00:00",[[["In","192.0.2.1",4001],null]]]`,
+	}
+	for _, input := range bad {
+		if _, err := parseTCPTrafficRecord([]byte(input)); err == nil {
+			t.Errorf("accepted invalid record %s", input)
+		}
+	}
+}
+
+func TestUnixTimestampSecondsHandlesDatesBeyondUnixNanoRange(t *testing.T) {
+	for _, year := range []int{2263, 9999} {
+		at := time.Date(year, 12, 31, 23, 59, 59, 123456789, time.UTC)
+		got := unixTimestampSeconds(at)
+		if got < float64(at.Unix()) || got >= float64(at.Unix()+1) {
+			t.Fatalf("year %d timestamp=%v outside [%d,%d)", year, got, at.Unix(), at.Unix()+1)
+		}
+	}
+}
+
+func TestTickTCPTraffic_RejectsSourceTimeRegression(t *testing.T) {
+	root := t.TempDir()
+	dateDir := filepath.Join(root, "20260808")
+	if err := os.MkdirAll(dateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dateDir, "3")
+	newer := `["2026-08-08T03:00:30",[[["In","192.0.2.1",4001],2]]]` + "\n"
+	older := `["2026-08-08T03:00:00",[[["In","192.0.2.2",4001],3]]]` + "\n"
+	if err := os.WriteFile(path, []byte(newer), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	state := newTCPTrafficMonitorState()
+	tickTCPTraffic(root, state)
+	want := state.lastSource
+	if want.IsZero() {
+		t.Fatal("newer snapshot did not commit")
+	}
+	if err := os.WriteFile(path, []byte(older), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tickTCPTraffic(root, state)
+	if !state.lastSource.Equal(want) || state.lastRecord != strings.TrimSpace(newer) {
+		t.Fatalf("regressed snapshot committed: source=%s record=%q", state.lastSource, state.lastRecord)
+	}
+}
+
+func TestTCPTrafficProtectedGatherNeverSeesMixedGeneration(t *testing.T) {
+	metrics.HLP2PPeerTraffic.Reset()
+	metrics.HLP2PTotalTraffic.Reset()
+	metrics.HLP2PPeerCount.Reset()
+	state := newTCPTrafficMonitorState([]uint16{4001})
+	record := func(ip string, value float64) tcpTrafficRecord {
+		return tcpTrafficRecord{
+			timestamp: time.Now(),
+			inbound:   []peerSample{{ip: ip, dir: "in", value: value}},
+			outbound:  []peerSample{{ip: ip, dir: "out", value: value}},
+			byPort: map[string]map[string]float64{
+				"in":  {"4001": value},
+				"out": {"4001": value},
+			},
+		}
+	}
+	a := record("192.0.2.1", 1)
+	b := record("192.0.2.2", 2)
+	commitTCPTraffic(a, time.Now(), state)
+
+	stop := make(chan struct{})
+	var writer sync.WaitGroup
+	writer.Add(1)
+	go func() {
+		defer writer.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if i%2 == 0 {
+				commitTCPTraffic(b, time.Now(), state)
+			} else {
+				commitTCPTraffic(a, time.Now(), state)
+			}
+		}
+	}()
+	defer func() {
+		close(stop)
+		writer.Wait()
+	}()
+
+	gatherer := metrics.ProtectPrometheusSnapshots(prometheus.DefaultGatherer)
+	for i := 0; i < 300; i++ {
+		families, err := gatherer.Gather()
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := make(map[string]map[string]bool)
+		for _, family := range families {
+			if family.GetName() != "hl_p2p_peer_traffic" {
+				continue
+			}
+			for _, row := range family.Metric {
+				var ip, direction string
+				for _, label := range row.Label {
+					switch label.GetName() {
+					case "ip":
+						ip = label.GetValue()
+					case "direction":
+						direction = label.GetValue()
+					}
+				}
+				if ip != "" && ip != "other" {
+					if seen[ip] == nil {
+						seen[ip] = make(map[string]bool)
+					}
+					seen[ip][direction] = true
+				}
+			}
+		}
+		aComplete := seen["192.0.2.1"]["in"] && seen["192.0.2.1"]["out"] && len(seen) == 1
+		bComplete := seen["192.0.2.2"]["in"] && seen["192.0.2.2"]["out"] && len(seen) == 1
+		if !aComplete && !bComplete {
+			t.Fatalf("mixed traffic generation: %#v", seen)
+		}
 	}
 }

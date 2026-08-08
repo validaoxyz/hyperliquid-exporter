@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"sync"
 
 	"github.com/vmihailenco/msgpack/v5"
 )
@@ -12,84 +11,15 @@ import (
 // provides reading of ABCI state files
 type Reader struct {
 	bufferSize int
-	cache      *Cache
-	mu         sync.RWMutex
 }
 
 // creates a new reader with specified buffer size
 func NewReader(bufferSizeMB int) *Reader {
 	return &Reader{
 		bufferSize: bufferSizeMB * 1024 * 1024,
-		cache:      NewCache(),
 	}
 }
 
-// extracts context information from an ABCI state file
-func (r *Reader) ReadContext(filePath string) (*ContextInfo, error) {
-	// file info for cache validation
-	fileInfo, err := os.Stat(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("stat file: %w", err)
-	}
-
-	// cache first
-	if cached := r.cache.Get(filePath, fileInfo.ModTime()); cached != nil {
-		return cached, nil
-	}
-
-	// Open file
-	file, err := os.Open(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("open file: %w", err)
-	}
-	defer file.Close()
-
-	// buffered reader for efficiency
-	reader := bufio.NewReaderSize(file, r.bufferSize)
-
-	// minimal structure for context only
-	var data struct {
-		Exchange struct {
-			Context struct {
-				Height     int64  `msgpack:"height"`
-				TxIndex    int64  `msgpack:"tx_index"`
-				Time       string `msgpack:"time"`
-				NextOid    int64  `msgpack:"next_oid"`
-				NextLid    int64  `msgpack:"next_lid"`
-				NextTwapId int64  `msgpack:"next_twap_id"`
-				Hardfork   struct {
-					Version int64 `msgpack:"version"`
-				} `msgpack:"hardfork"`
-			} `msgpack:"context"`
-		} `msgpack:"exchange"`
-	}
-
-	// decoder and decode
-	decoder := msgpack.NewDecoder(reader)
-	decoder.SetCustomStructTag("msgpack")
-
-	if err := decoder.Decode(&data); err != nil {
-		return nil, fmt.Errorf("decode: %w", err)
-	}
-
-	// Create context info
-	ctx := &ContextInfo{
-		Height:          data.Exchange.Context.Height,
-		TxIndex:         data.Exchange.Context.TxIndex,
-		Time:            data.Exchange.Context.Time,
-		NextOid:         data.Exchange.Context.NextOid,
-		NextLid:         data.Exchange.Context.NextLid,
-		NextTwapId:      data.Exchange.Context.NextTwapId,
-		HardforkVersion: data.Exchange.Context.Hardfork.Version,
-	}
-
-	// Cache result
-	r.cache.Set(filePath, ctx, fileInfo.ModTime())
-
-	return ctx, nil
-}
-
-// read context and EVM account count
 // reads validator profiles from ABCI state.
 //
 // Schema notes:

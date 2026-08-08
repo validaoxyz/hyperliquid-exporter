@@ -5,13 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/validaoxyz/hyperliquid-exporter/internal/cache"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
@@ -25,8 +25,45 @@ type qcWindowEntry struct {
 
 // heartbeatInfo stores information about sent heartbeats
 type heartbeatInfo struct {
-	validator string
 	timestamp time.Time
+	matched   bool
+}
+
+type heartbeatKey struct {
+	validator string
+	randomID  uint64
+	round     uint64
+}
+
+type heartbeatAckKey struct {
+	heartbeatKey
+	source string
+}
+
+type boundedBlockDedupe struct {
+	max   int
+	seen  map[string]struct{}
+	order []string
+}
+
+func newBoundedBlockDedupe(max int) *boundedBlockDedupe {
+	return &boundedBlockDedupe{max: max, seen: make(map[string]struct{}, max)}
+}
+
+func (d *boundedBlockDedupe) seenOrAdd(key string) bool {
+	if key == "" {
+		return false
+	}
+	if _, exists := d.seen[key]; exists {
+		return true
+	}
+	d.seen[key] = struct{}{}
+	d.order = append(d.order, key)
+	if len(d.order) > d.max {
+		delete(d.seen, d.order[0])
+		d.order = d.order[1:]
+	}
+	return false
 }
 
 // Bounds on consensus-monitor maps. These are validator-keyed so the
@@ -36,8 +73,6 @@ type heartbeatInfo struct {
 // cares about the recent sliding window.
 const (
 	consensusValidatorTTL = time.Hour
-	validatorCacheSize    = 1024
-	validatorCacheTTL     = 24 * time.Hour
 )
 
 // monitors consensus-related logs and metrics
@@ -48,28 +83,27 @@ type ConsensusMonitor struct {
 	qcLastSeen   map[string]time.Time // last-seen timestamp per signer
 	tcVotes      map[string]int64     // Track TC votes per signer
 	tcLastSeen   map[string]time.Time
-	// validatorCache is a bounded, thread-safe LRU. Capacity covers the
-	// active set comfortably and stale entries expire on their own.
-	validatorCache *cache.LRUCache // signer -> validator address
-
 	// sliding window tracking for participation rates
 	qcWindow       []qcWindowEntry
 	windowSize     int
 	windowDuration time.Duration
 
 	// block round tracking
-	lastBlockRound int64
+	lastBlockRound       int64
+	latestConsensusRound int64
+	latestExecutionRound int64
+	blockDedupe          *boundedBlockDedupe
 
 	// throttle for the participation-rate recalculation
 	lastQCRecalc time.Time
 
-	// connectivity tracking
-	disconnectedSet   map[string]bool
-	disconnectedMutex sync.RWMutex
-
 	// Heartbeat tracking
-	heartbeats      map[float64]heartbeatInfo // randomID -> heartbeat info
+	heartbeats      map[heartbeatKey]heartbeatInfo
+	heartbeatAcks   map[heartbeatAckKey]time.Time
 	heartbeatsMutex sync.RWMutex
+
+	lastConsensusSourceTime time.Time
+	lastStatusSourceTime    time.Time
 
 	// verification tracking
 	verificationStats VerificationStats
@@ -91,17 +125,17 @@ type VerificationStats struct {
 // creates a new consensus monitor
 func NewConsensusMonitor(cfg *config.Config) *ConsensusMonitor {
 	return &ConsensusMonitor{
-		config:          cfg,
-		qcSignatures:    make(map[string]int64),
-		qcLastSeen:      make(map[string]time.Time),
-		tcVotes:         make(map[string]int64),
-		tcLastSeen:      make(map[string]time.Time),
-		validatorCache:  cache.NewLRUCache(validatorCacheSize, validatorCacheTTL),
-		qcWindow:        make([]qcWindowEntry, 0),
-		windowSize:      100,       // keep last 100 blocks for participation calculation
-		windowDuration:  time.Hour, // or calculate based on last hour
-		disconnectedSet: make(map[string]bool),
-		heartbeats:      make(map[float64]heartbeatInfo),
+		config:         cfg,
+		qcSignatures:   make(map[string]int64),
+		qcLastSeen:     make(map[string]time.Time),
+		tcVotes:        make(map[string]int64),
+		tcLastSeen:     make(map[string]time.Time),
+		qcWindow:       make([]qcWindowEntry, 0),
+		windowSize:     100,       // keep last 100 blocks for participation calculation
+		windowDuration: time.Hour, // or calculate based on last hour
+		heartbeats:     make(map[heartbeatKey]heartbeatInfo),
+		heartbeatAcks:  make(map[heartbeatAckKey]time.Time),
+		blockDedupe:    newBoundedBlockDedupe(4096),
 	}
 }
 
@@ -152,6 +186,7 @@ type ConsensusBlockMessage struct {
 	// block info
 	Round    uint64 `json:"round"`
 	Proposer string `json:"proposer"`
+	Hash     string `json:"hash"`
 	// Evidence
 	QC       *QCEvidence       `json:"qc,omitempty"`
 	TC       json.RawMessage   `json:"tc,omitempty"`
@@ -159,8 +194,45 @@ type ConsensusBlockMessage struct {
 }
 
 type QCEvidence struct {
-	Round   uint64   `json:"round"`
-	Signers []string `json:"signers"`
+	Round     uint64   `json:"round"`
+	BlockHash string   `json:"block_hash"`
+	Signers   []string `json:"signers"`
+}
+
+// UnmarshalJSON keeps the certificate all-or-nothing. encoding/json accepts
+// null for primitive destinations, which would otherwise turn a malformed QC
+// into a plausible round zero / empty signer-set observation.
+func (q *QCEvidence) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Round     json.RawMessage `json:"round"`
+		BlockHash json.RawMessage `json:"block_hash"`
+		Signers   json.RawMessage `json:"signers"`
+	}
+	if err := unmarshalRequiredJSON(data, &wire); err != nil {
+		return fmt.Errorf("invalid QC object: %w", err)
+	}
+
+	var decoded QCEvidence
+	if err := unmarshalRequiredJSON(wire.Round, &decoded.Round); err != nil || decoded.Round == 0 {
+		return fmt.Errorf("invalid QC round")
+	}
+	if err := unmarshalRequiredJSON(wire.BlockHash, &decoded.BlockHash); err != nil || strings.TrimSpace(decoded.BlockHash) == "" {
+		return fmt.Errorf("invalid QC block hash")
+	}
+
+	var rawSigners []json.RawMessage
+	if err := unmarshalRequiredJSON(wire.Signers, &rawSigners); err != nil {
+		return fmt.Errorf("invalid QC signers: %w", err)
+	}
+	decoded.Signers = make([]string, len(rawSigners))
+	for i, rawSigner := range rawSigners {
+		if err := unmarshalRequiredJSON(rawSigner, &decoded.Signers[i]); err != nil || strings.TrimSpace(decoded.Signers[i]) == "" {
+			return fmt.Errorf("invalid QC signer %d", i)
+		}
+	}
+
+	*q = decoded
+	return nil
 }
 
 // helper function to format validator address for metrics
@@ -189,6 +261,17 @@ func (m *ConsensusMonitor) GetVerificationStats() VerificationStats {
 // starts monitoring consensus logs
 func StartConsensusMonitor(ctx context.Context, cfg *config.Config, errCh chan<- error) {
 	m := NewConsensusMonitor(cfg)
+	for _, source := range []metrics.SourceID{
+		metrics.SourceConsensus,
+		metrics.SourceConsensusStatus,
+		metrics.SourceConsensusRoundAdvance,
+		metrics.SourceConsensusLocalStatus,
+		metrics.SourceConsensusExecution,
+		metrics.SourceConsensusRPC,
+		metrics.SourceValidatorConnections,
+	} {
+		metrics.RegisterSource(source, true)
+	}
 
 	// load initial validator mappings
 	if err := m.loadValidatorMappings(); err != nil {
@@ -200,6 +283,8 @@ func StartConsensusMonitor(ctx context.Context, cfg *config.Config, errCh chan<-
 
 	// start monitoring status logs
 	goSafe("consensus", func() { m.monitorStatusLogs(ctx, errCh) })
+	goSafe("consensus", func() { monitorConsensusRPCLogs(ctx, cfg, errCh) })
+	goSafe("consensus", func() { monitorValidatorConnectionLogs(ctx, cfg, errCh) })
 
 	// periodic housekeeping: trim validator maps every 10 min. Drops entries
 	// that haven't been seen in consensusValidatorTTL.
@@ -212,7 +297,6 @@ func StartConsensusMonitor(ctx context.Context, cfg *config.Config, errCh chan<-
 				return
 			case <-t.C:
 				m.trimStaleValidators()
-				m.validatorCache.CleanupExpired()
 			}
 		}
 	})
@@ -222,30 +306,43 @@ func StartConsensusMonitor(ctx context.Context, cfg *config.Config, errCh chan<-
 func (m *ConsensusMonitor) monitorConsensusLogs(ctx context.Context, errCh chan<- error) {
 	consensusDir := filepath.Join(m.config.NodeHome, "data", "node_logs", "consensus", "hourly")
 
-	// check if consensus log directory exists
-	if _, err := os.Stat(consensusDir); os.IsNotExist(err) {
-		logger.InfoComponent("consensus", "Consensus logs not available (non-validator node) - skipping consensus monitoring")
-		return
-	}
-
 	logger.InfoComponent("consensus", "Starting comprehensive consensus monitoring in: %s", consensusDir)
 
 	var okLines, errLines int64
 	tailStream(ctx, tailStreamOpts{
-		component:   "consensus",
-		name:        "consensus stream",
-		resolve:     m.getLatestConsensusLogFile,
+		component: "consensus",
+		name:      "consensus stream",
+		resolve: func() (string, error) {
+			metrics.MarkSourceAttempt(metrics.SourceConsensus)
+			if _, err := os.Stat(consensusDir); err != nil {
+				if os.IsNotExist(err) {
+					metrics.MarkSourceAbsent(metrics.SourceConsensus)
+				} else {
+					metrics.MarkSourceError(metrics.SourceConsensus, metrics.SourceFailureStat)
+				}
+				return "", err
+			}
+			path, err := m.getLatestConsensusLogFile()
+			if err != nil {
+				metrics.MarkSourceError(metrics.SourceConsensus, metrics.SourceFailureDiscovery)
+				return "", err
+			}
+			return path, nil
+		},
 		rescanEvery: 2 * time.Second,
 		eofSleep:    50 * time.Millisecond,
 		bufSize:     1 << 20,
 		onLine: func(line string) {
 			if err := m.processConsensusLine(line); err != nil {
+				metrics.MarkSourceError(metrics.SourceConsensus, metrics.SourceFailureSchema)
 				logger.DebugComponent("consensus", "Error processing consensus line: %v", err)
 				errLines++
 			} else {
+				metrics.MarkSourceValidObservation(metrics.SourceConsensus, m.lastConsensusSourceTime)
 				okLines++
 			}
 		},
+		onSwitch: func(string) { metrics.MarkSourceAvailable(metrics.SourceConsensus) },
 		// the per-line metric/stat updates used to take the global metrics
 		// mutex several times per line at full consensus volume; flush once
 		// per EOF pause instead
@@ -265,6 +362,7 @@ func (m *ConsensusMonitor) monitorConsensusLogs(ctx context.Context, errCh chan<
 				m.verificationStats.LinesProcessed += okLines
 				m.verificationStats.LastProcessedAt = time.Now()
 				m.statsMutex.Unlock()
+				metrics.MarkSourcePublication(metrics.SourceConsensus)
 				okLines = 0
 			}
 		},
@@ -285,7 +383,7 @@ func (m *ConsensusMonitor) processConsensusLine(line string) error {
 		return fmt.Errorf("json unmarshal: %w", err)
 	}
 
-	if len(rawParts) < 2 {
+	if len(rawParts) != 2 {
 		return fmt.Errorf("unexpected log format")
 	}
 
@@ -299,6 +397,7 @@ func (m *ConsensusMonitor) processConsensusLine(line string) error {
 	if err != nil {
 		return fmt.Errorf("parse timestamp: %w", err)
 	}
+	m.lastConsensusSourceTime = parsedTime
 
 	// parse the inner array [direction, message]
 	var innerParts []json.RawMessage
@@ -306,18 +405,29 @@ func (m *ConsensusMonitor) processConsensusLine(line string) error {
 		return fmt.Errorf("unmarshal inner parts: %w", err)
 	}
 
-	if len(innerParts) < 2 {
+	if len(innerParts) != 2 {
 		return fmt.Errorf("invalid message format")
 	}
 
 	// extract direction
 	var direction string
-	if err := json.Unmarshal(innerParts[0], &direction); err != nil {
-		direction = ""
+	if err := unmarshalRequiredJSON(innerParts[0], &direction); err != nil {
+		return fmt.Errorf("unmarshal direction/tag: %w", err)
+	}
+	if strings.TrimSpace(direction) == "" {
+		return fmt.Errorf("empty direction/tag")
 	}
 
 	// check message type using a minimal parse approach
 	msgData := innerParts[1]
+	switch direction {
+	case "round advance":
+		return m.processRoundAdvance(msgData, parsedTime)
+	case "status":
+		return m.processLocalConsensusStatus(msgData, parsedTime)
+	case "execution state":
+		return m.processExecutionState(msgData, parsedTime)
+	}
 
 	// first check if this has a nested msg struct (for "in" messages)
 	var wrapper struct {
@@ -359,13 +469,19 @@ func (m *ConsensusMonitor) processConsensusLine(line string) error {
 				return m.processVoteStruct(&voteMsg, parsedTime)
 			}
 		}
+		return fmt.Errorf("invalid Vote message")
 	} else if bytes.Contains(msgData, []byte(`"Block"`)) {
 		var msg struct {
 			Block json.RawMessage `json:"Block"`
 		}
 		if err := json.Unmarshal(msgData, &msg); err == nil && len(msg.Block) > 0 {
-			return m.processBlockRaw(msg.Block)
+			wireDirection := direction
+			if wireDirection != "in" && wireDirection != "out" {
+				wireDirection = "other"
+			}
+			return m.processBlockRaw(msg.Block, wireDirection)
 		}
+		return fmt.Errorf("invalid Block message")
 	} else if bytes.Contains(msgData, []byte(`"Heartbeat"`)) && direction == "out" {
 		var msg struct {
 			Heartbeat json.RawMessage `json:"Heartbeat"`
@@ -376,6 +492,7 @@ func (m *ConsensusMonitor) processConsensusLine(line string) error {
 				return m.processHeartbeatOut(&hbMsg, parsedTime)
 			}
 		}
+		return fmt.Errorf("invalid Heartbeat message")
 	} else if bytes.Contains(msgData, []byte(`"HeartbeatAck"`)) && direction == "in" {
 		// Handle HeartbeatAck which might be in wrapper structure
 		var msg struct {
@@ -387,6 +504,7 @@ func (m *ConsensusMonitor) processConsensusLine(line string) error {
 				return m.processHeartbeatAck(&ackMsg, wrapper.Source, parsedTime)
 			}
 		}
+		return fmt.Errorf("invalid HeartbeatAck message")
 	}
 
 	return nil
@@ -397,30 +515,157 @@ func (m *ConsensusMonitor) processVoteStruct(vote *ConsensusVoteMessage, timesta
 	// hl-node 2026+ exposes `validator` directly. Old releases used a
 	// `signer_id` that we'd then look up. Try the explicit field first;
 	// fall back to the signer mapping for backward compatibility.
-	validator := vote.Validator
-	if validator == "" && vote.SignerId != "" {
-		validator = m.getValidatorForSigner(vote.SignerId)
+	identifier := strings.TrimSpace(vote.Validator)
+	if identifier == "" {
+		identifier = strings.TrimSpace(vote.SignerId)
 	}
-	if validator == "" {
-		return nil
-	}
-
-	formattedValidator := m.formatValidatorAddress(validator)
-
-	if vote.Round > 0 {
-		metrics.SetValidatorLastVoteRound(formattedValidator, int64(vote.Round))
+	if identifier == "" || vote.Round == 0 {
+		return fmt.Errorf("vote is missing validator identity or round")
 	}
 
-	metrics.SetValidatorLastVoteTime(formattedValidator, timestamp)
+	// Preserve the raw wire identity for the registry join. Formatting here
+	// would turn a resolvable signer into an unresolvable display string.
+	metrics.SetValidatorLastVoteRound(identifier, int64(vote.Round))
+	metrics.SetValidatorLastVoteTime(identifier, timestamp)
+	metrics.HLConsensusAcceptedVoteObservations.Inc()
 
 	return nil
 }
 
+func (m *ConsensusMonitor) processRoundAdvance(raw json.RawMessage, sourceTime time.Time) error {
+	var event struct {
+		PrevRound *int64  `json:"prev_round"`
+		Round     *int64  `json:"round"`
+		Reason    *string `json:"reason"`
+	}
+	if err := json.Unmarshal(raw, &event); err != nil {
+		metrics.MarkSourceError(metrics.SourceConsensusRoundAdvance, metrics.SourceFailureDecode)
+		return fmt.Errorf("unmarshal round advance: %w", err)
+	}
+	if event.PrevRound == nil || event.Round == nil || event.Reason == nil || strings.TrimSpace(*event.Reason) == "" {
+		metrics.MarkSourceError(metrics.SourceConsensusRoundAdvance, metrics.SourceFailureSchema)
+		return fmt.Errorf("round advance is missing required fields")
+	}
+	if *event.PrevRound < 0 || *event.Round <= 0 || *event.Round < *event.PrevRound {
+		metrics.MarkSourceError(metrics.SourceConsensusRoundAdvance, metrics.SourceFailureSchema)
+		return fmt.Errorf("invalid round advance values")
+	}
+	reason := "other"
+	switch strings.ToLower(*event.Reason) {
+	case "qc":
+		reason = "qc"
+	case "tc":
+		reason = "tc"
+	}
+	metrics.HLConsensusRoundAdvanceEvents.WithLabelValues(reason).Inc()
+	metrics.HLConsensusLocalRound.WithLabelValues("round_advance").Set(float64(*event.Round))
+	m.publishConsensusRound(*event.Round)
+	metrics.MarkSourceValidObservation(metrics.SourceConsensusRoundAdvance, sourceTime)
+	metrics.MarkSourcePublication(metrics.SourceConsensusRoundAdvance)
+	return nil
+}
+
+func (m *ConsensusMonitor) processLocalConsensusStatus(raw json.RawMessage, sourceTime time.Time) error {
+	var event struct {
+		Round           *int64 `json:"round"`
+		LastVoteRound   *int64 `json:"last_vote_round"`
+		LastCommitRound *int64 `json:"last_commit_round"`
+		QCRound         *int64 `json:"qc_round"`
+	}
+	if err := json.Unmarshal(raw, &event); err != nil {
+		metrics.MarkSourceError(metrics.SourceConsensusLocalStatus, metrics.SourceFailureDecode)
+		return fmt.Errorf("unmarshal local consensus status: %w", err)
+	}
+	if event.Round == nil || event.LastVoteRound == nil || event.LastCommitRound == nil || event.QCRound == nil {
+		metrics.MarkSourceError(metrics.SourceConsensusLocalStatus, metrics.SourceFailureSchema)
+		return fmt.Errorf("local consensus status is missing required fields")
+	}
+	if *event.Round <= 0 || *event.LastVoteRound < 0 || *event.LastCommitRound < 0 || *event.QCRound < 0 ||
+		*event.LastVoteRound > *event.Round || *event.LastCommitRound > *event.Round || *event.QCRound > *event.Round {
+		metrics.MarkSourceError(metrics.SourceConsensusLocalStatus, metrics.SourceFailureSchema)
+		return fmt.Errorf("invalid local consensus status values")
+	}
+	for field, value := range map[string]int64{
+		"status": *event.Round, "last_vote": *event.LastVoteRound,
+		"last_commit": *event.LastCommitRound, "qc": *event.QCRound,
+	} {
+		metrics.HLConsensusLocalRound.WithLabelValues(field).Set(float64(value))
+	}
+	metrics.HLConsensusLocalRoundLag.WithLabelValues("last_vote").Set(float64(*event.Round - *event.LastVoteRound))
+	metrics.HLConsensusLocalRoundLag.WithLabelValues("last_commit").Set(float64(*event.Round - *event.LastCommitRound))
+	metrics.HLConsensusLocalRoundLag.WithLabelValues("qc").Set(float64(*event.Round - *event.QCRound))
+	m.publishConsensusRound(*event.Round)
+	metrics.MarkSourceValidObservation(metrics.SourceConsensusLocalStatus, sourceTime)
+	metrics.MarkSourcePublication(metrics.SourceConsensusLocalStatus)
+	return nil
+}
+
+func (m *ConsensusMonitor) processExecutionState(raw json.RawMessage, sourceTime time.Time) error {
+	var event struct {
+		Round int64 `json:"round"`
+	}
+	if err := json.Unmarshal(raw, &event); err != nil {
+		metrics.MarkSourceError(metrics.SourceConsensusExecution, metrics.SourceFailureDecode)
+		return fmt.Errorf("unmarshal execution state: %w", err)
+	}
+	if event.Round <= 0 {
+		metrics.MarkSourceError(metrics.SourceConsensusExecution, metrics.SourceFailureSchema)
+		return fmt.Errorf("invalid execution-state round")
+	}
+	m.latestExecutionRound = event.Round
+	metrics.HLConsensusLocalRound.WithLabelValues("execution").Set(float64(event.Round))
+	if m.latestConsensusRound >= event.Round {
+		metrics.HLConsensusLocalRoundLag.WithLabelValues("execution").Set(float64(m.latestConsensusRound - event.Round))
+	} else {
+		metrics.HLConsensusLocalRoundLag.DeleteLabelValues("execution")
+	}
+	metrics.MarkSourceValidObservation(metrics.SourceConsensusExecution, sourceTime)
+	metrics.MarkSourcePublication(metrics.SourceConsensusExecution)
+	return nil
+}
+
+func (m *ConsensusMonitor) publishConsensusRound(round int64) {
+	if round <= 0 {
+		return
+	}
+	m.latestConsensusRound = round
+	metrics.SetCurrentConsensusRound(round)
+	if m.latestExecutionRound > 0 && round >= m.latestExecutionRound {
+		metrics.HLConsensusLocalRoundLag.WithLabelValues("execution").Set(float64(round - m.latestExecutionRound))
+	} else {
+		metrics.HLConsensusLocalRoundLag.DeleteLabelValues("execution")
+	}
+}
+
 // processes the block message
-func (m *ConsensusMonitor) processBlockRaw(blockData json.RawMessage) error {
+func (m *ConsensusMonitor) processBlockRaw(blockData json.RawMessage, direction string) error {
+	if direction != "in" && direction != "out" {
+		direction = "other"
+	}
 	var block ConsensusBlockMessage
 	if err := json.Unmarshal(blockData, &block); err != nil {
 		return fmt.Errorf("unmarshal block: %w", err)
+	}
+	if block.Round == 0 || strings.TrimSpace(block.Proposer) == "" {
+		return fmt.Errorf("block is missing round or proposer")
+	}
+
+	var tc *TCData
+	trimmedTC := bytes.TrimSpace(block.TC)
+	if len(trimmedTC) > 0 && !bytes.Equal(trimmedTC, []byte("null")) {
+		if !isJSONObject(trimmedTC) {
+			return fmt.Errorf("non-null TC is not an object")
+		}
+		var decoded TCData
+		if err := json.Unmarshal(trimmedTC, &decoded); err != nil {
+			return fmt.Errorf("unmarshal non-null TC: %w", err)
+		}
+		tc = &decoded
+	}
+
+	metrics.HLConsensusBlockDirectionEvents.WithLabelValues(direction).Inc()
+	if m.blockDedupe.seenOrAdd(canonicalConsensusBlockKey(block)) {
+		return nil
 	}
 
 	// get val addr for proposer
@@ -433,12 +678,13 @@ func (m *ConsensusMonitor) processBlockRaw(blockData json.RawMessage) error {
 
 	// log block processing
 	logger.DebugComponent("consensus", "Processing block - Round: %d, Proposer: %s, Has TC: %v, Has QC: %v",
-		block.Round, formattedProposer, block.TC != nil, block.QC != nil)
+		block.Round, formattedProposer, tc != nil, block.QC != nil)
 
 	// update consensus round metrics
 	blockRound := int64(block.Round)
 	if blockRound > 0 {
-		metrics.SetCurrentConsensusRound(blockRound)
+		m.publishConsensusRound(blockRound)
+		metrics.HLConsensusLocalRound.WithLabelValues("block").Set(float64(blockRound))
 
 		// calculate rounds per block if we have a previous round
 		if m.lastBlockRound > 0 && blockRound > m.lastBlockRound {
@@ -469,15 +715,13 @@ func (m *ConsensusMonitor) processBlockRaw(blockData json.RawMessage) error {
 					continue
 				}
 
-				formattedValidator := m.formatValidatorAddress(validator)
-
 				// track QC signatures (bounded by trimStaleValidators)
 				m.mapsMu.Lock()
 				m.qcSignatures[validator]++
 				m.qcLastSeen[validator] = time.Now()
 				m.mapsMu.Unlock()
 
-				metrics.IncrementQCSignatures(formattedValidator)
+				metrics.IncrementQCSignatures(validator)
 			}
 
 			logger.DebugComponent("consensus", "Processed QC with %d signers in block round %d",
@@ -504,41 +748,31 @@ func (m *ConsensusMonitor) processBlockRaw(blockData json.RawMessage) error {
 		}
 	}
 
-	if len(block.TC) > 0 {
-		var tc TCData
-		if err := json.Unmarshal(block.TC, &tc); err == nil {
-			// record TC size
-			metrics.RecordTCSize(float64(len(tc.Timeouts)))
+	if tc != nil {
+		// record TC size
+		metrics.RecordTCSize(float64(len(tc.Timeouts)))
 
-			// update verification stats
-			m.statsMutex.Lock()
-			m.verificationStats.TCsProcessed++
-			m.statsMutex.Unlock()
+		// update verification stats
+		m.statsMutex.Lock()
+		m.verificationStats.TCsProcessed++
+		m.statsMutex.Unlock()
 
-			// track each timeout voter
-			for _, timeout := range tc.Timeouts {
-				if timeout.Validator != "" {
-					// timeout.Validator is already a validator address (truncated), not a signer
-					// just format it directly
-					formattedValidator := m.formatValidatorAddress(timeout.Validator)
-
-					// track TC votes (bounded by trimStaleValidators)
-					m.mapsMu.Lock()
-					m.tcVotes[timeout.Validator]++
-					m.tcLastSeen[timeout.Validator] = time.Now()
-					m.mapsMu.Unlock()
-					metrics.IncrementTCParticipation(formattedValidator)
-				}
+		// track each timeout voter
+		for _, timeout := range tc.Timeouts {
+			if timeout.Validator != "" {
+				m.mapsMu.Lock()
+				m.tcVotes[timeout.Validator]++
+				m.tcLastSeen[timeout.Validator] = time.Now()
+				m.mapsMu.Unlock()
+				metrics.IncrementTCParticipation(timeout.Validator)
 			}
-
-			logger.DebugComponent("consensus", "Processed TC with %d timeout votes in block round %d",
-				len(tc.Timeouts), block.Round)
-		} else {
-			logger.DebugComponent("consensus", "Failed to parse TC data: %v", err)
 		}
 
+		logger.DebugComponent("consensus", "Processed TC with %d timeout votes in block round %d",
+			len(tc.Timeouts), block.Round)
+
 		// update TC metrics
-		metrics.IncrementTCBlocks(formattedProposer)
+		metrics.IncrementTCBlocks(block.Proposer)
 	}
 
 	// count block payloads if present
@@ -556,24 +790,34 @@ func (m *ConsensusMonitor) processBlockRaw(blockData json.RawMessage) error {
 	return nil
 }
 
+func canonicalConsensusBlockKey(block ConsensusBlockMessage) string {
+	if block.Hash != "" {
+		return "hash:" + block.Hash
+	}
+	if block.Round == 0 && block.Proposer == "" {
+		return ""
+	}
+	qcRound := uint64(0)
+	qcHash := ""
+	if block.QC != nil {
+		qcRound = block.QC.Round
+		qcHash = block.QC.BlockHash
+	}
+	return fmt.Sprintf("round:%d|proposer:%s|qc:%d|qc_hash:%s", block.Round, block.Proposer, qcRound, qcHash)
+}
+
+func isJSONObject(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) >= 2 && trimmed[0] == '{' && trimmed[len(trimmed)-1] == '}'
+}
+
 // returns the validator address for a given signer
 func (m *ConsensusMonitor) getValidatorForSigner(signer string) string {
-	if v, ok := m.validatorCache.Get(signer); ok {
-		if validator, ok2 := v.(string); ok2 {
-			return validator
-		}
+	identity, ok := metrics.ResolveValidatorIdentity(signer)
+	if !ok || identity.Kind != "signer" {
+		return ""
 	}
-
-	// try to get from metrics package (which maintains a global mapping)
-	validator, exists := metrics.GetValidatorForSigner(signer)
-	if exists && validator != "" {
-		m.validatorCache.Set(signer, validator)
-		return validator
-	}
-
-	// if not found, the signer might be the validator itself
-	// return empty to indicate no mapping found
-	return ""
+	return identity.Validator
 }
 
 // loads initial validator mappings from ABCI state
@@ -616,73 +860,122 @@ func (m *ConsensusMonitor) addQCWindowEntry(signers []string) {
 
 // processHeartbeatOut processes outgoing heartbeat messages
 func (m *ConsensusMonitor) processHeartbeatOut(hb *HeartbeatMessage, timestamp time.Time) error {
-	if hb.Validator == "" || hb.RandomID == 0 {
+	if hb.Validator == "" || hb.RandomID == 0 || hb.Round == 0 {
 		return fmt.Errorf("missing heartbeat fields")
 	}
-
-	// Get validator address
-	validator := m.getValidatorForSigner(hb.Validator)
-	if validator == "" {
-		validator = hb.Validator
+	wireValidator := strings.ToLower(strings.TrimSpace(hb.Validator))
+	if wireValidator == "" {
+		return fmt.Errorf("empty heartbeat validator")
 	}
-	formattedValidator := m.formatValidatorAddress(validator)
+	key := heartbeatKey{validator: wireValidator, randomID: hb.RandomID, round: hb.Round}
+
+	formattedValidator := m.formatValidatorAddress(hb.Validator)
 
 	// Store heartbeat info
 	m.heartbeatsMutex.Lock()
-	m.heartbeats[hb.RandomID] = heartbeatInfo{
-		validator: validator,
-		timestamp: timestamp,
-	}
+	m.heartbeats[key] = heartbeatInfo{timestamp: timestamp}
 
 	// Clean up old heartbeats (older than 5 minutes)
-	cutoff := time.Now().Add(-5 * time.Minute)
+	cutoff := timestamp.Add(-5 * time.Minute)
 	for id, info := range m.heartbeats {
 		if info.timestamp.Before(cutoff) {
 			delete(m.heartbeats, id)
+			if !info.matched {
+				metrics.HLConsensusHeartbeatJoin.WithLabelValues("unknown", "expired").Inc()
+			}
+		}
+	}
+	for ackKey, seenAt := range m.heartbeatAcks {
+		if seenAt.Before(cutoff) {
+			delete(m.heartbeatAcks, ackKey)
 		}
 	}
 	m.heartbeatsMutex.Unlock()
 
 	// Increment heartbeat sent counter
-	metrics.IncrementHeartbeatsSent(formattedValidator)
+	metrics.IncrementHeartbeatsSent(hb.Validator)
 
-	logger.DebugComponent("consensus", "Registered outgoing heartbeat from %s with ID %.0f", formattedValidator, hb.RandomID)
+	logger.DebugComponent("consensus", "Registered outgoing heartbeat from %s", formattedValidator)
 
 	return nil
 }
 
 // processHeartbeatAck processes heartbeat acknowledgment messages
 func (m *ConsensusMonitor) processHeartbeatAck(ack *HeartbeatAckMessage, source string, timestamp time.Time) error {
-	if ack.RandomID == 0 {
-		return fmt.Errorf("missing random_id in ack")
+	if ack.RandomID == 0 || ack.Round == 0 || ack.Validator == "" {
+		return fmt.Errorf("missing heartbeat acknowledgement fields")
 	}
 
 	if source == "" {
 		return fmt.Errorf("missing source in ack")
 	}
 
-	// Look up the original heartbeat
-	m.heartbeatsMutex.RLock()
-	hbInfo, exists := m.heartbeats[ack.RandomID]
-	m.heartbeatsMutex.RUnlock()
+	source = strings.ToLower(strings.TrimSpace(source))
+	wireValidator := strings.ToLower(strings.TrimSpace(ack.Validator))
+	if source == "" || wireValidator == "" {
+		return fmt.Errorf("empty heartbeat acknowledgement identity")
+	}
+	key := heartbeatKey{validator: wireValidator, randomID: ack.RandomID, round: ack.Round}
+	ackKey := heartbeatAckKey{heartbeatKey: key, source: source}
+
+	// Look up the original heartbeat and reject a duplicate acknowledgement
+	// without re-observing either latency distribution.
+	m.heartbeatsMutex.Lock()
+	hbInfo, exists := m.heartbeats[key]
+	kind := "unknown"
+	if exists {
+		kind = "peer"
+		if source == key.validator {
+			kind = "self"
+		}
+	}
+	if _, duplicate := m.heartbeatAcks[ackKey]; duplicate {
+		m.heartbeatsMutex.Unlock()
+		metrics.HLConsensusHeartbeatJoin.WithLabelValues(kind, "mismatch").Inc()
+		return nil
+	}
+	m.heartbeatsMutex.Unlock()
 
 	if !exists {
-		// Heartbeat not found - might be from before we started monitoring
+		outcome := "orphan"
+		m.heartbeatsMutex.RLock()
+		for candidate := range m.heartbeats {
+			if candidate.randomID == ack.RandomID {
+				outcome = "mismatch"
+				break
+			}
+		}
+		m.heartbeatsMutex.RUnlock()
+		metrics.HLConsensusHeartbeatJoin.WithLabelValues("unknown", outcome).Inc()
 		return nil
 	}
 
 	// calculate delay
 	delay := timestamp.Sub(hbInfo.timestamp)
+	if delay < 0 {
+		metrics.HLConsensusHeartbeatJoin.WithLabelValues(kind, "mismatch").Inc()
+		return nil
+	}
+	m.heartbeatsMutex.Lock()
+	if _, duplicate := m.heartbeatAcks[ackKey]; duplicate {
+		m.heartbeatsMutex.Unlock()
+		metrics.HLConsensusHeartbeatJoin.WithLabelValues(kind, "mismatch").Inc()
+		return nil
+	}
+	m.heartbeatAcks[ackKey] = timestamp
+	hbInfo.matched = true
+	m.heartbeats[key] = hbInfo
+	m.heartbeatsMutex.Unlock()
+	if source == key.validator {
+		metrics.HLConsensusHeartbeatJoin.WithLabelValues("self", "matched").Inc()
+		metrics.HLConsensusSelfHeartbeatLoopDuration.Observe(delay.Seconds())
+		return nil
+	}
 
-	// get formatted addresses
-	fromValidator := m.formatValidatorAddress(hbInfo.validator)
-	toValidator := m.formatValidatorAddress(source)
-
-	// update metrics
-	metrics.IncrementHeartbeatAcksReceived(toValidator)
-	metrics.RecordHeartbeatAckDelay(fromValidator, toValidator, float64(delay.Milliseconds()))
-
-	logger.DebugComponent("consensus", "Heartbeat ack from %s to %s, delay: %v", toValidator, fromValidator, delay)
+	metrics.HLConsensusHeartbeatJoin.WithLabelValues("peer", "matched").Inc()
+	metrics.HLConsensusHeartbeatPeerAckDelay.Observe(delay.Seconds())
+	identity := metrics.ResolveSignerSnapshot([]string{source})[source]
+	metrics.HLConsensusHeartbeatPeerAcks.WithLabelValues(identity.Validator, identity.Signer, identity.Name).Inc()
 
 	return nil
 }
@@ -690,6 +983,7 @@ func (m *ConsensusMonitor) processHeartbeatAck(ack *HeartbeatAckMessage, source 
 // calculates and updates QC participation rates for all validators
 func (m *ConsensusMonitor) updateQCParticipationRates() {
 	if len(m.qcWindow) == 0 {
+		metrics.ReplaceQCParticipationRates(map[string]float64{})
 		return
 	}
 
@@ -704,56 +998,53 @@ func (m *ConsensusMonitor) updateQCParticipationRates() {
 	// calculate rates
 	totalBlocks := float64(len(m.qcWindow))
 
-	// update metrics for validators who participated
+	rates := make(map[string]float64, len(participationCount))
 	for validator, count := range participationCount {
-		rate := (float64(count) / totalBlocks) * 100
-		formattedValidator := m.formatValidatorAddress(validator)
-		metrics.SetQCParticipationRate(formattedValidator, rate)
+		rates[validator] = (float64(count) / totalBlocks) * 100
 	}
-
-	// set rate to 0 for validators who haven't participated
-	m.mapsMu.Lock()
-	knownValidators := make([]string, 0, len(m.qcSignatures))
-	for v := range m.qcSignatures {
-		knownValidators = append(knownValidators, v)
-	}
-	m.mapsMu.Unlock()
-	for _, validator := range knownValidators {
-		if _, exists := participationCount[validator]; !exists {
-			formattedValidator := m.formatValidatorAddress(validator)
-			metrics.SetQCParticipationRate(formattedValidator, 0)
-		}
-	}
+	metrics.ReplaceQCParticipationRates(rates)
 }
 
 // monitors the status log files for additional consensus info
 func (m *ConsensusMonitor) monitorStatusLogs(ctx context.Context, errCh chan<- error) {
 	statusDir := filepath.Join(m.config.NodeHome, "data", "node_logs", "status", "hourly")
 
-	// check if status log dir exists
-	if _, err := os.Stat(statusDir); os.IsNotExist(err) {
-		logger.InfoComponent("consensus", "Status logs not available (non-validator node) - skipping status monitoring")
-		return
-	}
-
 	logger.InfoComponent("consensus", "Starting status log monitoring in: %s", statusDir)
 
 	var okLines, errLines int64
 	tailStream(ctx, tailStreamOpts{
-		component:   "consensus",
-		name:        "status stream",
-		resolve:     func() (string, error) { return latestHourlyFile(statusDir) },
+		component: "consensus",
+		name:      "status stream",
+		resolve: func() (string, error) {
+			metrics.MarkSourceAttempt(metrics.SourceConsensusStatus)
+			if _, err := os.Stat(statusDir); err != nil {
+				if os.IsNotExist(err) {
+					metrics.MarkSourceAbsent(metrics.SourceConsensusStatus)
+				} else {
+					metrics.MarkSourceError(metrics.SourceConsensusStatus, metrics.SourceFailureStat)
+				}
+				return "", err
+			}
+			path, err := latestHourlyFile(statusDir)
+			if err != nil {
+				metrics.MarkSourceError(metrics.SourceConsensusStatus, metrics.SourceFailureDiscovery)
+			}
+			return path, err
+		},
 		rescanEvery: 5 * time.Second,
 		eofSleep:    250 * time.Millisecond,
 		bufSize:     1 << 20,
 		onLine: func(line string) {
 			if err := m.processStatusLine(line); err != nil {
+				metrics.MarkSourceError(metrics.SourceConsensusStatus, metrics.SourceFailureSchema)
 				logger.DebugComponent("consensus", "Error processing status line: %v", err)
 				errLines++
 			} else {
+				metrics.MarkSourceValidObservation(metrics.SourceConsensusStatus, m.lastStatusSourceTime)
 				okLines++
 			}
 		},
+		onSwitch: func(string) { metrics.MarkSourceAvailable(metrics.SourceConsensusStatus) },
 		onIdle: func() {
 			if errLines > 0 {
 				metrics.AddConsensusMonitorErrors("status", errLines)
@@ -762,6 +1053,7 @@ func (m *ConsensusMonitor) monitorStatusLogs(ctx context.Context, errCh chan<- e
 			if okLines > 0 {
 				metrics.AddConsensusMonitorLines("status", okLines)
 				metrics.SetConsensusMonitorLastProcessed("status", time.Now().Unix())
+				metrics.MarkSourcePublication(metrics.SourceConsensusStatus)
 				okLines = 0
 			}
 		},
@@ -770,141 +1062,276 @@ func (m *ConsensusMonitor) monitorStatusLogs(ctx context.Context, errCh chan<- e
 
 // processStatusLine processes a single line from status logs
 func (m *ConsensusMonitor) processStatusLine(line string) error {
-	// parse the outer array [timestamp, data]
-	var rawParts []json.RawMessage
-	if err := json.Unmarshal([]byte(line), &rawParts); err != nil {
-		return fmt.Errorf("json unmarshal: %w", err)
+	snapshot, err := parseStatusSnapshot([]byte(line))
+	if err != nil {
+		return err
 	}
 
-	if len(rawParts) < 2 {
-		return fmt.Errorf("unexpected status log format")
+	signers := make([]string, 0, len(snapshot.Heartbeats)+2*len(snapshot.Disconnected))
+	for _, hb := range snapshot.Heartbeats {
+		signers = append(signers, hb.Signer)
+	}
+	for _, pair := range snapshot.Disconnected {
+		signers = append(signers, pair.SubjectSigner, pair.ReporterSigner)
+	}
+	identities := metrics.ResolveSignerSnapshot(signers)
+
+	heartbeats := make([]metrics.ValidatorHeartbeatSnapshot, 0, len(snapshot.Heartbeats))
+	for _, hb := range snapshot.Heartbeats {
+		identity := identities[hb.Signer]
+		row := metrics.ValidatorHeartbeatSnapshot{Identity: identity}
+		if hb.SinceLastSuccess.Present && !hb.SinceLastSuccess.Null {
+			value := hb.SinceLastSuccess.Value
+			row.SinceLastSuccess = &value
+		}
+		if hb.LastAckDuration.Present {
+			row.AckFieldPresent = true
+			if !hb.LastAckDuration.Null {
+				value := hb.LastAckDuration.Value
+				row.LastAckDuration = &value
+			}
+		}
+		heartbeats = append(heartbeats, row)
 	}
 
-	// parse status data
-	var statusData struct {
-		DisconnectedValidators json.RawMessage `json:"disconnected_validators"`
-		HeartbeatStatuses      json.RawMessage `json:"heartbeat_statuses"`
+	disconnected := make([]metrics.ValidatorDisconnectSnapshot, 0, len(snapshot.Disconnected))
+	for _, pair := range snapshot.Disconnected {
+		subject := identities[pair.SubjectSigner]
+		reporter := identities[pair.ReporterSigner]
+		disconnected = append(disconnected, metrics.ValidatorDisconnectSnapshot{
+			Subject: subject, Reporter: reporter, SinceRound: pair.SinceRound,
+		})
 	}
 
-	if err := json.Unmarshal(rawParts[1], &statusData); err != nil {
-		return fmt.Errorf("unmarshal status data: %w", err)
+	metrics.ReplaceConsensusStatusSnapshot(heartbeats, disconnected)
+	if snapshot.HeartbeatFieldPresent {
+		metrics.HLConsensusStatusFieldReported.WithLabelValues("heartbeat_statuses").Set(1)
+	} else {
+		metrics.HLConsensusStatusFieldReported.WithLabelValues("heartbeat_statuses").Set(0)
 	}
-
-	// process disconnected validators
-	if len(statusData.DisconnectedValidators) > 0 {
-		m.processDisconnectedValidatorsRaw(statusData.DisconnectedValidators)
+	if snapshot.DisconnectedPresent {
+		metrics.HLConsensusStatusFieldReported.WithLabelValues("disconnected_validators").Set(1)
+	} else {
+		metrics.HLConsensusStatusFieldReported.WithLabelValues("disconnected_validators").Set(0)
 	}
-
-	// process heartbeat statuses
-	if len(statusData.HeartbeatStatuses) > 0 {
-		m.processHeartbeatStatusesRaw(statusData.HeartbeatStatuses)
-	}
-
+	m.publishEligibleStatusSummaries(snapshot)
+	m.lastStatusSourceTime = snapshot.SourceTime
 	return nil
 }
 
-// processes disconnected validators from raw JSON
-func (m *ConsensusMonitor) processDisconnectedValidatorsRaw(data json.RawMessage) {
-	// parse as array of [validator, [[peer, round], ...]]
-	var discList []json.RawMessage
-	if err := json.Unmarshal(data, &discList); err != nil {
-		logger.DebugComponent("consensus", "Failed to parse disconnected validators: %v", err)
-		return
+func parseStatusSnapshot(line []byte) (statusSnapshot, error) {
+	var outer []json.RawMessage
+	if err := json.Unmarshal(line, &outer); err != nil {
+		return statusSnapshot{}, fmt.Errorf("unmarshal status envelope: %w", err)
+	}
+	if len(outer) != 2 {
+		return statusSnapshot{}, fmt.Errorf("status envelope length %d", len(outer))
+	}
+	var timestamp string
+	if err := json.Unmarshal(outer[0], &timestamp); err != nil {
+		return statusSnapshot{}, fmt.Errorf("unmarshal status timestamp: %w", err)
+	}
+	sourceTime, err := time.Parse("2006-01-02T15:04:05.999999999", timestamp)
+	if err != nil {
+		return statusSnapshot{}, fmt.Errorf("parse status timestamp: %w", err)
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(outer[1], &body); err != nil {
+		return statusSnapshot{}, fmt.Errorf("unmarshal status object: %w", err)
+	}
+	if body == nil {
+		return statusSnapshot{}, fmt.Errorf("status body is not an object")
+	}
+	snapshot := statusSnapshot{SourceTime: sourceTime}
+	rawRound, present := body["round"]
+	if !present || json.Unmarshal(rawRound, &snapshot.Round) != nil || snapshot.Round <= 0 {
+		return statusSnapshot{}, fmt.Errorf("invalid status round")
 	}
 
-	newDisconnected := make(map[string]bool)
-
-	for _, item := range discList {
-		var entry []json.RawMessage
-		if err := json.Unmarshal(item, &entry); err != nil || len(entry) < 2 {
-			continue
+	if raw, present := body["heartbeat_statuses"]; present {
+		snapshot.HeartbeatFieldPresent = true
+		rows, err := parseStatusHeartbeats(raw)
+		if err != nil {
+			return statusSnapshot{}, err
 		}
-
-		var valAddr string
-		if err := json.Unmarshal(entry[0], &valAddr); err != nil {
-			continue
+		snapshot.Heartbeats = rows
+	}
+	if raw, present := body["disconnected_validators"]; present {
+		snapshot.DisconnectedPresent = true
+		pairs, err := parseStatusDisconnected(raw)
+		if err != nil {
+			return statusSnapshot{}, err
 		}
-
-		var peerList [][]json.RawMessage
-		if err := json.Unmarshal(entry[1], &peerList); err != nil {
-			continue
+		snapshot.Disconnected = pairs
+	}
+	if raw, present := body["validators_missing_heartbeat"]; present {
+		snapshot.MissingHeartbeatPresent = true
+		if !isJSONArray(raw) {
+			return statusSnapshot{}, fmt.Errorf("validators_missing_heartbeat is not an array")
 		}
-
-		for _, peerData := range peerList {
-			if len(peerData) > 0 {
-				var peerAddr string
-				if err := json.Unmarshal(peerData[0], &peerAddr); err == nil {
-					key := fmt.Sprintf("%s_%s", valAddr, peerAddr)
-					newDisconnected[key] = true
-				}
+		if err := json.Unmarshal(raw, &snapshot.MissingHeartbeatSigners); err != nil {
+			return statusSnapshot{}, fmt.Errorf("invalid validators_missing_heartbeat: %w", err)
+		}
+		seen := make(map[string]struct{}, len(snapshot.MissingHeartbeatSigners))
+		for i, signer := range snapshot.MissingHeartbeatSigners {
+			signer = strings.ToLower(strings.TrimSpace(signer))
+			if signer == "" {
+				return statusSnapshot{}, fmt.Errorf("empty missing-heartbeat signer at %d", i)
 			}
-		}
-	}
-
-	// update metrics, only track disconnected pairs to reduce cardinality
-	m.disconnectedMutex.Lock()
-
-	// remove metrics for validators that are now connected
-	for oldKey := range m.disconnectedSet {
-		if _, stillDisconnected := newDisconnected[oldKey]; !stillDisconnected {
-			// validator is now connected - remove the metric entirely instead of setting to 1
-			parts := strings.Split(oldKey, "_")
-			if len(parts) == 2 {
-				// this will remove the metric from the labeledValues map
-				metrics.RemoveValidatorConnectivity(parts[0], parts[1])
+			if _, duplicate := seen[signer]; duplicate {
+				return statusSnapshot{}, fmt.Errorf("duplicate missing-heartbeat signer")
 			}
+			seen[signer] = struct{}{}
+			snapshot.MissingHeartbeatSigners[i] = signer
 		}
 	}
-
-	// only set metrics for disconnected pairs (value 0)
-	for newKey := range newDisconnected {
-		if _, wasDisconnected := m.disconnectedSet[newKey]; !wasDisconnected {
-			parts := strings.Split(newKey, "_")
-			if len(parts) == 2 {
-				metrics.SetValidatorConnectivity(parts[0], parts[1], 0)
-			}
-		}
-	}
-
-	m.disconnectedSet = newDisconnected
-	m.disconnectedMutex.Unlock()
+	return snapshot, nil
 }
 
-// processes heartbeat status information from raw JSON
-func (m *ConsensusMonitor) processHeartbeatStatusesRaw(data json.RawMessage) {
-	// parse as array of [validator, {status_info}]
-	var hsList []json.RawMessage
-	if err := json.Unmarshal(data, &hsList); err != nil {
-		logger.DebugComponent("consensus", "Failed to parse heartbeat statuses: %v", err)
-		return
+func parseStatusHeartbeats(raw json.RawMessage) ([]statusHeartbeat, error) {
+	if !isJSONArray(raw) {
+		return nil, fmt.Errorf("heartbeat_statuses is not an array")
 	}
-
-	for _, item := range hsList {
+	var entries []json.RawMessage
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return nil, fmt.Errorf("invalid heartbeat_statuses: %w", err)
+	}
+	out := make([]statusHeartbeat, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
+	for i, rawEntry := range entries {
 		var entry []json.RawMessage
-		if err := json.Unmarshal(item, &entry); err != nil || len(entry) < 2 {
-			continue
+		if err := json.Unmarshal(rawEntry, &entry); err != nil || len(entry) != 2 {
+			return nil, fmt.Errorf("invalid heartbeat row %d", i)
 		}
+		var signer string
+		if err := json.Unmarshal(entry[0], &signer); err != nil || strings.TrimSpace(signer) == "" {
+			return nil, fmt.Errorf("invalid heartbeat signer %d", i)
+		}
+		signer = strings.ToLower(strings.TrimSpace(signer))
+		if _, duplicate := seen[signer]; duplicate {
+			return nil, fmt.Errorf("duplicate heartbeat signer")
+		}
+		seen[signer] = struct{}{}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(entry[1], &fields); err != nil || fields == nil {
+			return nil, fmt.Errorf("invalid heartbeat body %d", i)
+		}
+		since, err := parseOptionalStatusFloat(fields, "since_last_success", false)
+		if err != nil {
+			return nil, fmt.Errorf("heartbeat row %d since_last_success: %w", i, err)
+		}
+		ack, err := parseOptionalStatusFloat(fields, "last_ack_duration", true)
+		if err != nil {
+			return nil, fmt.Errorf("heartbeat row %d last_ack_duration: %w", i, err)
+		}
+		out = append(out, statusHeartbeat{Signer: signer, SinceLastSuccess: since, LastAckDuration: ack})
+	}
+	return out, nil
+}
 
-		var valAddr string
-		if err := json.Unmarshal(entry[0], &valAddr); err != nil {
-			continue
+func parseOptionalStatusFloat(fields map[string]json.RawMessage, key string, allowNull bool) (optionalStatusFloat, error) {
+	raw, present := fields[key]
+	if !present {
+		return optionalStatusFloat{}, nil
+	}
+	value := optionalStatusFloat{Present: true}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		if !allowNull {
+			return optionalStatusFloat{}, fmt.Errorf("null is not valid for this field")
 		}
+		value.Null = true
+		return value, nil
+	}
+	if err := json.Unmarshal(raw, &value.Value); err != nil || math.IsNaN(value.Value) || math.IsInf(value.Value, 0) || value.Value < 0 {
+		return optionalStatusFloat{}, fmt.Errorf("expected nonnegative finite number or null")
+	}
+	return value, nil
+}
 
-		var info struct {
-			SinceLastSuccess float64 `json:"since_last_success"`
-			LastAckDuration  float64 `json:"last_ack_duration"`
+func parseStatusDisconnected(raw json.RawMessage) ([]statusDisconnectedPair, error) {
+	if !isJSONArray(raw) {
+		return nil, fmt.Errorf("disconnected_validators is not an array")
+	}
+	var subjects []json.RawMessage
+	if err := json.Unmarshal(raw, &subjects); err != nil {
+		return nil, fmt.Errorf("invalid disconnected_validators: %w", err)
+	}
+	out := make([]statusDisconnectedPair, 0)
+	seen := make(map[string]struct{})
+	for i, rawSubject := range subjects {
+		var subject []json.RawMessage
+		if err := json.Unmarshal(rawSubject, &subject); err != nil || len(subject) != 2 {
+			return nil, fmt.Errorf("invalid disconnected subject row %d", i)
 		}
-		if err := json.Unmarshal(entry[1], &info); err != nil {
-			continue
+		var subjectSigner string
+		if err := json.Unmarshal(subject[0], &subjectSigner); err != nil || strings.TrimSpace(subjectSigner) == "" {
+			return nil, fmt.Errorf("invalid disconnected subject signer %d", i)
 		}
+		subjectSigner = strings.ToLower(strings.TrimSpace(subjectSigner))
+		if !isJSONArray(subject[1]) {
+			return nil, fmt.Errorf("invalid disconnected reporter list %d", i)
+		}
+		var reporters []json.RawMessage
+		if err := json.Unmarshal(subject[1], &reporters); err != nil {
+			return nil, fmt.Errorf("invalid disconnected reporter list %d", i)
+		}
+		for j, rawReporter := range reporters {
+			var reporter []json.RawMessage
+			if err := json.Unmarshal(rawReporter, &reporter); err != nil || len(reporter) != 2 {
+				return nil, fmt.Errorf("invalid disconnected reporter row %d/%d", i, j)
+			}
+			var reporterSigner string
+			var sinceRound int64
+			if err := json.Unmarshal(reporter[0], &reporterSigner); err != nil || strings.TrimSpace(reporterSigner) == "" {
+				return nil, fmt.Errorf("invalid reporter signer %d/%d", i, j)
+			}
+			if err := unmarshalRequiredJSON(reporter[1], &sinceRound); err != nil || sinceRound < 0 {
+				return nil, fmt.Errorf("invalid since_round %d/%d", i, j)
+			}
+			reporterSigner = strings.ToLower(strings.TrimSpace(reporterSigner))
+			key := subjectSigner + "\x00" + reporterSigner
+			if _, duplicate := seen[key]; duplicate {
+				return nil, fmt.Errorf("duplicate disconnected reporter pair")
+			}
+			seen[key] = struct{}{}
+			out = append(out, statusDisconnectedPair{SubjectSigner: subjectSigner, ReporterSigner: reporterSigner, SinceRound: sinceRound})
+		}
+	}
+	return out, nil
+}
 
-		// extract heartbeat metrics
-		if info.SinceLastSuccess > 0 {
-			metrics.SetValidatorHeartbeatStatus(valAddr, "since_last_success", info.SinceLastSuccess)
-		}
+func isJSONArray(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) >= 2 && trimmed[0] == '[' && trimmed[len(trimmed)-1] == ']'
+}
 
-		if info.LastAckDuration > 0 {
-			metrics.SetValidatorHeartbeatStatus(valAddr, "last_ack_duration", info.LastAckDuration)
+func (m *ConsensusMonitor) publishEligibleStatusSummaries(snapshot statusSnapshot) {
+	eligible, _ := metrics.GetAPIActiveAndUnjailedValidators()
+	eligibleSigners := make(map[string]struct{}, len(eligible))
+	for _, row := range eligible {
+		eligibleSigners[strings.ToLower(row.Signer)] = struct{}{}
+	}
+	if snapshot.MissingHeartbeatPresent {
+		count := 0
+		for _, signer := range snapshot.MissingHeartbeatSigners {
+			if _, ok := eligibleSigners[strings.ToLower(metrics.ExpandAddress(signer))]; ok {
+				count++
+			}
 		}
+		metrics.HLConsensusStatusEligibleSummary.WithLabelValues("missing_heartbeat").Set(float64(count))
+	} else {
+		metrics.HLConsensusStatusEligibleSummary.DeleteLabelValues("missing_heartbeat")
+	}
+	if snapshot.DisconnectedPresent {
+		disconnectedEligible := make(map[string]struct{})
+		for _, pair := range snapshot.Disconnected {
+			signer := strings.ToLower(metrics.ExpandAddress(pair.SubjectSigner))
+			if _, ok := eligibleSigners[signer]; ok {
+				disconnectedEligible[signer] = struct{}{}
+			}
+		}
+		metrics.HLConsensusStatusEligibleSummary.WithLabelValues("disconnected").Set(float64(len(disconnectedEligible)))
+	} else {
+		metrics.HLConsensusStatusEligibleSummary.DeleteLabelValues("disconnected")
 	}
 }

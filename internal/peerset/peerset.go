@@ -13,10 +13,9 @@ import (
 
 // Peer is one entry in the set.
 type Peer struct {
-	IP         string
-	FirstSeen  time.Time
-	LastSeen   time.Time
-	Directions map[string]struct{}
+	IP        string
+	FirstSeen time.Time
+	LastSeen  time.Time
 }
 
 // Set is the bounded peer-tracking data structure.
@@ -26,8 +25,9 @@ type Set struct {
 	cap   int
 	ttl   time.Duration
 
-	addedTotal   atomic.Uint64
-	evictedTotal atomic.Uint64
+	addedTotal atomic.Uint64
+	evictedTTL atomic.Uint64
+	evictedCap atomic.Uint64
 }
 
 // New builds an empty set with the given LRU cap and TTL.
@@ -62,21 +62,26 @@ func Default() *Set {
 	return defaultSet
 }
 
-// Register records that ip was seen in direction now. direction may be
-// "in", "out", or "" (unknown). Returns (evictedIP, true) if the set
+// Register records a qualified traffic-endpoint observation at now. The
+// direction argument is retained for source compatibility but deliberately
+// ignored: registry membership is not a directional or connectivity claim.
+// Returns (evictedIP, true) if the set
 // was at capacity and a peer was bumped to make room.
-func (s *Set) Register(ip, direction string, now time.Time) (string, bool) {
+func (s *Set) Register(ip, _ string, now time.Time) (string, bool) {
 	if ip == "" {
 		return "", false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Enforce TTL before either refreshing an existing entry or deciding that
+	// the set is at capacity. Otherwise a producer tick that wins scheduling
+	// just before the periodic publisher can revive an expired endpoint, or
+	// misclassify its removal as a capacity eviction.
+	s.evictExpiredLocked(now)
+
 	if p, ok := s.peers[ip]; ok {
 		p.LastSeen = now
-		if direction != "" {
-			p.Directions[direction] = struct{}{}
-		}
 		return "", false
 	}
 
@@ -84,15 +89,10 @@ func (s *Set) Register(ip, direction string, now time.Time) (string, bool) {
 	if len(s.peers) >= s.cap {
 		evicted = s.evictOldestLocked()
 	}
-	dirs := map[string]struct{}{}
-	if direction != "" {
-		dirs[direction] = struct{}{}
-	}
 	s.peers[ip] = &Peer{
-		IP:         ip,
-		FirstSeen:  now,
-		LastSeen:   now,
-		Directions: dirs,
+		IP:        ip,
+		FirstSeen: now,
+		LastSeen:  now,
 	}
 	s.addedTotal.Add(1)
 	return evicted, evicted != ""
@@ -101,9 +101,15 @@ func (s *Set) Register(ip, direction string, now time.Time) (string, bool) {
 // EvictExpired drops peers whose LastSeen is older than now - ttl.
 // Returns the evicted IPs so callers can clean per-IP metric series.
 func (s *Set) EvictExpired(now time.Time) []string {
-	cutoff := now.Add(-s.ttl)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.evictExpiredLocked(now)
+}
+
+// evictExpiredLocked applies the TTL boundary and accounts every removal as a
+// TTL eviction. The caller must hold s.mu.
+func (s *Set) evictExpiredLocked(now time.Time) []string {
+	cutoff := now.Add(-s.ttl)
 	var evicted []string
 	for ip, p := range s.peers {
 		if p.LastSeen.Before(cutoff) {
@@ -111,7 +117,8 @@ func (s *Set) EvictExpired(now time.Time) []string {
 			evicted = append(evicted, ip)
 		}
 	}
-	s.evictedTotal.Add(uint64(len(evicted)))
+	sort.Strings(evicted)
+	s.evictedTTL.Add(uint64(len(evicted)))
 	return evicted
 }
 
@@ -143,7 +150,20 @@ func (s *Set) AddedTotal() uint64 { return s.addedTotal.Load() }
 
 // EvictedTotal returns the cumulative count of evictions (both LRU and
 // TTL-driven).
-func (s *Set) EvictedTotal() uint64 { return s.evictedTotal.Load() }
+func (s *Set) EvictedTotal() uint64 { return s.evictedTTL.Load() + s.evictedCap.Load() }
+
+// EvictedByReason returns the monotonic process-local eviction total for one
+// fixed reason. Unknown reasons return zero.
+func (s *Set) EvictedByReason(reason string) uint64 {
+	switch reason {
+	case "ttl":
+		return s.evictedTTL.Load()
+	case "capacity":
+		return s.evictedCap.Load()
+	default:
+		return 0
+	}
+}
 
 // Snapshot returns a copy of every peer. Order is not specified.
 // Callers must treat the returned slice as read-only.
@@ -172,14 +192,14 @@ func (s *Set) evictOldestLocked() string {
 	var oldestTime time.Time
 	first := true
 	for ip, p := range s.peers {
-		if first || p.LastSeen.Before(oldestTime) {
+		if first || p.LastSeen.Before(oldestTime) || (p.LastSeen.Equal(oldestTime) && ip < oldestIP) {
 			oldestIP = ip
 			oldestTime = p.LastSeen
 			first = false
 		}
 	}
 	delete(s.peers, oldestIP)
-	s.evictedTotal.Add(1)
+	s.evictedCap.Add(1)
 	return oldestIP
 }
 
@@ -188,7 +208,10 @@ func (s *Set) evictOldestLocked() string {
 func (s *Set) SortedByLastSeen() []Peer {
 	out := s.Snapshot()
 	sort.Slice(out, func(i, j int) bool {
-		return out[i].LastSeen.After(out[j].LastSeen)
+		if !out[i].LastSeen.Equal(out[j].LastSeen) {
+			return out[i].LastSeen.After(out[j].LastSeen)
+		}
+		return out[i].IP < out[j].IP
 	})
 	return out
 }

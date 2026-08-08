@@ -3,6 +3,9 @@ package monitors
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -15,15 +18,27 @@ import (
 
 var hlResolver *hyperliquidapi.Resolver
 
+const validatorSummaryLimit = 500
+
 func StartValidatorMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
+	metrics.RegisterSource(metrics.SourceValidatorAPI, true)
 	// init HL resolver
-	hlResolver = hyperliquidapi.NewResolver(cfg.Chain)
+	resolver, err := hyperliquidapi.NewResolver(cfg.Chain)
+	if err != nil {
+		ReportError(ctx, "validator_api", errCh, fmt.Errorf("validator API resolver: %w", err))
+		return
+	}
+	resolver.SetValidatorSummariesValidator(func(summaries []hyperliquidapi.ValidatorSummary) error {
+		_, err := validateValidatorSummaries(summaries)
+		return err
+	})
+	hlResolver = resolver
 
 	goSafe("validator_api", func() {
 		// run immediately on startup to populate mappings
 		if err := updateValidatorMetrics(ctx, cfg); err != nil {
 			logger.Error("Initial validator monitor update error: %v", err)
-			errCh <- err
+			ReportError(ctx, "validator_api", errCh, err)
 		}
 
 		ticker := time.NewTicker(5 * time.Minute)
@@ -36,7 +51,7 @@ func StartValidatorMonitor(ctx context.Context, cfg config.Config, errCh chan<- 
 			case <-ticker.C:
 				if err := updateValidatorMetrics(ctx, cfg); err != nil {
 					logger.Error("Validator monitor error: %v", err)
-					errCh <- err
+					ReportError(ctx, "validator_api", errCh, err)
 				}
 			}
 		}
@@ -44,69 +59,146 @@ func StartValidatorMonitor(ctx context.Context, cfg config.Config, errCh chan<- 
 }
 
 func updateValidatorMetrics(ctx context.Context, cfg config.Config) error {
+	metrics.MarkSourceAttempt(metrics.SourceValidatorAPI)
 	// use resolver to get val summaries
-	summaries, err := hlResolver.GetValidatorSummaries(ctx, false)
+	result, err := hlResolver.GetValidatorSummaries(ctx, false)
 	if err != nil {
+		metrics.HLValidatorAPIUp.Set(0)
+		metrics.HLValidatorAPICacheStale.Set(0)
+		metrics.HLValidatorAPIOutcomesTotal.WithLabelValues(metrics.ValidatorAPIOutcomeError).Inc()
+		metrics.MarkSourceError(metrics.SourceValidatorAPI, validatorAPIFailureStage(err))
 		return err
 	}
+	if result.Stale {
+		updateValidatorAPICacheAge(result.LastSuccess)
+		metrics.HLValidatorAPIUp.Set(0)
+		metrics.HLValidatorAPICacheStale.Set(1)
+		metrics.HLValidatorAPIOutcomesTotal.WithLabelValues(metrics.ValidatorAPIOutcomeStaleFallback).Inc()
+		metrics.MarkSourceError(metrics.SourceValidatorAPI, validatorAPIFailureStage(result.RefreshError))
+		return fmt.Errorf("validator API refresh failed; retained stale cache from %s: %w",
+			result.LastSuccess.Format(time.RFC3339), result.RefreshError)
+	}
+	metrics.HLValidatorAPICacheStale.Set(0)
 
-	totalStake := 0.0
-	jailedStake := 0.0
-	notJailedStake := 0.0
-	activeStake := 0.0
-	inactiveStake := 0.0
+	snapshot, err := validateValidatorSummaries(result.Summaries)
+	if err != nil {
+		metrics.HLValidatorAPIUp.Set(0)
+		metrics.HLValidatorAPIOutcomesTotal.WithLabelValues(metrics.ValidatorAPIOutcomeError).Inc()
+		metrics.MarkSourceError(metrics.SourceValidatorAPI, metrics.SourceFailureSchema)
+		return err
+	}
+	updateValidatorAPICacheAge(result.LastSuccess)
+	if result.FromCache {
+		metrics.HLValidatorAPIOutcomesTotal.WithLabelValues(metrics.ValidatorAPIOutcomeFreshCache).Inc()
+		return nil
+	}
+	metrics.HLValidatorAPIUp.Set(1)
+	metrics.HLValidatorAPIOutcomesTotal.WithLabelValues(metrics.ValidatorAPIOutcomeRefreshSuccess).Inc()
+	if !result.LastSuccess.IsZero() {
+		metrics.HLValidatorAPILastSuccessSeconds.Set(float64(result.LastSuccess.Unix()))
+	}
 
-	snapshot := make([]metrics.ValidatorSummarySnapshot, 0, len(summaries))
-
-	for _, summary := range summaries {
-		// register signer->val mapping (lowercase for consistency)
-		metrics.RegisterSignerMapping(strings.ToLower(summary.Signer), strings.ToLower(summary.Validator))
-
-		// register the full validator addr for expansion
+	for _, summary := range result.Summaries {
 		metrics.RegisterFullAddress(strings.ToLower(summary.Validator))
-		// also register the signer addr for expansion (consensus logs use signer addrss)
 		metrics.RegisterFullAddress(strings.ToLower(summary.Signer))
+	}
+	// The registry, row gauges, and all row-derived aggregates commit as one
+	// generation under the metrics lock. Register full identities first so
+	// truncated vote/QC observations can reconcile in this same generation.
+	metrics.ReplaceValidatorSnapshot(snapshot)
+	reconcileValidatorExtras(result.Summaries)
+	metrics.MarkSourceValidObservation(metrics.SourceValidatorAPI, time.Time{})
+	metrics.MarkSourcePublication(metrics.SourceValidatorAPI)
 
-		// register val info (signer and name) for consensus metrics
-		metrics.RegisterValidatorInfo(strings.ToLower(summary.Validator), strings.ToLower(summary.Signer), summary.Name)
+	metrics.MarkMonitorTick("validator_api")
+	return nil
+}
 
-		snapshot = append(snapshot, metrics.ValidatorSummarySnapshot{
-			Validator: summary.Validator,
-			Signer:    summary.Signer,
+func updateValidatorAPICacheAge(lastSuccess time.Time) {
+	if lastSuccess.IsZero() {
+		return
+	}
+	age := time.Since(lastSuccess).Seconds()
+	if age < 0 {
+		age = 0
+	}
+	metrics.HLValidatorAPICacheAgeSeconds.Set(age)
+}
+
+func validatorAPIFailureStage(err error) metrics.SourceFailureStage {
+	var callErr *hyperliquidapi.CallError
+	if !errors.As(err, &callErr) {
+		return metrics.SourceFailureRequest
+	}
+	switch callErr.Stage {
+	case hyperliquidapi.FailureStatus:
+		return metrics.SourceFailureStatus
+	case hyperliquidapi.FailureRead:
+		return metrics.SourceFailureRead
+	case hyperliquidapi.FailureDecode:
+		return metrics.SourceFailureDecode
+	case hyperliquidapi.FailureSchema:
+		return metrics.SourceFailureSchema
+	default:
+		return metrics.SourceFailureRequest
+	}
+}
+
+func validateValidatorSummaries(summaries []hyperliquidapi.ValidatorSummary) ([]metrics.ValidatorSummarySnapshot, error) {
+	if summaries == nil {
+		return nil, fmt.Errorf("validator summaries response is null")
+	}
+	if len(summaries) > validatorSummaryLimit {
+		return nil, fmt.Errorf("validator summary count %d exceeds limit %d", len(summaries), validatorSummaryLimit)
+	}
+	validators := make(map[string]struct{}, len(summaries))
+	signers := make(map[string]struct{}, len(summaries))
+	out := make([]metrics.ValidatorSummarySnapshot, 0, len(summaries))
+	for i, summary := range summaries {
+		validator := strings.ToLower(strings.TrimSpace(summary.Validator))
+		signer := strings.ToLower(strings.TrimSpace(summary.Signer))
+		if !isFullHexAddress(validator) || !isFullHexAddress(signer) {
+			return nil, fmt.Errorf("validator summary row %d has invalid identity", i)
+		}
+		if _, duplicate := validators[validator]; duplicate {
+			return nil, fmt.Errorf("validator summary row %d duplicates validator", i)
+		}
+		if _, duplicate := signers[signer]; duplicate {
+			return nil, fmt.Errorf("validator summary row %d duplicates signer", i)
+		}
+		if math.IsNaN(summary.Stake) || math.IsInf(summary.Stake, 0) || summary.Stake < 0 {
+			return nil, fmt.Errorf("validator summary row %d has invalid stake", i)
+		}
+		if summary.UnjailableAfter < 0 || summary.NRecentBlocks < 0 {
+			return nil, fmt.Errorf("validator summary row %d has invalid nonnegative field", i)
+		}
+		if _, err := parseSummaryStatsStrict(summary.Stats); err != nil {
+			return nil, fmt.Errorf("validator summary row %d: %w", i, err)
+		}
+		validators[validator] = struct{}{}
+		signers[signer] = struct{}{}
+		out = append(out, metrics.ValidatorSummarySnapshot{
+			Validator: validator,
+			Signer:    signer,
 			Name:      summary.Name,
 			Stake:     summary.Stake,
 			Jailed:    summary.IsJailed,
 			Active:    summary.IsActive,
 		})
-
-		if summary.IsJailed {
-			jailedStake += summary.Stake
-		} else {
-			notJailedStake += summary.Stake
-		}
-		if summary.IsActive {
-			activeStake += summary.Stake
-		} else {
-			inactiveStake += summary.Stake
-		}
-		totalStake += summary.Stake
 	}
+	return out, nil
+}
 
-	// reconcile the per-validator gauges as one snapshot so validators that
-	// left the set are removed instead of freezing at their last value
-	metrics.ReplaceValidatorSummaries(snapshot)
-	reconcileValidatorExtras(summaries)
-
-	// update aggregate metrics
-	metrics.SetTotalStake(totalStake)
-	metrics.SetJailedStake(jailedStake)
-	metrics.SetNotJailedStake(notJailedStake)
-	metrics.SetActiveStake(activeStake)
-	metrics.SetInactiveStake(inactiveStake)
-	metrics.SetValidatorCount(int64(len(summaries)))
-
-	metrics.MarkMonitorTick("validator_api")
-	return nil
+func isFullHexAddress(s string) bool {
+	if len(s) != 42 || !strings.HasPrefix(s, "0x") {
+		return false
+	}
+	for _, c := range s[2:] {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 // returns the HL resolver instance
@@ -117,13 +209,19 @@ func GetValidatorResolver() *hyperliquidapi.Resolver {
 // summaryPeriods is the fixed period set validatorSummaries stats carry.
 var summaryPeriods = []string{"day", "week", "month"}
 
-// prevExtraLabels tracks the label sets currently published on the extras
-// vectors so validators leaving the set (or unjailing) get their series
-// deleted. Single-goroutine access from the API monitor.
-var (
-	prevExtraLabels = map[string][3]string{}
-	prevUnjailable  = map[string][3]string{}
-)
+var summaryPeriodIndex = map[string]int{"day": 0, "week": 1, "month": 2}
+
+// prevExtraState tracks exactly which optional series were present in the
+// last complete validator snapshot. Single-goroutine access from the API
+// monitor.
+var prevExtraState = map[string]validatorExtraState{}
+
+type validatorExtraState struct {
+	labels      [3]string
+	commission  bool
+	unjailable  bool
+	uptime, apr [3]bool
+}
 
 // reconcileValidatorExtras publishes the validatorSummaries facts beyond
 // stake/status: recent blocks proposed, commission, the unjail timestamp
@@ -131,23 +229,25 @@ var (
 // decoded and discarded even though unjailableAfter is the number an
 // operator actually needs mid-incident.
 func reconcileValidatorExtras(summaries []hyperliquidapi.ValidatorSummary) {
-	current := make(map[string][3]string, len(summaries))
-	currentJailed := make(map[string][3]string)
+	current := make(map[string]validatorExtraState, len(summaries))
 
 	for _, summary := range summaries {
-		labels := [3]string{summary.Validator, summary.Signer, summary.Name}
-		current[summary.Validator] = labels
+		validator := strings.ToLower(strings.TrimSpace(summary.Validator))
+		signer := strings.ToLower(strings.TrimSpace(summary.Signer))
+		labels := [3]string{validator, signer, summary.Name}
+		state := validatorExtraState{labels: labels}
 
 		metrics.HLConsensusValidatorRecentBlocks.
 			WithLabelValues(labels[0], labels[1], labels[2]).Set(float64(summary.NRecentBlocks))
 
-		if v, err := strconv.ParseFloat(summary.Commission, 64); err == nil {
+		if v, ok := parseFiniteFloat(summary.Commission); ok {
 			metrics.HLConsensusValidatorCommissionRate.
 				WithLabelValues(labels[0], labels[1], labels[2]).Set(v)
+			state.commission = true
 		}
 
 		if summary.IsJailed && summary.UnjailableAfter > 0 {
-			currentJailed[summary.Validator] = labels
+			state.unjailable = true
 			// the API reports milliseconds since epoch
 			metrics.HLConsensusValidatorUnjailableAfter.
 				WithLabelValues(labels[0], labels[1], labels[2]).Set(float64(summary.UnjailableAfter) / 1000.0)
@@ -157,34 +257,48 @@ func reconcileValidatorExtras(summaries []hyperliquidapi.ValidatorSummary) {
 			if ps.hasUptime {
 				metrics.HLConsensusValidatorUptimeFraction.
 					WithLabelValues(labels[0], labels[1], labels[2], ps.period).Set(ps.uptime)
+				state.uptime[summaryPeriodIndex[ps.period]] = true
 			}
 			if ps.hasApr {
 				metrics.HLConsensusValidatorPredictedApr.
 					WithLabelValues(labels[0], labels[1], labels[2], ps.period).Set(ps.apr)
+				state.apr[summaryPeriodIndex[ps.period]] = true
+			}
+		}
+		current[validator] = state
+	}
+
+	for validator, previous := range prevExtraState {
+		// drop old series when the validator left OR its label set changed
+		// (a renamed moniker would otherwise leak the old-name series)
+		cur, exists := current[validator]
+		labels := previous.labels
+		if !exists || cur.labels != labels {
+			metrics.HLConsensusValidatorRecentBlocks.DeleteLabelValues(labels[0], labels[1], labels[2])
+			metrics.HLConsensusValidatorCommissionRate.DeleteLabelValues(labels[0], labels[1], labels[2])
+			metrics.HLConsensusValidatorUnjailableAfter.DeleteLabelValues(labels[0], labels[1], labels[2])
+			for _, period := range summaryPeriods {
+				metrics.HLConsensusValidatorUptimeFraction.DeleteLabelValues(labels[0], labels[1], labels[2], period)
+				metrics.HLConsensusValidatorPredictedApr.DeleteLabelValues(labels[0], labels[1], labels[2], period)
+			}
+			continue
+		}
+		if previous.commission && !cur.commission {
+			metrics.HLConsensusValidatorCommissionRate.DeleteLabelValues(labels[0], labels[1], labels[2])
+		}
+		if previous.unjailable && !cur.unjailable {
+			metrics.HLConsensusValidatorUnjailableAfter.DeleteLabelValues(labels[0], labels[1], labels[2])
+		}
+		for i, period := range summaryPeriods {
+			if previous.uptime[i] && !cur.uptime[i] {
+				metrics.HLConsensusValidatorUptimeFraction.DeleteLabelValues(labels[0], labels[1], labels[2], period)
+			}
+			if previous.apr[i] && !cur.apr[i] {
+				metrics.HLConsensusValidatorPredictedApr.DeleteLabelValues(labels[0], labels[1], labels[2], period)
 			}
 		}
 	}
-
-	for validator, labels := range prevExtraLabels {
-		// drop old series when the validator left OR its label set changed
-		// (a renamed moniker would otherwise leak the old-name series)
-		if cur, ok := current[validator]; ok && cur == labels {
-			continue
-		}
-		metrics.HLConsensusValidatorRecentBlocks.DeleteLabelValues(labels[0], labels[1], labels[2])
-		metrics.HLConsensusValidatorCommissionRate.DeleteLabelValues(labels[0], labels[1], labels[2])
-		for _, period := range summaryPeriods {
-			metrics.HLConsensusValidatorUptimeFraction.DeleteLabelValues(labels[0], labels[1], labels[2], period)
-			metrics.HLConsensusValidatorPredictedApr.DeleteLabelValues(labels[0], labels[1], labels[2], period)
-		}
-	}
-	for validator, labels := range prevUnjailable {
-		if cur, ok := currentJailed[validator]; !ok || cur != labels {
-			metrics.HLConsensusValidatorUnjailableAfter.DeleteLabelValues(labels[0], labels[1], labels[2])
-		}
-	}
-	prevExtraLabels = current
-	prevUnjailable = currentJailed
+	prevExtraState = current
 }
 
 type summaryPeriodStat struct {
@@ -194,30 +308,73 @@ type summaryPeriodStat struct {
 }
 
 func parseSummaryStats(raw [][]json.RawMessage) []summaryPeriodStat {
-	out := make([]summaryPeriodStat, 0, len(raw))
+	out, err := parseSummaryStatsStrict(raw)
+	if err != nil {
+		return nil
+	}
 	for _, pair := range raw {
 		if len(pair) != 2 {
 			continue
 		}
 		var period string
+		if json.Unmarshal(pair[0], &period) == nil && period != "" {
+			if _, ok := summaryPeriodIndex[period]; !ok {
+				metrics.HLValidatorAPIUnknownPeriodsTotal.Inc()
+			}
+		}
+	}
+	return out
+}
+
+func parseSummaryStatsStrict(raw [][]json.RawMessage) ([]summaryPeriodStat, error) {
+	out := make([]summaryPeriodStat, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for i, pair := range raw {
+		if len(pair) != 2 {
+			return nil, fmt.Errorf("stats pair %d has length %d", i, len(pair))
+		}
+		var period string
 		if json.Unmarshal(pair[0], &period) != nil || period == "" {
+			return nil, fmt.Errorf("stats pair %d has invalid period", i)
+		}
+		if _, ok := summaryPeriodIndex[period]; !ok {
 			continue
 		}
+		if _, duplicate := seen[period]; duplicate {
+			return nil, fmt.Errorf("stats pair %d duplicates period %s", i, period)
+		}
+		seen[period] = struct{}{}
 		var body struct {
 			UptimeFraction string `json:"uptimeFraction"`
 			PredictedApr   string `json:"predictedApr"`
 		}
+		var bodyObject map[string]json.RawMessage
+		if err := unmarshalRequiredJSON(pair[1], &bodyObject); err != nil || bodyObject == nil {
+			return nil, fmt.Errorf("stats pair %d has invalid body", i)
+		}
 		if json.Unmarshal(pair[1], &body) != nil {
-			continue
+			return nil, fmt.Errorf("stats pair %d has invalid body", i)
 		}
 		ps := summaryPeriodStat{period: period}
-		if v, err := strconv.ParseFloat(body.UptimeFraction, 64); err == nil {
-			ps.uptime, ps.hasUptime = v, true
+		if body.UptimeFraction != "" {
+			if v, ok := parseFiniteFloat(body.UptimeFraction); ok {
+				ps.uptime, ps.hasUptime = v, true
+			}
 		}
-		if v, err := strconv.ParseFloat(body.PredictedApr, 64); err == nil {
-			ps.apr, ps.hasApr = v, true
+		if body.PredictedApr != "" {
+			if v, ok := parseFiniteFloat(body.PredictedApr); ok {
+				ps.apr, ps.hasApr = v, true
+			}
 		}
 		out = append(out, ps)
 	}
-	return out
+	return out, nil
+}
+
+func parseFiniteFloat(raw string) (float64, bool) {
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, false
+	}
+	return v, true
 }

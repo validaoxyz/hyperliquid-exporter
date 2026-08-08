@@ -68,3 +68,14 @@ func TestParseCritLocationsFile_Empty(t *testing.T) {
 		t.Errorf("want 0 stats on empty doc, got %d", len(rich.Stats))
 	}
 }
+
+func TestParseCritRichSnapshotRejectsRequiredNulls(t *testing.T) {
+	for _, doc := range []string{
+		`{"start_time":"2026-08-08T00:00:00","n_bugs":null,"n_crits":0,"code_location_and_stats":[]}`,
+		`{"start_time":"2026-08-08T00:00:00","n_bugs":0,"n_crits":0,"code_location_and_stats":[[{"fln":"a.rs","line":1},{"n":1,"is_ignored":null,"first_seen":"2026-08-08T00:00:00","last_seen":"2026-08-08T00:00:00"}]]}`,
+	} {
+		if _, err := parseCritRichSnapshot([]byte(doc)); err == nil {
+			t.Fatalf("required null accepted: %s", doc)
+		}
+	}
+}

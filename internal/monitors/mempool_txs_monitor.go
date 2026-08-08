@@ -2,12 +2,14 @@ package monitors
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/validaoxyz/hyperliquid-exporter/internal/actiontypes"
@@ -32,6 +34,10 @@ type mempoolTxSignedAction struct {
 	Action mempoolTxAction `json:"action"`
 }
 
+type mempoolTxSignedActionEnvelope struct {
+	Action json.RawMessage `json:"action"`
+}
+
 type mempoolTxAction struct {
 	Type     string            `json:"type"`
 	Orders   []mempoolTxOrder  `json:"orders,omitempty"`
@@ -42,6 +48,116 @@ type mempoolTxAction struct {
 
 type mempoolTxModify struct {
 	Order *mempoolTxOrder `json:"order,omitempty"`
+}
+
+type rawMempoolTxAction struct {
+	Type     json.RawMessage `json:"type"`
+	Orders   json.RawMessage `json:"orders"`
+	Cancels  json.RawMessage `json:"cancels"`
+	Modifies json.RawMessage `json:"modifies"`
+	Order    json.RawMessage `json:"order"`
+}
+
+func (a *mempoolTxAction) UnmarshalJSON(data []byte) error {
+	var raw rawMempoolTxAction
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	var actionType string
+	if err := unmarshalRequiredJSON(raw.Type, &actionType); err != nil || strings.TrimSpace(actionType) == "" {
+		return errors.New("action type must be a non-empty string")
+	}
+	*a = mempoolTxAction{Type: actionType}
+
+	var err error
+	switch actionType {
+	case "order":
+		a.Orders, err = decodeMempoolTxOrders(raw.Orders)
+	case "cancel", "cancelByCloid":
+		a.Cancels, err = decodeMempoolTxCancels(raw.Cancels)
+	case "batchModify":
+		a.Modifies, err = decodeMempoolTxModifies(raw.Modifies)
+	case "modify":
+		var order mempoolTxOrder
+		if !rawJSONObject(raw.Order) {
+			return errors.New("modify order must be an object")
+		}
+		if err := json.Unmarshal(raw.Order, &order); err != nil {
+			return err
+		}
+		a.Order = &order
+	default:
+		// Scalar and future action types count as one operation. Fields owned by
+		// another action shape are deliberately ignored and cannot skew counts or
+		// emit order labels.
+	}
+	return err
+}
+
+func decodeMempoolTxOrders(raw json.RawMessage) ([]mempoolTxOrder, error) {
+	if !rawJSONArray(raw) {
+		return nil, errors.New("orders must be an array")
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, err
+	}
+	orders := make([]mempoolTxOrder, 0, len(items))
+	for _, item := range items {
+		if !rawJSONObject(item) {
+			return nil, errors.New("order must be an object")
+		}
+		var order mempoolTxOrder
+		if err := json.Unmarshal(item, &order); err != nil {
+			return nil, err
+		}
+		orders = append(orders, order)
+	}
+	return orders, nil
+}
+
+func decodeMempoolTxCancels(raw json.RawMessage) ([]json.RawMessage, error) {
+	if !rawJSONArray(raw) {
+		return nil, errors.New("cancels must be an array")
+	}
+	var cancels []json.RawMessage
+	if err := json.Unmarshal(raw, &cancels); err != nil {
+		return nil, err
+	}
+	for _, cancel := range cancels {
+		if !rawJSONObject(cancel) {
+			return nil, errors.New("cancel must be an object")
+		}
+	}
+	return cancels, nil
+}
+
+func decodeMempoolTxModifies(raw json.RawMessage) ([]mempoolTxModify, error) {
+	if !rawJSONArray(raw) {
+		return nil, errors.New("modifies must be an array")
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, err
+	}
+	modifies := make([]mempoolTxModify, 0, len(items))
+	for _, item := range items {
+		if !rawJSONObject(item) {
+			return nil, errors.New("modify must be an object")
+		}
+		var rawModify struct {
+			Order json.RawMessage `json:"order"`
+		}
+		if err := json.Unmarshal(item, &rawModify); err != nil || !rawJSONObject(rawModify.Order) {
+			return nil, errors.New("batch modify order must be an object")
+		}
+		var order mempoolTxOrder
+		if err := json.Unmarshal(rawModify.Order, &order); err != nil {
+			return nil, err
+		}
+		modifies = append(modifies, mempoolTxModify{Order: &order})
+	}
+	return modifies, nil
 }
 
 type mempoolTxOrder struct {
@@ -180,7 +296,7 @@ func parseMempoolTxsLineDetailed(line []byte) (mempoolTxParsedLine, string, bool
 		return mempoolTxParsedLine{}, "invalid_envelope", false
 	}
 	var tsStr string
-	if err := json.Unmarshal(outer[0], &tsStr); err != nil {
+	if err := unmarshalRequiredJSON(outer[0], &tsStr); err != nil {
 		return mempoolTxParsedLine{}, "invalid_timestamp", false
 	}
 	ts, ok := parseVisorTime(tsStr)
@@ -192,12 +308,33 @@ func parseMempoolTxsLineDetailed(line []byte) (mempoolTxParsedLine, string, bool
 	if err := json.Unmarshal(outer[1], &payload); err != nil {
 		return mempoolTxParsedLine{}, "invalid_payload", false
 	}
-	if len(payload.SignedActions) == 0 || string(payload.SignedActions) == "null" {
+	if len(payload.SignedActions) == 0 || bytes.Equal(bytes.TrimSpace(payload.SignedActions), []byte("null")) {
 		return mempoolTxParsedLine{}, "missing_signed_actions", false
 	}
-	var signedActions []mempoolTxSignedAction
-	if err := json.Unmarshal(payload.SignedActions, &signedActions); err != nil {
+	if !rawJSONArray(payload.SignedActions) {
 		return mempoolTxParsedLine{}, "invalid_signed_actions", false
+	}
+	var rawSignedActions []json.RawMessage
+	if err := json.Unmarshal(payload.SignedActions, &rawSignedActions); err != nil {
+		return mempoolTxParsedLine{}, "invalid_signed_actions", false
+	}
+	if len(rawSignedActions) == 0 {
+		return mempoolTxParsedLine{}, "invalid_signed_actions", false
+	}
+	signedActions := make([]mempoolTxSignedAction, 0, len(rawSignedActions))
+	for _, raw := range rawSignedActions {
+		if !rawJSONObject(raw) {
+			return mempoolTxParsedLine{}, "invalid_signed_action", false
+		}
+		var envelope mempoolTxSignedActionEnvelope
+		if err := unmarshalRequiredJSON(raw, &envelope); err != nil || !rawJSONObject(envelope.Action) {
+			return mempoolTxParsedLine{}, "invalid_signed_action", false
+		}
+		var action mempoolTxAction
+		if err := unmarshalRequiredJSON(envelope.Action, &action); err != nil {
+			return mempoolTxParsedLine{}, "invalid_signed_action", false
+		}
+		signedActions = append(signedActions, mempoolTxSignedAction{Action: action})
 	}
 
 	stats := mempoolTxParsedLine{
@@ -275,14 +412,14 @@ func mempoolTxActionTypeLabel(actionType string) (string, bool) {
 }
 
 func mempoolTxOperationCount(action mempoolTxAction) int {
-	switch {
-	case len(action.Orders) > 0:
+	switch action.Type {
+	case "order":
 		return len(action.Orders)
-	case len(action.Cancels) > 0:
+	case "cancel", "cancelByCloid":
 		return len(action.Cancels)
-	case len(action.Modifies) > 0:
+	case "batchModify":
 		return len(action.Modifies)
-	case action.Order != nil:
+	case "modify":
 		return 1
 	default:
 		return 1

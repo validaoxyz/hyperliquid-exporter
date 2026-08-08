@@ -3,6 +3,8 @@ package monitors
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
 func TestStatusStakeRowsLegacyArray(t *testing.T) {
@@ -45,7 +47,79 @@ func TestStatusStakeRowsGarbage(t *testing.T) {
 	}
 }
 
+func TestDecodeStatusStakeRowsRejectsNullAndMalformedRows(t *testing.T) {
+	for _, raw := range []string{
+		`null`,
+		`{"validator_to_stake":null}`,
+		`[null]`,
+		`[["0x1111111111111111111111111111111111111111"]]`,
+		`[[null,1]]`,
+		`[["0x1111111111111111111111111111111111111111",null]]`,
+	} {
+		if _, err := decodeStatusStakeRows(json.RawMessage(raw)); err == nil {
+			t.Fatalf("invalid current_stakes accepted: %s", raw)
+		}
+	}
+
+	for _, raw := range []string{
+		`[]`,
+		`{"validator_to_stake":[]}`,
+		`[["0x1111111111111111111111111111111111111111",0]]`,
+		`[["0x1111111111111111111111111111111111111111","0x2222222222222222222222222222222222222222"]]`,
+	} {
+		if _, err := decodeStatusStakeRows(json.RawMessage(raw)); err != nil {
+			t.Fatalf("valid current_stakes rejected: %s: %v", raw, err)
+		}
+	}
+}
+
+func TestParseValidatorStatusLineRejectsNullRequiredFields(t *testing.T) {
+	const timestamp = `"2026-07-04T08:00:00.000000000"`
+	const home = `"0x2222222222222222222222222222222222222222"`
+	validBody := `{"home_validator":` + home + `,"round":1,"current_stakes":[],"current_jailed_validators":[]}`
+	for name, line := range map[string]string{
+		"timestamp":           `[null,` + validBody + `]`,
+		"body":                `[` + timestamp + `,null]`,
+		"home_validator":      `[` + timestamp + `,{"home_validator":null,"round":1,"current_stakes":[],"current_jailed_validators":[]}]`,
+		"round":               `[` + timestamp + `,{"home_validator":` + home + `,"round":null,"current_stakes":[],"current_jailed_validators":[]}]`,
+		"current_stakes":      `[` + timestamp + `,{"home_validator":` + home + `,"round":1,"current_stakes":null,"current_jailed_validators":[]}]`,
+		"wrapped stakes":      `[` + timestamp + `,{"home_validator":` + home + `,"round":1,"current_stakes":{"validator_to_stake":null},"current_jailed_validators":[]}]`,
+		"jailed validators":   `[` + timestamp + `,{"home_validator":` + home + `,"round":1,"current_stakes":[],"current_jailed_validators":null}]`,
+		"null stake row":      `[` + timestamp + `,{"home_validator":` + home + `,"round":1,"current_stakes":[null],"current_jailed_validators":[]}]`,
+		"null stake identity": `[` + timestamp + `,{"home_validator":` + home + `,"round":1,"current_stakes":[[null,1]],"current_jailed_validators":[]}]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseValidatorStatusLine(line); err == nil {
+				t.Fatalf("accepted null %s: %s", name, line)
+			}
+		})
+	}
+
+	if parsed, err := parseValidatorStatusLine(`[` + timestamp + `,{"home_validator":` + home + `,"round":0,"current_stakes":[]}]`); err != nil || parsed.Round != 0 || parsed.JailedFieldPresent {
+		t.Fatalf("valid zero/omitted optional field rejected: %+v, %v", parsed, err)
+	}
+}
+
+func TestNullJailedSetDoesNotReconcilePreviousGeneration(t *testing.T) {
+	oldJailed := jailedLocalPrev
+	const signer = "0x1111111111111111111111111111111111111111"
+	labels := [3]string{"validator", signer, "name"}
+	jailedLocalPrev = map[string][3]string{signer: labels}
+	t.Cleanup(func() { jailedLocalPrev = oldJailed })
+
+	line := `[` + `"2026-07-04T08:00:00.000000000"` + `,{"home_validator":"0x2222222222222222222222222222222222222222","round":1,"current_stakes":[],"current_jailed_validators":null}]`
+	if err := processValidatorStatusLine(line); err == nil {
+		t.Fatal("null jailed set was accepted")
+	}
+	if got, ok := jailedLocalPrev[signer]; !ok || got != labels || len(jailedLocalPrev) != 1 {
+		t.Fatalf("invalid status reconciled previous jailed generation: %v", jailedLocalPrev)
+	}
+}
+
 func TestProcessValidatorStatusLineNewSchema(t *testing.T) {
+	oldJailed := jailedLocalPrev
+	jailedLocalPrev = make(map[string][3]string)
+	t.Cleanup(func() { jailedLocalPrev = oldJailed })
 	line := `["2026-07-04T08:00:00.000000000",{"home_validator":"0x2222222222222222222222222222222222222222","round":770617293,` +
 		`"current_stakes":{"validator_to_stake":[["0x1111111111111111111111111111111111111111",9],["0x3333333333333333333333333333333333333333",652]]},` +
 		`"current_jailed_validators":["0x1111111111111111111111111111111111111111"],` +
@@ -53,8 +127,15 @@ func TestProcessValidatorStatusLineNewSchema(t *testing.T) {
 	if err := processValidatorStatusLine(line); err != nil {
 		t.Fatalf("new-schema status line failed to parse: %v", err)
 	}
-	if !jailedLocalPrev["0x1111111111111111111111111111111111111111"] {
+	if _, ok := jailedLocalPrev["0x1111111111111111111111111111111111111111"]; !ok {
 		t.Fatal("jailed-local set was not published from new-schema line")
+	}
+	if !validatorCollectorHasLabels(metrics.HLConsensusValidatorJailedLocal, map[string]string{
+		"validator": "unknown",
+		"signer":    "0x1111111111111111111111111111111111111111",
+		"name":      "unknown",
+	}) {
+		t.Fatal("node-local jailed signer was not published with explicit identity kind")
 	}
 	// unjail everyone: set must clear
 	line2 := `["2026-07-04T08:02:00.000000000",{"home_validator":"0x2222222222222222222222222222222222222222","round":770617400,` +
@@ -68,9 +149,18 @@ func TestProcessValidatorStatusLineNewSchema(t *testing.T) {
 }
 
 func TestProcessValidatorStatusLineLegacySchema(t *testing.T) {
+	oldJailed := jailedLocalPrev
+	const priorSigner = "0x1111111111111111111111111111111111111111"
+	priorLabels := [3]string{"validator", priorSigner, "name"}
+	jailedLocalPrev = map[string][3]string{priorSigner: priorLabels}
+	t.Cleanup(func() { jailedLocalPrev = oldJailed })
+
 	line := `["2026-07-04T08:00:00.000000000",{"home_validator":"0x4444444444444444444444444444444444444444","round":1,` +
 		`"current_stakes":[["0x3333333333333333333333333333333333333333","0x4444444444444444444444444444444444444444"]]}]`
 	if err := processValidatorStatusLine(line); err != nil {
 		t.Fatalf("legacy status line failed to parse: %v", err)
+	}
+	if got, ok := jailedLocalPrev[priorSigner]; !ok || got != priorLabels || len(jailedLocalPrev) != 1 {
+		t.Fatalf("omitted legacy jailed field impersonated empty: %v", jailedLocalPrev)
 	}
 }

@@ -3,10 +3,17 @@ package monitors
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"math"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
@@ -15,292 +22,648 @@ import (
 )
 
 const (
-	tcpLz4PollInterval = 60 * time.Second
-	tcpLz4TopN         = 16
+	tcpLz4PollInterval  = 60 * time.Second
+	tcpLz4TopN          = 16
+	tcpLz4PairTolerance = 5 * time.Second
+	tcpLz4IdentityTTL   = 10 * time.Minute
+	maxLz4LinesToScan   = 64
 )
 
-// lz4PeerSample is one peer row from the latest line.
 type lz4PeerSample struct {
-	direction string // "in" / "out"
+	direction string
 	ip        string
+	port      uint16
 	bytes     int64
 	packets   int64
 	ratio     float64
 }
 
-// StartTCPLz4Monitor watches $NODE_HOME/data/tcp_lz4_stats/<YYYYMMDD>.
-//
-// hl-node writes the file every 5 minutes (300 s sample windows), so a
-// 60-second poll is more than enough; we only re-parse when the file's
-// mtime changed.
-//
-// Each tick yields two records (microseconds apart on the same
-// timestamp):
-//   - a peer-level array:  [ts, [[[dir, ip, port], bytes, packets, ratio], ...]]
-//   - a global aggregate:  [ts, [bytes, packets, ratio]]
-//
-// We take the most recent of each. Per-peer cardinality is capped at
-// tcpLz4TopN per direction with an ip="other" rollup, mirroring the
-// pattern in tcp_traffic_monitor.
+type lz4PeerRecord struct {
+	timestamp time.Time
+	peers     []lz4PeerSample
+}
+
+type lz4GlobalRecord struct {
+	timestamp time.Time
+	bytes     int64
+	packets   int64
+	ratio     float64
+}
+
+type lz4Pair struct {
+	peer   lz4PeerRecord
+	global lz4GlobalRecord
+}
+
+type lz4MonitorState struct {
+	lastPairKey       string
+	lastReceipt       time.Time
+	previousSource    time.Time
+	prevPublished     map[string]map[string]bool
+	identitiesExpired bool
+	servicePorts      []uint16
+}
+
+func newLz4MonitorState(configured ...[]uint16) *lz4MonitorState {
+	ports := tcpListenPorts
+	if len(configured) > 0 && len(configured[0]) > 0 {
+		ports = configured[0]
+	}
+	ports, _ = validateTCPServicePorts(ports)
+	return &lz4MonitorState{
+		prevPublished: map[string]map[string]bool{"in": {}, "out": {}},
+		servicePorts:  ports,
+	}
+}
+
 func StartTCPLz4Monitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
-	path := filepath.Join(cfg.NodeHome, "data", "tcp_lz4_stats")
-	if _, err := os.Stat(path); err != nil {
-		logger.InfoComponent("tcp_lz4",
-			"tcp_lz4_stats directory not present (%s); monitor idle", path)
+	root := filepath.Join(cfg.NodeHome, "data", "tcp_lz4_stats")
+	metrics.RegisterSource(metrics.SourceTCPLZ4, true)
+	logger.InfoComponent("tcp_lz4", "watching %s (late discovery enabled)", root)
+	ports, err := tcpServicePortsForConfig(cfg)
+	if err != nil {
+		metrics.MarkSourceError(metrics.SourceTCPLZ4, metrics.SourceFailureSchema)
+		logger.ErrorComponent("tcp_lz4", "invalid service-port configuration: %v", err)
 		<-ctx.Done()
 		return
 	}
-
-	logger.InfoComponent("tcp_lz4", "watching %s", path)
-
-	prev := map[string]map[string]bool{
-		"in":  {},
-		"out": {},
-	}
-	var lastMtime time.Time
-
+	state := newLz4MonitorState(ports)
 	ticker := time.NewTicker(tcpLz4PollInterval)
 	defer ticker.Stop()
 
-	tickLz4(path, prev, &lastMtime)
-	metrics.MarkMonitorTick("tcp_lz4")
-
+	tickLz4(root, state)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			tickLz4(path, prev, &lastMtime)
-			metrics.MarkMonitorTick("tcp_lz4")
+			tickLz4(root, state)
 		}
 	}
 }
 
-func tickLz4(root string, prev map[string]map[string]bool, lastMtime *time.Time) {
+func tickLz4(root string, state *lz4MonitorState) {
+	metrics.MarkMonitorAttempt("tcp_lz4")
+	metrics.MarkSourceAttempt(metrics.SourceTCPLZ4)
+	now := time.Now()
+	if !state.lastReceipt.IsZero() {
+		metrics.WithPrometheusSnapshotUpdate(func() {
+			metrics.HLP2PLZ4SampleAgeSeconds.Set(nonnegativeDuration(now.Sub(state.lastReceipt)).Seconds())
+			if now.Sub(state.lastReceipt) > tcpLz4IdentityTTL && !state.identitiesExpired {
+				clearLz4PeerSeries(state.prevPublished)
+				state.identitiesExpired = true
+			}
+		})
+	}
+
 	datePath, err := latestDateFile(root)
 	if err != nil {
+		lz4Failure(metrics.SourceFailureDiscovery, err)
 		return
-	}
-	info, err := os.Stat(datePath)
-	if err != nil {
-		return
-	}
-	if info.ModTime().Equal(*lastMtime) {
-		return // file unchanged
 	}
 	data, err := os.ReadFile(datePath)
 	if err != nil {
+		lz4Failure(metrics.SourceFailureRead, err)
+		return
+	}
+	pair, err := selectLatestLZ4Pair(data)
+	if err != nil {
+		lz4Failure(metrics.SourceFailureSchema, err)
+		return
+	}
+	key := lz4PairKey(pair)
+	if key == state.lastPairKey {
+		markLz4SourceSuccess()
+		return
+	}
+	sourceTime := pairTimestamp(pair)
+	if !state.previousSource.IsZero() && sourceTime.Before(state.previousSource) {
+		lz4Failure(metrics.SourceFailureSchema, errors.New("LZ4 source timestamp regressed"))
 		return
 	}
 
-	// Walk lines from the bottom, classifying each as global or per-peer
-	// until we've found one of each. The two records are written
-	// microseconds apart on every sample, so finding both is the
-	// expected case; we bound the search at maxLinesToScan as a sanity
-	// guard against a pathologically large file from a long uptime.
-	const maxLinesToScan = 64
-	gotGlobal := false
-	gotPeer := false
-	end := len(data)
-	scanned := 0
-	for end > 0 && scanned < maxLinesToScan && (!gotGlobal || !gotPeer) {
-		// Skip trailing newlines.
-		for end > 0 && data[end-1] == '\n' {
-			end--
-		}
-		if end == 0 {
-			break
-		}
-		start := bytes.LastIndexByte(data[:end], '\n') + 1
-		line := bytes.TrimSpace(data[start:end])
-		end = start - 1
-		scanned++
-		if len(line) == 0 || line[0] != '[' {
-			continue
-		}
-		if !gotGlobal {
-			if b, p, r, ok := parseLz4GlobalLine(line); ok {
-				metrics.HLP2PLz4GlobalBytes.Set(float64(b))
-				metrics.HLP2PLz4GlobalPackets.Set(float64(p))
-				metrics.HLP2PLz4GlobalRatio.Set(r)
-				gotGlobal = true
-				continue
-			}
-		}
-		if !gotPeer {
-			if peers, ok := parseLz4PeerLine(line); ok {
-				publishLz4Peers(peers, prev)
-				gotPeer = true
-				continue
-			}
-		}
+	receipt := time.Now()
+	if err := commitLZ4Pair(pair, receipt, state); err != nil {
+		lz4Failure(metrics.SourceFailureSchema, err)
+		return
 	}
-
-	// On the rare edge where the tail contains only one record shape
-	// (day-file rollover, or a torn last write), we leave the other
-	// metric set at its previous values. That's strictly better than
-	// zeroing — a stale-but-recent gauge gives an operator a
-	// degraded-but-useful reading; a zeroed gauge looks like an
-	// incident.
-
-	*lastMtime = info.ModTime()
+	markLz4SourceSuccess()
+	state.lastPairKey = key
+	state.lastReceipt = receipt
+	state.previousSource = sourceTime
+	state.identitiesExpired = false
 }
 
-func publishLz4Peers(peers []lz4PeerSample, prev map[string]map[string]bool) {
-	byDir := map[string][]lz4PeerSample{"in": {}, "out": {}}
-	for _, p := range peers {
-		byDir[p.direction] = append(byDir[p.direction], p)
+func markLz4SourceSuccess() {
+	metrics.WithPrometheusSnapshotUpdate(publishLz4SourceSuccess)
+}
+
+func publishLz4SourceSuccess() {
+	metrics.HLP2PLZ4SourceUp.Set(1)
+	metrics.MarkSourceReadOutcome(metrics.SourceTCPLZ4, true)
+	metrics.MarkSourceSchemaOutcome(metrics.SourceTCPLZ4, true)
+}
+
+func lz4Failure(stage metrics.SourceFailureStage, err error) {
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		metrics.HLP2PLZ4SourceUp.Set(0)
+		metrics.MarkSourceError(metrics.SourceTCPLZ4, stage)
+		if stage == metrics.SourceFailureDiscovery && errors.Is(err, os.ErrNotExist) {
+			metrics.MarkSourceAbsent(metrics.SourceTCPLZ4)
+		}
+		metrics.IncMonitorError("tcp_lz4")
+	})
+}
+
+func pairTimestamp(pair lz4Pair) time.Time {
+	if pair.global.timestamp.After(pair.peer.timestamp) {
+		return pair.global.timestamp
+	}
+	return pair.peer.timestamp
+}
+
+// lz4PairKey identifies the complete semantic contents of one paired window,
+// not only its timestamps. This lets a corrected/replaced committed record at
+// the same source time reconcile stale values while keeping byte/order-only
+// rewrites of an equivalent peer multiset idempotent.
+func lz4PairKey(pair lz4Pair) string {
+	peers := append([]lz4PeerSample(nil), pair.peer.peers...)
+	sort.Slice(peers, func(i, j int) bool {
+		a, b := peers[i], peers[j]
+		switch {
+		case a.direction != b.direction:
+			return a.direction < b.direction
+		case a.ip != b.ip:
+			return a.ip < b.ip
+		case a.port != b.port:
+			return a.port < b.port
+		case a.bytes != b.bytes:
+			return a.bytes < b.bytes
+		case a.packets != b.packets:
+			return a.packets < b.packets
+		default:
+			return a.ratio < b.ratio
+		}
+	})
+
+	var canonical strings.Builder
+	appendLz4KeyField(&canonical, pair.peer.timestamp.Format(time.RFC3339Nano))
+	for _, peer := range peers {
+		appendLz4KeyField(&canonical, peer.direction)
+		appendLz4KeyField(&canonical, peer.ip)
+		appendLz4KeyField(&canonical, strconv.FormatUint(uint64(peer.port), 10))
+		appendLz4KeyField(&canonical, strconv.FormatInt(peer.bytes, 10))
+		appendLz4KeyField(&canonical, strconv.FormatInt(peer.packets, 10))
+		appendLz4KeyField(&canonical, strconv.FormatFloat(peer.ratio, 'g', -1, 64))
+	}
+	appendLz4KeyField(&canonical, pair.global.timestamp.Format(time.RFC3339Nano))
+	appendLz4KeyField(&canonical, strconv.FormatInt(pair.global.bytes, 10))
+	appendLz4KeyField(&canonical, strconv.FormatInt(pair.global.packets, 10))
+	appendLz4KeyField(&canonical, strconv.FormatFloat(pair.global.ratio, 'g', -1, 64))
+
+	sum := sha256.Sum256([]byte(canonical.String()))
+	return hex.EncodeToString(sum[:])
+}
+
+func appendLz4KeyField(out *strings.Builder, value string) {
+	out.WriteString(strconv.Itoa(len(value)))
+	out.WriteByte(':')
+	out.WriteString(value)
+}
+
+func commitLZ4Pair(pair lz4Pair, receipt time.Time, state *lz4MonitorState) error {
+	prepared, err := prepareLz4Peers(pair.peer.peers, state.servicePorts)
+	if err != nil {
+		return err
+	}
+	sourceTime := pairTimestamp(pair)
+	duration := 0.0
+	publishDuration := state.previousSource.IsZero()
+	if !state.previousSource.IsZero() && sourceTime.After(state.previousSource) {
+		duration = sourceTime.Sub(state.previousSource).Seconds()
+		publishDuration = true
+	}
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		publishLz4SourceSuccess()
+		publishLz4Peers(prepared, state.prevPublished, state.servicePorts)
+		metrics.HLP2PLZ4GlobalWindowBytes.Set(float64(pair.global.bytes))
+		metrics.HLP2PLZ4GlobalWindowPackets.Set(float64(pair.global.packets))
+		metrics.HLP2PLZ4GlobalWindowRatio.Set(pair.global.ratio)
+		metrics.HLP2PLz4GlobalBytes.Set(float64(pair.global.bytes)) // one-release gauge aliases
+		metrics.HLP2PLz4GlobalPackets.Set(float64(pair.global.packets))
+		metrics.HLP2PLz4GlobalRatio.Set(pair.global.ratio)
+		// A same-source-time content replacement corrects the current window;
+		// it must not erase the already observed inter-window duration.
+		if publishDuration {
+			metrics.HLP2PLZ4WindowDurationSeconds.Set(duration)
+		}
+		metrics.HLP2PLZ4SampleTimestampSeconds.Set(unixTimestampSeconds(sourceTime))
+		metrics.HLP2PLZ4SampleAgeSeconds.Set(0)
+		metrics.MarkSourceValidObservation(metrics.SourceTCPLZ4, sourceTime)
+		metrics.MarkSourcePublication(metrics.SourceTCPLZ4)
+		metrics.MarkMonitorValidObservation("tcp_lz4")
+		metrics.MarkMonitorPublication("tcp_lz4")
+	})
+	_ = receipt // receipt is retained by the caller after the atomic commit boundary
+	return nil
+}
+
+type lz4Aggregate struct {
+	bytes       float64
+	packets     float64
+	ratioWeight float64
+	ratioBytes  float64
+}
+
+type rankedLz4Aggregate struct {
+	ip  string
+	agg *lz4Aggregate
+}
+
+type preparedLz4Direction struct {
+	top   []rankedLz4Aggregate
+	other *lz4Aggregate
+}
+
+type preparedLz4Publication struct {
+	directions map[string]preparedLz4Direction
+	byPort     map[string]map[string]*lz4Aggregate
+}
+
+// prepareLz4Peers derives and validates the complete publishable generation
+// before touching any metric. This keeps numeric/schema failures from partly
+// reconciling the prior good snapshot.
+func prepareLz4Peers(peers []lz4PeerSample, servicePorts []uint16) (preparedLz4Publication, error) {
+	byEndpoint := map[string]map[string]*lz4Aggregate{"in": {}, "out": {}}
+	byPort := map[string]map[string]*lz4Aggregate{"in": {}, "out": {}}
+	byDirection := map[string]*lz4Aggregate{"in": {}, "out": {}}
+	allowed := make(map[uint16]string, len(servicePorts))
+	for _, port := range servicePorts {
+		allowed[port] = strconv.FormatUint(uint64(port), 10)
+	}
+	for _, peer := range peers {
+		if byEndpoint[peer.direction] == nil {
+			return preparedLz4Publication{}, errors.New("invalid LZ4 aggregate direction")
+		}
+		agg := byEndpoint[peer.direction][peer.ip]
+		if agg == nil {
+			agg = &lz4Aggregate{}
+			byEndpoint[peer.direction][peer.ip] = agg
+		}
+		if err := addLz4Sample(agg, peer); err != nil {
+			return preparedLz4Publication{}, err
+		}
+		port := allowed[peer.port]
+		if port == "" {
+			port = "other"
+		}
+		portAgg := byPort[peer.direction][port]
+		if portAgg == nil {
+			portAgg = &lz4Aggregate{}
+			byPort[peer.direction][port] = portAgg
+		}
+		if err := addLz4Sample(portAgg, peer); err != nil {
+			return preparedLz4Publication{}, err
+		}
+		if err := addLz4Sample(byDirection[peer.direction], peer); err != nil {
+			return preparedLz4Publication{}, err
+		}
 	}
 
-	for direction, list := range byDir {
-		sort.Slice(list, func(a, b int) bool { return list[a].bytes > list[b].bytes })
-		current := make(map[string]bool, tcpLz4TopN+1)
-		var otherBytes, otherPackets int64
-		var otherRatioWeight float64 // weighted by bytes
-		var otherRatioBytesSum float64
-
-		for i, p := range list {
-			if i < tcpLz4TopN {
-				metrics.HLP2PLz4BytesTotal.WithLabelValues(p.ip, direction).Set(float64(p.bytes))
-				metrics.HLP2PLz4PacketsTotal.WithLabelValues(p.ip, direction).Set(float64(p.packets))
-				metrics.HLP2PLz4CompressionRatio.WithLabelValues(p.ip, direction).Set(p.ratio)
-				current[p.ip] = true
-			} else {
-				otherBytes += p.bytes
-				otherPackets += p.packets
-				otherRatioWeight += p.ratio * float64(p.bytes)
-				otherRatioBytesSum += float64(p.bytes)
+	prepared := preparedLz4Publication{
+		directions: make(map[string]preparedLz4Direction, 2),
+		byPort:     byPort,
+	}
+	for _, direction := range []string{"in", "out"} {
+		list := make([]rankedLz4Aggregate, 0, len(byEndpoint[direction]))
+		for ip, agg := range byEndpoint[direction] {
+			// All-zero rows contribute to bounded service/global aggregates but
+			// never manufacture a raw-IP identity series.
+			if agg.bytes == 0 && agg.packets == 0 {
+				continue
 			}
+			list = append(list, rankedLz4Aggregate{ip: ip, agg: agg})
 		}
-		if otherBytes > 0 {
-			metrics.HLP2PLz4BytesTotal.WithLabelValues("other", direction).Set(float64(otherBytes))
-			metrics.HLP2PLz4PacketsTotal.WithLabelValues("other", direction).Set(float64(otherPackets))
-			if otherRatioBytesSum > 0 {
-				metrics.HLP2PLz4CompressionRatio.WithLabelValues("other", direction).
-					Set(otherRatioWeight / otherRatioBytesSum)
+		sort.Slice(list, func(i, j int) bool {
+			if list[i].agg.bytes != list[j].agg.bytes {
+				return list[i].agg.bytes > list[j].agg.bytes
 			}
+			return list[i].ip < list[j].ip
+		})
+		limit := len(list)
+		if limit > tcpLz4TopN {
+			limit = tcpLz4TopN
+		}
+		directionSnapshot := preparedLz4Direction{top: append([]rankedLz4Aggregate(nil), list[:limit]...)}
+		if len(list) > tcpLz4TopN {
+			other := &lz4Aggregate{}
+			for _, item := range list[tcpLz4TopN:] {
+				if err := mergeLz4Aggregate(other, item.agg); err != nil {
+					return preparedLz4Publication{}, err
+				}
+			}
+			directionSnapshot.other = other
+		}
+		prepared.directions[direction] = directionSnapshot
+	}
+	return prepared, nil
+}
+
+func publishLz4Peers(prepared preparedLz4Publication, prev map[string]map[string]bool, servicePorts []uint16) {
+	for _, direction := range []string{"in", "out"} {
+		snapshot := prepared.directions[direction]
+		current := make(map[string]bool, tcpLz4TopN+1)
+		for _, item := range snapshot.top {
+			setLz4Endpoint(item.ip, direction, item.agg)
+			current[item.ip] = true
+		}
+		if snapshot.other != nil {
+			setLz4Endpoint("other", direction, snapshot.other)
 			current["other"] = true
 		}
-
-		// Drop labels that fell out of the top-N.
 		for ip := range prev[direction] {
 			if !current[ip] {
-				metrics.HLP2PLz4BytesTotal.DeleteLabelValues(ip, direction)
-				metrics.HLP2PLz4PacketsTotal.DeleteLabelValues(ip, direction)
-				metrics.HLP2PLz4CompressionRatio.DeleteLabelValues(ip, direction)
+				deleteLz4Endpoint(ip, direction)
 				delete(prev[direction], ip)
 			}
 		}
 		for ip := range current {
 			prev[direction][ip] = true
 		}
+
+		for _, port := range servicePortLabels(servicePorts) {
+			agg := prepared.byPort[direction][port]
+			if agg == nil {
+				agg = &lz4Aggregate{}
+			}
+			metrics.HLP2PLZ4WindowBytesByServicePort.WithLabelValues(port, direction).Set(float64(agg.bytes))
+			metrics.HLP2PLZ4WindowPacketsByServicePort.WithLabelValues(port, direction).Set(float64(agg.packets))
+		}
 	}
 }
 
-// parseLz4PeerLine returns the per-peer samples from a line of the form:
-//
-//	["<iso>", [ [["In"|"Out", "<ip>", <port>], <bytes>, <packets>, <ratio>], ... ]]
-//
-// Returns ok=false if the inner array entries don't all have the
-// 4-element shape (this is what distinguishes a peer line from a global
-// line, since the global line has a 3-element inner with no [dir,ip,port]
-// key).
-func parseLz4PeerLine(line []byte) ([]lz4PeerSample, bool) {
-	var outer [2]json.RawMessage
-	if err := json.Unmarshal(line, &outer); err != nil {
-		return nil, false
+func addLz4Sample(agg *lz4Aggregate, sample lz4PeerSample) error {
+	bytesValue := float64(sample.bytes)
+	packetsValue := float64(sample.packets)
+	bytesTotal := agg.bytes + bytesValue
+	packetsTotal := agg.packets + packetsValue
+	if math.IsNaN(bytesTotal) || math.IsInf(bytesTotal, 0) || math.IsNaN(packetsTotal) || math.IsInf(packetsTotal, 0) {
+		return errors.New("LZ4 byte or packet aggregate overflow")
+	}
+	agg.bytes = bytesTotal
+	agg.packets = packetsTotal
+	if sample.bytes > 0 {
+		weight := sample.ratio * bytesValue
+		weightTotal := agg.ratioWeight + weight
+		ratioBytesTotal := agg.ratioBytes + bytesValue
+		if math.IsNaN(weightTotal) || math.IsInf(weightTotal, 0) || math.IsNaN(ratioBytesTotal) || math.IsInf(ratioBytesTotal, 0) {
+			return errors.New("LZ4 weighted-ratio aggregate overflow")
+		}
+		agg.ratioWeight = weightTotal
+		agg.ratioBytes = ratioBytesTotal
+	}
+	return nil
+}
+
+func mergeLz4Aggregate(dst, src *lz4Aggregate) error {
+	values := [4]float64{
+		dst.bytes + src.bytes,
+		dst.packets + src.packets,
+		dst.ratioWeight + src.ratioWeight,
+		dst.ratioBytes + src.ratioBytes,
+	}
+	for _, value := range values {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return errors.New("LZ4 overflow aggregate is non-finite")
+		}
+	}
+	dst.bytes, dst.packets, dst.ratioWeight, dst.ratioBytes = values[0], values[1], values[2], values[3]
+	return nil
+}
+
+func lz4Ratio(agg *lz4Aggregate) float64 {
+	if agg.ratioBytes == 0 {
+		return 0
+	}
+	return agg.ratioWeight / agg.ratioBytes
+}
+
+func setLz4Endpoint(ip, direction string, agg *lz4Aggregate) {
+	ratio := lz4Ratio(agg)
+	metrics.HLP2PLZ4WindowBytes.WithLabelValues(ip, direction).Set(agg.bytes)
+	metrics.HLP2PLZ4WindowPackets.WithLabelValues(ip, direction).Set(agg.packets)
+	metrics.HLP2PLZ4WindowWeightedRatio.WithLabelValues(ip, direction).Set(ratio)
+	metrics.HLP2PLz4BytesTotal.WithLabelValues(ip, direction).Set(agg.bytes)
+	metrics.HLP2PLz4PacketsTotal.WithLabelValues(ip, direction).Set(agg.packets)
+	metrics.HLP2PLz4CompressionRatio.WithLabelValues(ip, direction).Set(ratio)
+}
+
+func deleteLz4Endpoint(ip, direction string) {
+	metrics.HLP2PLZ4WindowBytes.DeleteLabelValues(ip, direction)
+	metrics.HLP2PLZ4WindowPackets.DeleteLabelValues(ip, direction)
+	metrics.HLP2PLZ4WindowWeightedRatio.DeleteLabelValues(ip, direction)
+	metrics.HLP2PLz4BytesTotal.DeleteLabelValues(ip, direction)
+	metrics.HLP2PLz4PacketsTotal.DeleteLabelValues(ip, direction)
+	metrics.HLP2PLz4CompressionRatio.DeleteLabelValues(ip, direction)
+}
+
+func clearLz4PeerSeries(prev map[string]map[string]bool) {
+	for direction, labels := range prev {
+		for ip := range labels {
+			deleteLz4Endpoint(ip, direction)
+			delete(labels, ip)
+		}
+	}
+}
+
+func selectLatestLZ4Pair(data []byte) (lz4Pair, error) {
+	lines := committedLinesReverse(data, maxLz4LinesToScan)
+	if len(lines) == 0 {
+		return lz4Pair{}, errors.New("no complete LZ4 record")
+	}
+	peers := make([]lz4PeerRecord, 0, 4)
+	globals := make([]lz4GlobalRecord, 0, 4)
+	for _, line := range lines {
+		kind, timestamp, payload, err := decodeLz4Envelope(line)
+		if err != nil {
+			return lz4Pair{}, err
+		}
+		switch kind {
+		case "peer":
+			rows, err := parseLz4PeerPayload(payload)
+			if err != nil {
+				return lz4Pair{}, err
+			}
+			peers = append(peers, lz4PeerRecord{timestamp: timestamp, peers: rows})
+		case "global":
+			global, err := parseLz4GlobalPayload(payload)
+			if err != nil {
+				return lz4Pair{}, err
+			}
+			global.timestamp = timestamp
+			globals = append(globals, global)
+		}
+	}
+	if len(peers) == 0 || len(globals) == 0 {
+		return lz4Pair{}, errors.New("latest scan lacks peer/global pair")
+	}
+	if pair, ok := newestCompatibleLZ4Pair(peers, globals); ok {
+		return pair, nil
+	}
+	return lz4Pair{}, errors.New("latest peer/global records are from different windows")
+}
+
+func newestCompatibleLZ4Pair(peers []lz4PeerRecord, globals []lz4GlobalRecord) (lz4Pair, bool) {
+	var best lz4Pair
+	bestDelta := time.Duration(0)
+	found := false
+	for _, peer := range peers {
+		for _, global := range globals {
+			delta := peer.timestamp.Sub(global.timestamp)
+			if delta < 0 {
+				delta = -delta
+			}
+			if delta > tcpLz4PairTolerance {
+				continue
+			}
+			candidate := lz4Pair{peer: peer, global: global}
+			candidateTime := pairTimestamp(candidate)
+			bestTime := pairTimestamp(best)
+			if !found || candidateTime.After(bestTime) ||
+				(candidateTime.Equal(bestTime) && delta < bestDelta) ||
+				(candidateTime.Equal(bestTime) && delta == bestDelta && peer.timestamp.After(best.peer.timestamp)) {
+				best = candidate
+				bestDelta = delta
+				found = true
+			}
+		}
+	}
+	return best, found
+}
+
+func committedLinesReverse(data []byte, limit int) [][]byte {
+	boundary := bytes.LastIndexByte(data, '\n')
+	if boundary < 0 {
+		return nil
+	}
+	data = data[:boundary]
+	out := make([][]byte, 0, limit)
+	for len(data) > 0 && len(out) < limit {
+		start := bytes.LastIndexByte(data, '\n') + 1
+		line := bytes.TrimSpace(data[start:])
+		if len(line) > 0 {
+			out = append(out, append([]byte(nil), line...))
+		}
+		if start == 0 {
+			break
+		}
+		data = data[:start-1]
+	}
+	return out
+}
+
+func decodeLz4Envelope(line []byte) (string, time.Time, json.RawMessage, error) {
+	var outer []json.RawMessage
+	if err := json.Unmarshal(line, &outer); err != nil || len(outer) != 2 {
+		return "", time.Time{}, nil, errors.New("invalid LZ4 envelope")
+	}
+	var tsString string
+	if err := unmarshalRequiredJSON(outer[0], &tsString); err != nil {
+		return "", time.Time{}, nil, errors.New("invalid LZ4 timestamp")
+	}
+	timestamp, ok := parseVisorTime(tsString)
+	if !ok {
+		return "", time.Time{}, nil, errors.New("invalid LZ4 timestamp")
 	}
 	var entries []json.RawMessage
-	if err := json.Unmarshal(outer[1], &entries); err != nil || len(entries) == 0 {
-		return nil, false
+	if !rawJSONArray(outer[1]) {
+		return "", time.Time{}, nil, errors.New("LZ4 payload must be an array")
 	}
-	// Sniff the first entry — must be a 4-tuple starting with [dir, ip, port].
-	var first []json.RawMessage
-	if err := json.Unmarshal(entries[0], &first); err != nil || len(first) < 4 {
-		return nil, false
+	if err := json.Unmarshal(outer[1], &entries); err != nil {
+		return "", time.Time{}, nil, errors.New("invalid LZ4 payload")
 	}
-	var firstKey [3]json.RawMessage
-	if err := json.Unmarshal(first[0], &firstKey); err != nil {
-		return nil, false
+	if len(entries) == 0 {
+		return "peer", timestamp, outer[1], nil
 	}
+	var number float64
+	if len(entries) == 3 && unmarshalRequiredJSON(entries[0], &number) == nil {
+		return "global", timestamp, outer[1], nil
+	}
+	return "peer", timestamp, outer[1], nil
+}
 
+func parseLz4PeerPayload(payload json.RawMessage) ([]lz4PeerSample, error) {
+	var entries []json.RawMessage
+	if !rawJSONArray(payload) {
+		return nil, errors.New("LZ4 peer payload must be an array")
+	}
+	if err := json.Unmarshal(payload, &entries); err != nil {
+		return nil, err
+	}
 	out := make([]lz4PeerSample, 0, len(entries))
 	for _, raw := range entries {
 		var entry []json.RawMessage
-		if err := json.Unmarshal(raw, &entry); err != nil || len(entry) < 4 {
-			continue
+		if err := json.Unmarshal(raw, &entry); err != nil || len(entry) != 4 {
+			return nil, errors.New("LZ4 peer row must have arity four")
 		}
-		var key [3]json.RawMessage
-		if err := json.Unmarshal(entry[0], &key); err != nil {
-			continue
+		var key []json.RawMessage
+		if err := json.Unmarshal(entry[0], &key); err != nil || len(key) != 3 {
+			return nil, errors.New("LZ4 peer key must have arity three")
 		}
-		var dir, ip string
-		if err := json.Unmarshal(key[0], &dir); err != nil {
-			continue
-		}
-		if err := json.Unmarshal(key[1], &ip); err != nil {
-			continue
-		}
+		var upstreamDirection, ipString string
+		var port uint16
 		var bytesN, packetsN int64
-		if err := json.Unmarshal(entry[1], &bytesN); err != nil {
-			continue
-		}
-		if err := json.Unmarshal(entry[2], &packetsN); err != nil {
-			continue
-		}
 		var ratio float64
-		if err := json.Unmarshal(entry[3], &ratio); err != nil {
-			continue
+		if unmarshalRequiredJSON(key[0], &upstreamDirection) != nil || unmarshalRequiredJSON(key[1], &ipString) != nil || unmarshalRequiredJSON(key[2], &port) != nil || port == 0 ||
+			unmarshalRequiredJSON(entry[1], &bytesN) != nil || bytesN < 0 || unmarshalRequiredJSON(entry[2], &packetsN) != nil || packetsN < 0 ||
+			unmarshalRequiredJSON(entry[3], &ratio) != nil || math.IsNaN(ratio) || math.IsInf(ratio, 0) || ratio < 0 {
+			return nil, errors.New("invalid LZ4 peer row")
 		}
-		var direction string
-		switch dir {
+		ip, err := netip.ParseAddr(ipString)
+		if err != nil || ip.Zone() != "" {
+			return nil, errors.New("invalid LZ4 peer IP")
+		}
+		direction := ""
+		switch upstreamDirection {
 		case "In":
 			direction = "in"
 		case "Out":
 			direction = "out"
 		default:
-			continue
+			return nil, errors.New("invalid LZ4 direction")
 		}
-		out = append(out, lz4PeerSample{
-			direction: direction,
-			ip:        ip,
-			bytes:     bytesN,
-			packets:   packetsN,
-			ratio:     ratio,
-		})
+		out = append(out, lz4PeerSample{direction: direction, ip: ip.Unmap().String(), port: port, bytes: bytesN, packets: packetsN, ratio: ratio})
 	}
-	if len(out) == 0 {
-		return nil, false
-	}
-	return out, true
+	return out, nil
 }
 
-// parseLz4GlobalLine handles the aggregate row:
-//
-//	["<iso>", [<bytes>, <packets>, <ratio>]]
-//
-// Returns ok=false on any structural mismatch.
-func parseLz4GlobalLine(line []byte) (int64, int64, float64, bool) {
-	var outer [2]json.RawMessage
-	if err := json.Unmarshal(line, &outer); err != nil {
-		return 0, 0, 0, false
-	}
+func parseLz4GlobalPayload(payload json.RawMessage) (lz4GlobalRecord, error) {
 	var inner []json.RawMessage
-	if err := json.Unmarshal(outer[1], &inner); err != nil || len(inner) != 3 {
+	if err := json.Unmarshal(payload, &inner); err != nil || len(inner) != 3 {
+		return lz4GlobalRecord{}, errors.New("invalid LZ4 global payload")
+	}
+	var out lz4GlobalRecord
+	if unmarshalRequiredJSON(inner[0], &out.bytes) != nil || out.bytes < 0 || unmarshalRequiredJSON(inner[1], &out.packets) != nil || out.packets < 0 ||
+		unmarshalRequiredJSON(inner[2], &out.ratio) != nil || math.IsNaN(out.ratio) || math.IsInf(out.ratio, 0) || out.ratio < 0 {
+		return lz4GlobalRecord{}, errors.New("invalid LZ4 global values")
+	}
+	return out, nil
+}
+
+func parseLz4PeerLine(line []byte) ([]lz4PeerSample, bool) {
+	kind, _, payload, err := decodeLz4Envelope(line)
+	if err != nil || kind != "peer" {
+		return nil, false
+	}
+	peers, err := parseLz4PeerPayload(payload)
+	return peers, err == nil
+}
+
+func parseLz4GlobalLine(line []byte) (int64, int64, float64, bool) {
+	kind, _, payload, err := decodeLz4Envelope(line)
+	if err != nil || kind != "global" {
 		return 0, 0, 0, false
 	}
-	// Must be 3 numbers; if the first element is itself an array, this is a
-	// peer line, not a global aggregate.
-	var b, p int64
-	if err := json.Unmarshal(inner[0], &b); err != nil {
-		return 0, 0, 0, false
-	}
-	if err := json.Unmarshal(inner[1], &p); err != nil {
-		return 0, 0, 0, false
-	}
-	var r float64
-	if err := json.Unmarshal(inner[2], &r); err != nil {
-		return 0, 0, 0, false
-	}
-	return b, p, r, true
+	global, err := parseLz4GlobalPayload(payload)
+	return global.bytes, global.packets, global.ratio, err == nil
 }

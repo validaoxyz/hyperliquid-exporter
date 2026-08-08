@@ -139,7 +139,14 @@ func TestParseMempoolTxsRejectsIncompleteEnvelope(t *testing.T) {
 		{name: "invalid timestamp", line: `[7,{"signed_actions":[]}]`, reason: "invalid_timestamp"},
 		{name: "missing actions", line: `["2026-06-01T17:59:25.990970382",{}]`, reason: "missing_signed_actions"},
 		{name: "null actions", line: `["2026-06-01T17:59:25.990970382",{"signed_actions":null}]`, reason: "missing_signed_actions"},
+		{name: "null action row", line: `["2026-06-01T17:59:25.990970382",{"signed_actions":[null]}]`, reason: "invalid_signed_action"},
+		{name: "null action payload", line: `["2026-06-01T17:59:25.990970382",{"signed_actions":[{"action":null}]}]`, reason: "invalid_signed_action"},
 		{name: "wrong actions", line: `["2026-06-01T17:59:25.990970382",{"signed_actions":{}}]`, reason: "invalid_signed_actions"},
+		{name: "empty actions", line: `["2026-06-01T17:59:25.990970382",{"signed_actions":[]}]`, reason: "invalid_signed_actions"},
+		{name: "missing action type", line: `["2026-06-01T17:59:25.990970382",{"signed_actions":[{"action":{}}]}]`, reason: "invalid_signed_action"},
+		{name: "null action type", line: `["2026-06-01T17:59:25.990970382",{"signed_actions":[{"action":{"type":null}}]}]`, reason: "invalid_signed_action"},
+		{name: "empty action type", line: `["2026-06-01T17:59:25.990970382",{"signed_actions":[{"action":{"type":""}}]}]`, reason: "invalid_signed_action"},
+		{name: "blank action type", line: `["2026-06-01T17:59:25.990970382",{"signed_actions":[{"action":{"type":"  "}}]}]`, reason: "invalid_signed_action"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -148,5 +155,62 @@ func TestParseMempoolTxsRejectsIncompleteEnvelope(t *testing.T) {
 				t.Fatalf("parse = ok:%v reason:%q, want false/%q", ok, reason, tt.reason)
 			}
 		})
+	}
+}
+
+func TestMempoolTxsOperationCountsAreOwnedByActionType(t *testing.T) {
+	for actionType, field := range map[string]string{
+		"order":         `"orders":[]`,
+		"cancel":        `"cancels":[]`,
+		"cancelByCloid": `"cancels":[]`,
+		"batchModify":   `"modifies":[]`,
+	} {
+		t.Run(actionType, func(t *testing.T) {
+			line := []byte(`["2026-06-01T17:59:25.990970382",{"signed_actions":[{"action":{"type":"` + actionType + `",` + field + `}}]}]`)
+			stats, reason, ok := parseMempoolTxsLineDetailed(line)
+			if !ok || reason != "" {
+				t.Fatalf("empty owned array rejected: ok=%v reason=%q", ok, reason)
+			}
+			if stats.operations != 0 || stats.operationCounts[actionType] != 0 {
+				t.Fatalf("operations=%d by type=%#v, want zero", stats.operations, stats.operationCounts)
+			}
+		})
+	}
+
+	injected := []byte(`["2026-06-01T17:59:25.990970382",{"signed_actions":[{"action":{"type":"noop","orders":[{"b":true}],"cancels":[{},{}],"modifies":[{"order":{}}],"order":{"b":false}}}]}]`)
+	stats, reason, ok := parseMempoolTxsLineDetailed(injected)
+	if !ok || reason != "" {
+		t.Fatalf("scalar with irrelevant fields rejected: ok=%v reason=%q", ok, reason)
+	}
+	if stats.operations != 1 || stats.operationCounts["noop"] != 1 || len(stats.orderCounts) != 0 {
+		t.Fatalf("irrelevant fields skewed scalar metrics: %+v", stats)
+	}
+}
+
+func TestMempoolTxsRequiresOwnedActionShapes(t *testing.T) {
+	invalidActions := []string{
+		`{"type":"order"}`,
+		`{"type":"order","orders":null}`,
+		`{"type":"order","orders":{}}`,
+		`{"type":"order","orders":[null]}`,
+		`{"type":"cancel"}`,
+		`{"type":"cancel","cancels":null}`,
+		`{"type":"cancelByCloid","cancels":[null]}`,
+		`{"type":"batchModify"}`,
+		`{"type":"batchModify","modifies":[{}]}`,
+		`{"type":"modify"}`,
+		`{"type":"modify","order":null}`,
+	}
+	for _, action := range invalidActions {
+		line := []byte(`["2026-06-01T17:59:25.990970382",{"signed_actions":[{"action":` + action + `}]}]`)
+		if _, reason, ok := parseMempoolTxsLineDetailed(line); ok || reason != "invalid_signed_action" {
+			t.Fatalf("invalid owned shape accepted: %s: ok=%v reason=%q", action, ok, reason)
+		}
+	}
+
+	modify := []byte(`["2026-06-01T17:59:25.990970382",{"signed_actions":[{"action":{"type":"modify","order":{"b":true,"t":{"limit":{"tif":"Gtc"}}}}}]}]`)
+	stats, reason, ok := parseMempoolTxsLineDetailed(modify)
+	if !ok || reason != "" || stats.operations != 1 || stats.orderCounts[mempoolTxOrderLabel{side: "buy", tif: "Gtc"}] != 1 {
+		t.Fatalf("valid modify metrics = %+v, ok=%v reason=%q", stats, ok, reason)
 	}
 }

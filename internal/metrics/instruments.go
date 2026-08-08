@@ -32,16 +32,19 @@ var (
 	HLMetalParseDurationGauge api.Float64ObservableGauge
 
 	// observable gauges, Consensus
-	HLConsensusValidatorJailedStatus api.Float64ObservableGauge
-	HLConsensusValidatorStakeGauge   api.Float64ObservableGauge
-	HLConsensusTotalStakeGauge       api.Float64ObservableGauge
-	HLConsensusJailedStakeGauge      api.Float64ObservableGauge
-	HLConsensusNotJailedStakeGauge   api.Float64ObservableGauge
-	HLConsensusValidatorCountGauge   api.Int64ObservableGauge
-	HLConsensusActiveStakeGauge      api.Float64ObservableGauge
-	HLConsensusInactiveStakeGauge    api.Float64ObservableGauge
-	HLConsensusValidatorActiveStatus api.Float64ObservableGauge
-	HLConsensusValidatorRTTGauge     api.Float64ObservableGauge
+	HLConsensusValidatorJailedStatus               api.Float64ObservableGauge
+	HLConsensusValidatorStakeGauge                 api.Float64ObservableGauge
+	HLConsensusTotalStakeGauge                     api.Float64ObservableGauge
+	HLConsensusJailedStakeGauge                    api.Float64ObservableGauge
+	HLConsensusNotJailedStakeGauge                 api.Float64ObservableGauge
+	HLConsensusValidatorCountGauge                 api.Int64ObservableGauge
+	HLConsensusActiveStakeGauge                    api.Float64ObservableGauge
+	HLConsensusInactiveStakeGauge                  api.Float64ObservableGauge
+	HLConsensusValidatorActiveStatus               api.Float64ObservableGauge
+	HLConsensusValidatorAPIActiveAndUnjailedStatus api.Float64ObservableGauge
+	HLConsensusAPIActiveAndUnjailedCountGauge      api.Int64ObservableGauge
+	HLConsensusAPIActiveAndUnjailedStakeGauge      api.Float64ObservableGauge
+	HLConsensusValidatorRTTGauge                   api.Float64ObservableGauge
 
 	// observable gauges, hl-node client
 	HLSoftwareVersionInfo api.Int64ObservableGauge
@@ -72,14 +75,16 @@ var (
 	HLEVMPriorityFeeHistogram api.Float64Histogram
 
 	// consensus monitoring metrics
-	HLConsensusVoteRoundGauge       api.Int64ObservableGauge
-	HLConsensusVoteTimeDiffGauge    api.Float64ObservableGauge
-	HLConsensusCurrentRoundGauge    api.Int64ObservableGauge
-	HLConsensusHeartbeatSentCounter api.Int64Counter
-	HLConsensusHeartbeatAckCounter  api.Int64Counter
-	HLConsensusHeartbeatDelayHist   api.Float64Histogram
-	HLConsensusConnectivityGauge    api.Float64ObservableGauge
-	HLConsensusHeartbeatStatusGauge api.Float64ObservableGauge
+	HLConsensusVoteRoundGauge              api.Int64ObservableGauge
+	HLConsensusVoteTimeDiffGauge           api.Float64ObservableGauge
+	HLConsensusCurrentRoundGauge           api.Int64ObservableGauge
+	HLConsensusHeartbeatSentCounter        api.Int64Counter
+	HLConsensusHeartbeatAckCounter         api.Int64Counter
+	HLConsensusHeartbeatDelayHist          api.Float64Histogram
+	HLConsensusConnectivityGauge           api.Float64ObservableGauge
+	HLConsensusDisconnectedSinceRoundGauge api.Int64ObservableGauge
+	HLConsensusHeartbeatStatusGauge        api.Float64ObservableGauge
+	HLConsensusHeartbeatAckObservedGauge   api.Float64ObservableGauge
 
 	// QC and TC metrics
 	HLConsensusQCSignaturesCounter    api.Int64Counter
@@ -131,6 +136,7 @@ func createInstruments() error {
 		0.1, 0.2, 0.5, 1, 2, 3, 5, 7, 10, 15, 20,
 		30, 50, 75, 100, 150, 160, 170, 180, 190,
 		200, 210, 220, 230, 240, 250,
+		300, 400, 500, 750, 1000, 1500, 2000, 3000, 5000, 10000,
 	}
 
 	HLMetalApplyDurationHistogram, err = meter.Float64Histogram(
@@ -161,7 +167,7 @@ func createInstruments() error {
 
 	HLConsensusValidatorJailedStatus, err = meter.Float64ObservableGauge(
 		"hl_consensus_validator_jailed_status",
-		api.WithDescription("Validator jail status (0=not jailed, 1=jailed)"),
+		api.WithDescription("Raw isJailed from the latest complete validatorSummaries response (1=jailed, 0=not jailed)"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create consensus validator jailed status gauge: %w", err)
@@ -169,7 +175,7 @@ func createInstruments() error {
 
 	HLConsensusValidatorStakeGauge, err = meter.Float64ObservableGauge(
 		"hl_consensus_validator_stake",
-		api.WithDescription("Stake amount for each validator"),
+		api.WithDescription("Raw validatorSummaries stake for each validator in 1e-8 HYPE units"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create consensus validator stake gauge: %w", err)
@@ -177,7 +183,7 @@ func createInstruments() error {
 
 	HLConsensusTotalStakeGauge, err = meter.Float64ObservableGauge(
 		"hl_consensus_total_stake",
-		api.WithDescription("Total stake in the network"),
+		api.WithDescription("Sum of raw validatorSummaries stake in 1e-8 HYPE units"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create consensus total stake gauge: %w", err)
@@ -185,7 +191,7 @@ func createInstruments() error {
 
 	HLConsensusJailedStakeGauge, err = meter.Float64ObservableGauge(
 		"hl_consensus_jailed_stake",
-		api.WithDescription("Total jailed stake"),
+		api.WithDescription("Raw validatorSummaries stake summed over isJailed rows, in 1e-8 HYPE units"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create consensus jailed stake gauge: %w", err)
@@ -193,15 +199,15 @@ func createInstruments() error {
 
 	HLConsensusNotJailedStakeGauge, err = meter.Float64ObservableGauge(
 		"hl_consensus_not_jailed_stake",
-		api.WithDescription("Total not jailed stake"),
+		api.WithDescription("Raw validatorSummaries stake summed over non-jailed rows, in 1e-8 HYPE units"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create consensus not jailed stake gauge: %w", err)
 	}
 
 	HLConsensusValidatorCountGauge, err = meter.Int64ObservableGauge(
-		"hl_consensus_validator_count",
-		api.WithDescription("Total number of validators"),
+		"hl_consensus_validators",
+		api.WithDescription("Number of rows in the latest complete validatorSummaries response; not a committee count"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create consensus validator count gauge: %w", err)
@@ -265,7 +271,7 @@ func createInstruments() error {
 
 	HLCoreTxCounter, err = meter.Int64Counter(
 		"hl_core_tx_total",
-		api.WithDescription("Total number of transactions in the Hyperliquid network"),
+		api.WithDescription("Validated signed actions observed in replica_cmds, by closed action type; compatibility name retains tx"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create core transaction counter: %w", err)
@@ -273,7 +279,7 @@ func createInstruments() error {
 
 	HLCoreOrdersCounter, err = meter.Int64Counter(
 		"hl_core_orders_total",
-		api.WithDescription("Total number of orders in the Hyperliquid network"),
+		api.WithDescription("Individual order operations inside validated replica order and twapOrder actions"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create core order counter: %w", err)
@@ -281,7 +287,7 @@ func createInstruments() error {
 
 	HLCoreOperationsCounter, err = meter.Int64Counter(
 		"hl_core_operations_total",
-		api.WithDescription("Total number of individual operations (orders, cancels, etc.) in the Hyperliquid network"),
+		api.WithDescription("Individual operations inside validated replica signed actions (array items for orders, cancels, and batch modifications)"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create core operations counter: %w", err)
@@ -289,7 +295,7 @@ func createInstruments() error {
 
 	HLCoreBlocksProcessedCounter, err = meter.Int64Counter(
 		"hl_core_blocks_processed",
-		api.WithDescription("Total number of blocks processed in the Hyperliquid network"),
+		api.WithDescription("Completely validated replica_cmds block records observed since exporter start"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create core blocks processed counter: %w", err)
@@ -311,8 +317,8 @@ func createInstruments() error {
 	}
 	HLCoreTxPerBlockHistogram, err = meter.Float64Histogram(
 		"hl_core_tx_per_block",
-		api.WithDescription("Distribution of transactions per block in the Hyperliquid network"),
-		api.WithUnit("transactions"),
+		api.WithDescription("Distribution of validated signed actions per replica block; compatibility name retains tx"),
+		api.WithUnit("actions"),
 		api.WithExplicitBucketBoundaries(coreTxPerBlockBuckets...),
 	)
 	if err != nil {
@@ -321,7 +327,7 @@ func createInstruments() error {
 
 	HLCoreOrdersPerBlockHistogram, err = meter.Float64Histogram(
 		"hl_core_orders_per_block",
-		api.WithDescription("Distribution of orders per block in the Hyperliquid network"),
+		api.WithDescription("Distribution of individual order operations per validated replica block"),
 		api.WithUnit("orders"),
 		api.WithExplicitBucketBoundaries(coreOrdersPerBlockBuckets...),
 	)
@@ -367,7 +373,7 @@ func createInstruments() error {
 	// replica commands metrics
 	HLConsensusActiveStakeGauge, err = meter.Float64ObservableGauge(
 		"hl_consensus_active_stake",
-		api.WithDescription("Total stake of active validators in the Hyperliquid network"),
+		api.WithDescription("Raw validatorSummaries stake summed over isActive rows, including jailed rows, in 1e-8 HYPE units"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create consensus active stake gauge: %w", err)
@@ -375,7 +381,7 @@ func createInstruments() error {
 
 	HLConsensusInactiveStakeGauge, err = meter.Float64ObservableGauge(
 		"hl_consensus_inactive_stake",
-		api.WithDescription("Total stake of inactive validators in the Hyperliquid network"),
+		api.WithDescription("Raw validatorSummaries stake summed over non-active rows, in 1e-8 HYPE units"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create consensus inactive stake gauge: %w", err)
@@ -383,15 +389,39 @@ func createInstruments() error {
 
 	HLConsensusValidatorActiveStatus, err = meter.Float64ObservableGauge(
 		"hl_consensus_validator_active_status",
-		api.WithDescription("Active status of each validator (1 if active, 0 if not active)"),
+		api.WithDescription("Raw isActive from the latest complete validatorSummaries response (1=active, 0=inactive); not committee membership"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create consensus validator active status gauge: %w", err)
 	}
 
+	HLConsensusValidatorAPIActiveAndUnjailedStatus, err = meter.Float64ObservableGauge(
+		"hl_consensus_validator_api_active_and_unjailed_status",
+		api.WithDescription("Whether the latest complete validatorSummaries row is API-active and not jailed (1=yes, 0=no); this is not committee membership"),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create API-active-and-unjailed validator gauge: %w", err)
+	}
+
+	HLConsensusAPIActiveAndUnjailedCountGauge, err = meter.Int64ObservableGauge(
+		"hl_consensus_api_active_and_unjailed_validators",
+		api.WithDescription("Number of validators both active and not jailed in the latest complete validatorSummaries response; not a committee count"),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create API-active-and-unjailed validator count gauge: %w", err)
+	}
+
+	HLConsensusAPIActiveAndUnjailedStakeGauge, err = meter.Float64ObservableGauge(
+		"hl_consensus_api_active_and_unjailed_stake",
+		api.WithDescription("Raw validatorSummaries stake summed over rows that are both API-active and not jailed, in 1e-8 HYPE units"),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create API-active-and-unjailed stake gauge: %w", err)
+	}
+
 	HLConsensusValidatorRTTGauge, err = meter.Float64ObservableGauge(
 		"hl_consensus_validator_rtt",
-		api.WithDescription("Round-trip time (RTT) to validator nodes in milliseconds"),
+		api.WithDescription("Deprecated compatibility family: most recent successful TCP connect duration to a validator endpoint in milliseconds; not protocol RTT"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create consensus validator RTT gauge: %w", err)
@@ -516,7 +546,7 @@ func createInstruments() error {
 
 	HLConsensusVoteRoundGauge, err = meter.Int64ObservableGauge(
 		"hl_consensus_vote_round",
-		api.WithDescription("Last vote round for each validator (validator nodes only)"),
+		api.WithDescription("Last observed vote round per validator; peer votes are leadership-sampled when this node is next proposer, not continuous coverage"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create consensus vote round gauge: %w", err)
@@ -524,7 +554,7 @@ func createInstruments() error {
 
 	HLConsensusVoteTimeDiffGauge, err = meter.Float64ObservableGauge(
 		"hl_consensus_vote_time_diff_seconds",
-		api.WithDescription("Time since last vote for each validator in seconds (validator nodes only)"),
+		api.WithDescription("Age of the last observed vote per validator; peer observations are leadership-sampled and not a continuous liveness denominator"),
 		api.WithUnit("s"),
 	)
 	if err != nil {
@@ -533,7 +563,7 @@ func createInstruments() error {
 
 	HLConsensusCurrentRoundGauge, err = meter.Int64ObservableGauge(
 		"hl_consensus_current_round",
-		api.WithDescription("Current consensus round from block messages (validator nodes only)"),
+		api.WithDescription("Latest local consensus round observed from a fixture-proven round-advance, status, or block event"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create consensus current round gauge: %w", err)
@@ -549,7 +579,7 @@ func createInstruments() error {
 
 	HLConsensusHeartbeatAckCounter, err = meter.Int64Counter(
 		"hl_consensus_heartbeat_ack_received_total",
-		api.WithDescription("Total heartbeat acknowledgments received"),
+		api.WithDescription("Deprecated and unpopulated by the current heartbeat path because it mixed self loops with peer acknowledgements; use hl_consensus_heartbeat_peer_acks_total"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create consensus heartbeat ack counter: %w", err)
@@ -557,7 +587,7 @@ func createInstruments() error {
 
 	HLConsensusHeartbeatDelayHist, err = meter.Float64Histogram(
 		"hl_consensus_heartbeat_ack_delay_ms",
-		api.WithDescription("Distribution of heartbeat acknowledgment delays (ms)"),
+		api.WithDescription("Deprecated and unpopulated by the current heartbeat path because it mixed self loops with peer delay; use the separate peer and self-loop seconds histograms"),
 		// IMPORTANT: do not set api.WithUnit("ms"). The OTel→Prometheus bridge
 		// auto-appends "_milliseconds" when a unit is declared, which collides
 		// with the "_ms" suffix already in the metric name and produces
@@ -584,12 +614,28 @@ func createInstruments() error {
 		return fmt.Errorf("failed to create consensus connectivity gauge: %w", err)
 	}
 
+	HLConsensusDisconnectedSinceRoundGauge, err = meter.Int64ObservableGauge(
+		"hl_consensus_validator_disconnected_since_round",
+		api.WithDescription("Consensus round at which a status reporter began reporting a signer as disconnected, from the latest complete status snapshot"),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create disconnected-since-round gauge: %w", err)
+	}
+
 	HLConsensusHeartbeatStatusGauge, err = meter.Float64ObservableGauge(
 		"hl_consensus_heartbeat_status",
-		api.WithDescription("Heartbeat status metrics for validators"),
+		api.WithDescription("Seconds-valued heartbeat fields from the latest complete status snapshot; status_type is since_last_success or last_ack_duration"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create consensus heartbeat status gauge: %w", err)
+	}
+
+	HLConsensusHeartbeatAckObservedGauge, err = meter.Float64ObservableGauge(
+		"hl_consensus_heartbeat_ack_observed",
+		api.WithDescription("Whether last_ack_duration was numeric in the latest complete status snapshot (1=numeric including zero, 0=explicit null)"),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create heartbeat acknowledgement observed gauge: %w", err)
 	}
 
 	HLConsensusQCSignaturesCounter, err = meter.Int64Counter(
@@ -721,7 +767,7 @@ func createInstruments() error {
 	// P2P metrics (non-validator peers)
 	HLP2PNonValPeerConnectionsGauge, err = meter.Float64ObservableGauge(
 		"hl_p2p_non_val_peer_connections",
-		api.WithDescription("Number of non-validator peer connections by verification status"),
+		api.WithDescription("Deprecated compatibility gauge: explicit child identities in the latest fresh child_peers status snapshot by verification status; despite the name, values are peers, not connections"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create P2P non-validator peer connections gauge: %w", err)
@@ -729,7 +775,7 @@ func createInstruments() error {
 
 	HLP2PNonValPeersTotalGauge, err = meter.Float64ObservableGauge(
 		"hl_p2p_non_val_peers_total",
-		api.WithDescription("Total number of connected non-validator peers"),
+		api.WithDescription("Deprecated compatibility gauge: explicit child identities in the latest fresh child_peers status snapshot; not all connected peers"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create P2P non-validator peers total gauge: %w", err)

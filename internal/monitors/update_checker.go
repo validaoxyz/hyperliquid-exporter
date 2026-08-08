@@ -35,9 +35,10 @@ var (
 // conditional request: as long as the CDN object's ETag is unchanged we
 // skip the download entirely.
 func StartUpdateChecker(ctx context.Context, cfg config.Config, errCh chan<- error) {
+	metrics.RegisterSource(metrics.SourceUpdate, true)
 	goSafe("update_checker", func() {
 		if err := checkSoftwareUpdate(ctx, cfg); err != nil {
-			errCh <- fmt.Errorf("update checker error: %w", err)
+			ReportError(ctx, "update_checker", errCh, fmt.Errorf("update checker error: %w", err))
 		}
 		metrics.MarkMonitorTick("update_checker")
 
@@ -50,7 +51,7 @@ func StartUpdateChecker(ctx context.Context, cfg config.Config, errCh chan<- err
 				return
 			case <-ticker.C:
 				if err := checkSoftwareUpdate(ctx, cfg); err != nil {
-					errCh <- fmt.Errorf("update checker error: %w", err)
+					ReportError(ctx, "update_checker", errCh, fmt.Errorf("update checker error: %w", err))
 				}
 				metrics.MarkMonitorTick("update_checker")
 			}
@@ -91,9 +92,9 @@ func checkSoftwareUpdate(ctx context.Context, cfg config.Config) error {
 // the CDN. A stored ETag turns the periodic check into a 304 round-trip;
 // the full download+exec only happens when the CDN object actually changed.
 func refreshLatestVisorHash(ctx context.Context, chain string) error {
-	binaryURL := "https://binaries.hyperliquid-testnet.xyz/Testnet/hl-visor"
-	if chain == "mainnet" {
-		binaryURL = "https://binaries.hyperliquid.xyz/Mainnet/hl-visor"
+	binaryURL, err := visorURLForChain(chain)
+	if err != nil {
+		return err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, binaryURL, nil)
@@ -140,6 +141,17 @@ func refreshLatestVisorHash(ctx context.Context, chain string) error {
 	cachedLatestHash = commit
 	cachedETag = resp.Header.Get("ETag")
 	return nil
+}
+
+func visorURLForChain(raw string) (string, error) {
+	chain, err := config.NormalizeChain(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid update-check chain: %w", err)
+	}
+	if chain == "mainnet" {
+		return "https://binaries.hyperliquid.xyz/Mainnet/hl-visor", nil
+	}
+	return "https://binaries.hyperliquid-testnet.xyz/Testnet/hl-visor", nil
 }
 
 func updateUpToDateStatus() {

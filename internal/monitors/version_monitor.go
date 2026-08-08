@@ -39,10 +39,11 @@ func NodeBinaryReady(cfg config.Config) (string, error) {
 }
 
 func StartVersionMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
+	metrics.RegisterSource(metrics.SourceVersion, true)
 	goSafe("version", func() {
 		// run immediately on startup
 		if err := updateVersionInfo(ctx, cfg); err != nil {
-			errCh <- fmt.Errorf("version monitor error: %w", err)
+			ReportError(ctx, "version", errCh, fmt.Errorf("version monitor error: %w", err))
 		}
 		metrics.MarkMonitorTick("version")
 
@@ -55,7 +56,7 @@ func StartVersionMonitor(ctx context.Context, cfg config.Config, errCh chan<- er
 				return
 			case <-ticker.C:
 				if err := updateVersionInfo(ctx, cfg); err != nil {
-					errCh <- fmt.Errorf("version monitor error: %w", err)
+					ReportError(ctx, "version", errCh, fmt.Errorf("version monitor error: %w", err))
 				}
 				metrics.MarkMonitorTick("version")
 			}

@@ -7,8 +7,8 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
-	"strings"
 	"syscall"
+	"time"
 
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/exporter"
@@ -16,6 +16,8 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/monitors"
 )
+
+const metricsShutdownTimeout = 10 * time.Second
 
 func main() {
 	if len(os.Args) < 2 {
@@ -25,7 +27,7 @@ func main() {
 		fmt.Println("  vals     Validator CSV/IP utilities (hl_exporter vals -h)")
 		fmt.Println("  version  Print build information and exit")
 		fmt.Println("\nOptions for start:")
-		fmt.Println("  --chain                   Chain: 'mainnet' or 'testnet' (required with --otlp)")
+		fmt.Println("  --chain                   Chain: 'mainnet' or 'testnet' (required)")
 		fmt.Println("  --node-home               Node home directory (default $NODE_HOME or ~/hl)")
 		fmt.Println("  --node-binary             Node binary path (default $NODE_BINARY or $BINARY_HOME/hl-node)")
 		fmt.Println("  --metrics-port            Prometheus listen port (default 8086)")
@@ -38,7 +40,9 @@ func main() {
 		fmt.Println("  --probe-info-endpoint     Actively probe the node's --serve-info endpoint")
 		fmt.Println("  --info-endpoint-url       Info probe URL (default http://127.0.0.1:3001/info)")
 		fmt.Println("  --extended-metrics        Enable the extended monitor bundle")
-		fmt.Println("  --per-peer-metrics        Emit per-peer first/last-seen gauges")
+		fmt.Println("  --per-peer-metrics        Emit up to 16 current explicit child identities")
+		fmt.Println("  --tcp-service-ports       Comma-separated tracked TCP service ports (max 16)")
+		fmt.Println("  --disable-tcp6            Disable reading /proc/net/tcp6")
 		fmt.Println("  --skip-version-check      Skip the local hl-node --version probe")
 		fmt.Println("  --skip-update-check       Skip the upstream hl-visor up-to-date check")
 		fmt.Println("  --otlp                    Enable OTLP export (with --otlp-endpoint, --otlp-insecure, --alias)")
@@ -64,7 +68,7 @@ func main() {
 	nodeHome := startCmd.String("node-home", "", "Node home directory (overrides env var)")
 	nodeBinary := startCmd.String("node-binary", "", "Node binary path (overrides env var)")
 	alias := startCmd.String("alias", "", "Node alias (required when OTLP is enabled)")
-	chain := startCmd.String("chain", "", "Chain type (required when OTLP is enabled: 'mainnet' or 'testnet')")
+	chain := startCmd.String("chain", "", "Chain type (required: 'mainnet' or 'testnet')")
 	otlpInsecure := startCmd.Bool("otlp-insecure", false, "Use insecure connection for OTLP")
 	enableEVM := startCmd.Bool("evm-metrics", false, "Enable EVM monitoring")
 	contractMetrics := startCmd.Bool("contract-metrics", false, "Enable per-contract transaction metrics")
@@ -77,7 +81,9 @@ func main() {
 	probeInfoEndpoint := startCmd.Bool("probe-info-endpoint", false, "Actively HTTP-probe the node's --serve-info endpoint as a liveness check")
 	infoEndpointURL := startCmd.String("info-endpoint-url", "", "URL the info probe POSTs to (default http://127.0.0.1:3001/info)")
 	enableExtendedMetrics := startCmd.Bool("extended-metrics", false, "Enable the extended monitor set (tcp_lz4, log lines, public IP, Tokio runtime, operator config, tmp dir)")
-	enablePerPeerMetrics := startCmd.Bool("per-peer-metrics", false, "Emit hl_p2p_peer_{last,first}_seen_seconds{ip} per known peer (cardinality bounded by the peer set's LRU cap + 24h TTL)")
+	enablePerPeerMetrics := startCmd.Bool("per-peer-metrics", false, "Emit up to 16 current explicit child identities from child_peers status")
+	tcpServicePorts := startCmd.String("tcp-service-ports", config.DefaultTCPServicePorts, "Comma-separated tracked TCP service ports (1..16)")
+	disableTCP6 := startCmd.Bool("disable-tcp6", false, "Disable reading /proc/net/tcp6 (an unavailable enabled source is reported unhealthy)")
 	enablePprof := startCmd.Bool("pprof", false, "Expose Go profiling endpoints under /debug/pprof/ on the metrics listener")
 
 	switch os.Args[1] {
@@ -91,15 +97,6 @@ func main() {
 	if err := logger.SetLogLevel(*logLevel); err != nil {
 		fmt.Printf("Error setting log level: %v\n", err)
 		os.Exit(1)
-	}
-
-	if *chain != "" {
-		*chain = strings.ToLower(*chain)
-		if *chain != "mainnet" && *chain != "testnet" {
-			logger.Error("--chain flag must be either 'mainnet' or 'testnet' (case insensitive)")
-			os.Exit(1)
-		}
-		*chain = strings.ToLower(*chain)
 	}
 
 	flags := &config.Flags{
@@ -122,18 +119,20 @@ func main() {
 		InfoEndpointURL:       *infoEndpointURL,
 		EnableExtendedMetrics: *enableExtendedMetrics,
 		EnablePerPeerMetrics:  *enablePerPeerMetrics,
+		TCPServicePorts:       *tcpServicePorts,
+		DisableTCP6:           *disableTCP6,
 		EnablePprof:           *enablePprof,
 	}
 
-	cfg := config.LoadConfig(flags)
+	cfg, err := config.LoadConfig(flags)
+	if err != nil {
+		logger.Error("Invalid configuration: %v", err)
+		os.Exit(1)
+	}
 
 	if *enableOTLP {
 		if *alias == "" {
 			logger.Error("--alias flag is required when OTLP is enabled. This can be whatever you choose and is just an identifier for your node.")
-			os.Exit(1)
-		}
-		if *chain == "" {
-			logger.Error("--chain flag is required when OTLP is enabled")
 			os.Exit(1)
 		}
 		if *otlpEndpoint == "" {
@@ -161,7 +160,7 @@ func main() {
 		OTLPEndpoint:     *otlpEndpoint,
 		OTLPInsecure:     *otlpInsecure,
 		Alias:            *alias,
-		Chain:            *chain,
+		Chain:            cfg.Chain,
 		NodeHome:         cfg.NodeHome,
 		ValidatorAddress: validatorAddress,
 		IsValidator:      isValidator,
@@ -170,13 +169,30 @@ func main() {
 		EnablePprof:      *enablePprof,
 	}
 
-	if err := metrics.InitMetrics(ctx, metricsConfig); err != nil {
+	providerOwner, err := metrics.InitMetrics(ctx, metricsConfig)
+	if err != nil {
 		logger.Error("Failed to initialize metrics: %v", err)
 		os.Exit(1)
 	}
 
 	exporter.Start(ctx, cfg)
 
-	<-ctx.Done()
-	logger.InfoComponent("system", "Shutting down gracefully")
+	if err := shutdownMetrics(providerOwner); err != nil {
+		logger.ErrorComponent("system", "Metrics provider shutdown failed: %v", err)
+	}
+	logger.InfoComponent("system", "Shutdown complete")
+}
+
+type metricsShutdowner interface {
+	Shutdown(context.Context) error
+}
+
+func shutdownMetrics(owner metricsShutdowner) error {
+	return shutdownMetricsWithin(owner, metricsShutdownTimeout)
+}
+
+func shutdownMetricsWithin(owner metricsShutdowner, timeout time.Duration) error {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return owner.Shutdown(shutdownCtx)
 }

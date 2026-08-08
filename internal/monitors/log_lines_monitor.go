@@ -38,6 +38,7 @@ var logTargets = []struct {
 // rotation cleanly zeroes the series; treating it as a counter would
 // look like a regression at midnight UTC.
 func StartLogLinesMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
+	metrics.RegisterSource(metrics.SourceLogLines, true)
 	root := filepath.Join(cfg.NodeHome, "data", "log")
 	if _, err := os.Stat(root); err != nil {
 		logger.InfoComponent("log_lines",

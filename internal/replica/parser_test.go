@@ -165,6 +165,27 @@ func TestParseReplicaResponsesReportsMalformedAndCountRelation(t *testing.T) {
 	if more.CountRelation != "more" || more.Records != 2 {
 		t.Fatalf("more response relation = %+v", more)
 	}
+	for _, record := range []string{
+		`{"res":{"status":null}}`,
+		`{"res":{"status":"ok","response":{"data":{"statuses":null}}}}`,
+		`{"res":{"status":"ok","response":{"data":{"statuses":["success",null]}}}}`,
+	} {
+		got := parseReplicaResponses(json.RawMessage(`{"Full":[["ignored",[`+record+`]]]}`), 1)
+		if got.Coverage != "malformed" || got.MalformedRecords != 1 || len(got.ActionStatuses) != 0 || len(got.Outcomes) != 0 {
+			t.Fatalf("required-null response leaked partial metrics: record=%s metrics=%+v", record, got)
+		}
+	}
+	for name, raw := range map[string]string{
+		"null Full":    `{"Full":null}`,
+		"null records": `{"Full":[["ignored",null]]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := parseReplicaResponses(json.RawMessage(raw), 1)
+			if got.Coverage != "malformed" || got.MalformedContainers != 1 || got.Records != 0 || len(got.ActionStatuses) != 0 || len(got.Outcomes) != 0 {
+				t.Fatalf("wrong-shape null response = %+v", got)
+			}
+		})
+	}
 }
 
 func TestClassifyErrorUsesOnlyBoundedStageAndReason(t *testing.T) {

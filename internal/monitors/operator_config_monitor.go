@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
@@ -28,12 +29,16 @@ var operatorConfigFiles = []string{
 	"heartbeat_jailing_config.json",
 	// gossip-auction ordering toggle (2026-04 hl-node addition)
 	"node_gossip_priority_config.json",
+	// Presence only. The body is versioned/undocumented and is deliberately
+	// not interpreted by the exporter.
+	"bug_alert_ack.json",
 }
 
 // StartOperatorConfigMonitor publishes the mtime age of each file under
 // $NODE_HOME/file_mod_time_tracker/. The age is a proxy for "when did
 // the operator last touch this config" — useful in postmortems.
 func StartOperatorConfigMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
+	metrics.RegisterSource(metrics.SourceOperatorConfig, true)
 	root := filepath.Join(cfg.NodeHome, "file_mod_time_tracker")
 	if _, err := os.Stat(root); err != nil {
 		logger.InfoComponent("operator_config",
@@ -66,10 +71,21 @@ func tickOperatorConfig(root string) {
 	for _, f := range operatorConfigFiles {
 		info, err := os.Stat(filepath.Join(root, f))
 		if err != nil {
+			if os.IsNotExist(err) {
+				metrics.HLNodeOperatorConfigPresent.WithLabelValues(f).Set(0)
+			} else {
+				metrics.HLNodeOperatorConfigPresent.WithLabelValues(f).Set(-1)
+			}
+			metrics.HLNodeOperatorConfigAgeSeconds.DeleteLabelValues(f)
 			continue
 		}
+		metrics.HLNodeOperatorConfigPresent.WithLabelValues(f).Set(1)
+		age := now.Sub(info.ModTime()).Seconds()
+		if age < 0 {
+			age = 0
+		}
 		metrics.HLNodeOperatorConfigAgeSeconds.WithLabelValues(f).
-			Set(now.Sub(info.ModTime()).Seconds())
+			Set(age)
 	}
 
 	// Count *_FAILED_LOAD sidecars hl-node leaves when it rejects an
@@ -78,16 +94,33 @@ func tickOperatorConfig(root string) {
 	// similar and it never actually loaded.
 	var failed int64
 	if entries, err := os.ReadDir(root); err == nil {
+		known := make(map[string]struct{}, len(operatorConfigFiles))
+		counts := make(map[string]int64, len(operatorConfigFiles)+1)
+		for _, file := range operatorConfigFiles {
+			known[file] = struct{}{}
+			counts[file] = 0
+		}
+		counts["unknown"] = 0
 		for _, e := range entries {
 			if e.IsDir() {
 				continue
 			}
-			if len(e.Name()) > 12 && e.Name()[len(e.Name())-12:] == "_FAILED_LOAD" {
-				failed++
+			if !strings.HasSuffix(e.Name(), "_FAILED_LOAD") {
+				continue
 			}
+			failed++
+			file := strings.TrimSuffix(e.Name(), "_FAILED_LOAD")
+			if _, ok := known[file]; !ok {
+				file = "unknown"
+			}
+			counts[file]++
 		}
+		for _, file := range operatorConfigFiles {
+			metrics.HLNodeOperatorConfigFailedLoad.WithLabelValues(file).Set(float64(counts[file]))
+		}
+		metrics.HLNodeOperatorConfigFailedLoad.WithLabelValues("unknown").Set(float64(counts["unknown"]))
+		metrics.HLNodeOperatorConfigFailedLoads.Set(float64(failed))
 	}
-	metrics.HLNodeOperatorConfigFailedLoads.Set(float64(failed))
 
 	readJailingConfig(root)
 }

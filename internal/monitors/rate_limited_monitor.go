@@ -2,6 +2,7 @@ package monitors
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,89 +13,170 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
-const rateLimitedPollInterval = 60 * time.Second
+const (
+	rateLimitedPollInterval = 60 * time.Second
+	rateLimitedRecentWindow = 120 * time.Second
+)
 
-// rateLimitedStreams is the fixed set of rate-limiter streams hl-node
-// writes under data/rate_limited_ips/.
-var rateLimitedStreams = []string{
-	"abci_stream",
-	"gossip_rpc_blocks",
-	"gossip_rpc_requests",
+var rateLimitedStreams = []string{"abci_stream", "gossip_rpc_blocks", "gossip_rpc_requests"}
+
+var rateLimitedSourceIDs = map[string]metrics.SourceID{
+	"abci_stream":         metrics.SourceRateLimitABCI,
+	"gossip_rpc_blocks":   metrics.SourceRateLimitBlocks,
+	"gossip_rpc_requests": metrics.SourceRateLimitRequests,
 }
 
-// StartRateLimitedMonitor counts non-empty files in the newest date dir of
-// each data/rate_limited_ips stream. hl-node only writes these when it
-// actively rate-limits a peer, so a healthy node sits at zero and any
-// non-zero value is a cheap abuse/DoS tripwire. The record schema is
-// deliberately not parsed (never observed populated on our nodes); the
-// file count alone carries the signal.
+type rateLimitedSnapshot struct {
+	retained     int
+	recent       int
+	lastNonempty time.Time
+}
+
+type rateLimitedScanError struct {
+	stage string
+	err   error
+}
+
+func (e *rateLimitedScanError) Error() string { return e.stage + ": " + e.err.Error() }
+func (e *rateLimitedScanError) Unwrap() error { return e.err }
+
 func StartRateLimitedMonitor(ctx context.Context, cfg config.Config) {
 	root := filepath.Join(cfg.NodeHome, "data", "rate_limited_ips")
-	if _, err := os.Stat(root); err != nil {
-		logger.InfoComponent("rate_limited",
-			"rate_limited_ips directory not present (%s); monitor idle", root)
-		<-ctx.Done()
-		return
+	for _, source := range rateLimitedSourceIDs {
+		metrics.RegisterSource(source, true)
 	}
+	logger.InfoComponent("rate_limited", "watching %s (late discovery enabled)", root)
 
-	logger.InfoComponent("rate_limited", "watching %s", root)
-
+	lastNonempty := make(map[string]time.Time, len(rateLimitedStreams))
 	ticker := time.NewTicker(rateLimitedPollInterval)
 	defer ticker.Stop()
-
-	tickRateLimited(root)
-	metrics.MarkMonitorTick("rate_limited")
-
+	tickRateLimitedAt(root, time.Now(), lastNonempty)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			tickRateLimited(root)
-			metrics.MarkMonitorTick("rate_limited")
+			tickRateLimitedAt(root, time.Now(), lastNonempty)
 		}
 	}
 }
 
 func tickRateLimited(root string) {
+	tickRateLimitedAt(root, time.Now(), make(map[string]time.Time))
+}
+
+func tickRateLimitedAt(root string, now time.Time, lastNonempty map[string]time.Time) {
+	metrics.MarkMonitorAttempt("rate_limited")
+	committed := 0
 	for _, stream := range rateLimitedStreams {
-		metrics.HLNodeRateLimitedFiles.WithLabelValues(stream).
-			Set(float64(countNonEmptyNewestDate(filepath.Join(root, stream, "hourly"))))
+		source := rateLimitedSourceIDs[stream]
+		metrics.MarkSourceAttempt(source)
+		snapshot, err := scanRateLimitedStream(filepath.Join(root, stream, "hourly"), now)
+		if err != nil {
+			markRateLimitedScanFailure(stream, source, err)
+			continue
+		}
+		if snapshot.lastNonempty.After(lastNonempty[stream]) {
+			lastNonempty[stream] = snapshot.lastNonempty
+		}
+		metrics.WithPrometheusSnapshotUpdate(func() {
+			metrics.HLNodeRateLimitedNonemptyFilesLatestDate.WithLabelValues(stream).Set(float64(snapshot.retained))
+			metrics.HLNodeRateLimitedRecentFiles.WithLabelValues(stream).Set(float64(snapshot.recent))
+			lastUpdate := 0.0
+			if !lastNonempty[stream].IsZero() {
+				lastUpdate = float64(lastNonempty[stream].Unix())
+			}
+			metrics.HLNodeRateLimitedLastNonemptyUpdateTimestampSeconds.WithLabelValues(stream).Set(lastUpdate)
+			metrics.HLNodeRateLimitedSourceUp.WithLabelValues(stream).Set(1)
+			metrics.HLNodeRateLimitedLastSuccessTimestampSeconds.WithLabelValues(stream).Set(float64(now.Unix()))
+			metrics.HLNodeRateLimitedFiles.WithLabelValues(stream).Set(float64(snapshot.retained)) // one-release alias
+			metrics.MarkSourceValidObservation(source, time.Time{})
+			metrics.MarkSourcePublication(source)
+		})
+		committed++
+	}
+	if committed > 0 {
+		metrics.MarkMonitorValidObservation("rate_limited")
+		metrics.MarkMonitorPublication("rate_limited")
 	}
 }
 
-// countNonEmptyNewestDate returns how many non-empty regular files sit in
-// the lexicographically-newest date dir under hourlyRoot; 0 when the
-// layout is absent or empty.
-func countNonEmptyNewestDate(hourlyRoot string) int {
+func markRateLimitedScanFailure(stream string, source metrics.SourceID, err error) {
+	stage := "root"
+	var scanErr *rateLimitedScanError
+	if errors.As(err, &scanErr) {
+		stage = scanErr.stage
+	}
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		metrics.HLNodeRateLimitedSourceUp.WithLabelValues(stream).Set(0)
+		metrics.HLNodeRateLimitedReadErrorsTotal.WithLabelValues(stream, stage).Inc()
+		if stage == "root" && errors.Is(err, os.ErrNotExist) {
+			// A missing fixed root is confirmed absence. Races below that
+			// root are read failures and must not erase source presence.
+			metrics.MarkSourceAbsent(source)
+		} else {
+			metrics.MarkSourceError(source, metrics.SourceFailureRead)
+		}
+		metrics.IncMonitorError("rate_limited")
+	})
+}
+
+func scanRateLimitedStream(hourlyRoot string, now time.Time) (rateLimitedSnapshot, error) {
 	entries, err := os.ReadDir(hourlyRoot)
 	if err != nil {
-		return 0
+		return rateLimitedSnapshot{}, &rateLimitedScanError{stage: "root", err: err}
 	}
 	dates := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if e.IsDir() {
-			dates = append(dates, e.Name())
+	for _, entry := range entries {
+		if entry.IsDir() {
+			dates = append(dates, entry.Name())
 		}
 	}
 	if len(dates) == 0 {
-		return 0
+		return rateLimitedSnapshot{}, nil
 	}
 	sort.Strings(dates)
-	newest := filepath.Join(hourlyRoot, dates[len(dates)-1])
+	var snapshot rateLimitedSnapshot
+	latestDate := dates[len(dates)-1]
+	for _, date := range dates {
+		files, err := os.ReadDir(filepath.Join(hourlyRoot, date))
+		if err != nil {
+			return rateLimitedSnapshot{}, &rateLimitedScanError{stage: "date", err: err}
+		}
+		for _, file := range files {
+			if file.IsDir() {
+				continue
+			}
+			info, err := file.Info()
+			if err != nil {
+				return rateLimitedSnapshot{}, &rateLimitedScanError{stage: "fileinfo", err: err}
+			}
+			if !info.Mode().IsRegular() || info.Size() <= 0 {
+				continue
+			}
+			if date == latestDate {
+				snapshot.retained++
+			}
+			age := now.Sub(info.ModTime())
+			if age >= 0 && age <= rateLimitedRecentWindow {
+				snapshot.recent++
+			}
+			// A future filesystem timestamp is not evidence of a future
+			// limiter event. Keep the retained file count, but exclude it from
+			// every time-derived gauge.
+			if !info.ModTime().After(now) && info.ModTime().After(snapshot.lastNonempty) {
+				snapshot.lastNonempty = info.ModTime()
+			}
+		}
+	}
+	return snapshot, nil
+}
 
-	files, err := os.ReadDir(newest)
+// countNonEmptyNewestDate is retained for compatibility with existing tests.
+func countNonEmptyNewestDate(hourlyRoot string) int {
+	snapshot, err := scanRateLimitedStream(hourlyRoot, time.Now())
 	if err != nil {
 		return 0
 	}
-	count := 0
-	for _, f := range files {
-		if f.IsDir() {
-			continue
-		}
-		if info, err := f.Info(); err == nil && info.Size() > 0 {
-			count++
-		}
-	}
-	return count
+	return snapshot.retained
 }

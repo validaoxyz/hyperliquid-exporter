@@ -105,6 +105,50 @@ func TestTailStreamReadsFirstFileCreatedAfterEmptyStartup(t *testing.T) {
 	}
 }
 
+func TestTailStreamReadsFirstFileAfterENOENTStartup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "late")
+	var current atomic.Value
+	current.Store("")
+	lines := make(chan string, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tailStream(ctx, tailStreamOpts{
+			component: "stream_test",
+			name:      "ENOENT startup",
+			resolve: func() (string, error) {
+				resolved := current.Load().(string)
+				if resolved == "" {
+					return "", os.ErrNotExist
+				}
+				return resolved, nil
+			},
+			rescanEvery: 10 * time.Millisecond,
+			eofSleep:    5 * time.Millisecond,
+			onLine:      func(line string) { lines <- line },
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(streamTestTimeout):
+			t.Fatal("tailStream did not stop after cancellation")
+		}
+	})
+
+	time.Sleep(25 * time.Millisecond)
+	if err := os.WriteFile(path, []byte("first\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current.Store(path)
+	if got := waitStreamValue(t, lines); got != "first\n" {
+		t.Fatalf("late first line = %q, want first record", got)
+	}
+}
+
 func TestTailStreamDrainsOldFileBeforeRotation(t *testing.T) {
 	dir := t.TempDir()
 	oldPath := filepath.Join(dir, "old")

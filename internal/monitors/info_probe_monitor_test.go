@@ -2,8 +2,10 @@ package monitors
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +19,96 @@ import (
 // probeOnce directly, so register here (idempotent)
 func init() {
 	metrics.InitInfoProbeInstruments()
+	metrics.InitInfoProbeStatusInstruments()
+}
+
+func TestProbeOnce_SubprobesRemainIndependentAndAgeFailures(t *testing.T) {
+	base := time.Unix(1_800_000_000, 0)
+	var nowNanos atomic.Int64
+	nowNanos.Store(base.UnixNano())
+	now := func() time.Time { return time.Unix(0, nowNanos.Load()) }
+
+	// mode 0: both succeed; mode 1: meta fails; mode 2: exchange fails.
+	var mode atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		switch request["type"] {
+		case "meta":
+			if mode.Load() == 1 {
+				http.Error(w, "meta unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			_, _ = w.Write([]byte("{}"))
+		case "exchangeStatus":
+			if mode.Load() == 2 {
+				http.Error(w, "exchange unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]float64{
+				"time": float64(now().UnixMilli()),
+			})
+		default:
+			http.Error(w, "unknown type", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	probeOnceAt(context.Background(), client, server.URL, now)
+	if got := b04MetricValue(t, metrics.HLInfoEndpointUp); got != 1 {
+		t.Fatalf("meta up after joint success = %v, want 1", got)
+	}
+	if got := b04MetricValue(t, metrics.HLInfoExchangeStatusUp); got != 1 {
+		t.Fatalf("exchange up after joint success = %v, want 1", got)
+	}
+
+	mode.Store(1)
+	nowNanos.Store(base.Add(10 * time.Second).UnixNano())
+	probeOnceAt(context.Background(), client, server.URL, now)
+	if got := b04MetricValue(t, metrics.HLInfoEndpointUp); got != 0 {
+		t.Fatalf("meta up after meta-only failure = %v, want 0", got)
+	}
+	if got := b04MetricValue(t, metrics.HLInfoExchangeStatusUp); got != 1 {
+		t.Fatalf("exchange was coupled to meta failure: up=%v", got)
+	}
+	if got := b04MetricValue(t, metrics.HLInfoMetaLastSuccessAgeSeconds); got != 10 {
+		t.Fatalf("meta success age = %v, want 10", got)
+	}
+
+	deltaBeforeExchangeFailure := b04MetricValue(t, metrics.HLInfoExchangeStatusDeltaSeconds)
+	lastExchangeSuccess := b04MetricValue(t, metrics.HLInfoExchangeStatusLastSuccess)
+	mode.Store(2)
+	nowNanos.Store(base.Add(20 * time.Second).UnixNano())
+	probeOnceAt(context.Background(), client, server.URL, now)
+	if got := b04MetricValue(t, metrics.HLInfoEndpointUp); got != 1 {
+		t.Fatalf("meta was coupled to exchange failure: up=%v", got)
+	}
+	if got := b04MetricValue(t, metrics.HLInfoExchangeStatusUp); got != 0 {
+		t.Fatalf("exchange up after exchange-only failure = %v, want 0", got)
+	}
+	if got := b04MetricValue(t, metrics.HLInfoExchangeStatusLastSuccessAge); got != 10 {
+		t.Fatalf("exchange success age = %v, want 10", got)
+	}
+	if got := b04MetricValue(t, metrics.HLInfoExchangeStatusLastSuccess); got != lastExchangeSuccess {
+		t.Fatalf("exchange failure advanced last success from %v to %v", lastExchangeSuccess, got)
+	}
+	if got := b04MetricValue(t, metrics.HLInfoExchangeStatusDeltaSeconds); got != deltaBeforeExchangeFailure {
+		t.Fatalf("exchange failure changed retained delta from %v to %v", deltaBeforeExchangeFailure, got)
+	}
+
+	mode.Store(0)
+	nowNanos.Store(base.Add(30 * time.Second).UnixNano())
+	probeOnceAt(context.Background(), client, server.URL, now)
+	if got := b04MetricValue(t, metrics.HLInfoExchangeStatusUp); got != 1 {
+		t.Fatalf("exchange up after recovery = %v, want 1", got)
+	}
+	if got := b04MetricValue(t, metrics.HLInfoExchangeStatusLastSuccessAge); got != 0 {
+		t.Fatalf("exchange age after recovery = %v, want 0", got)
+	}
 }
 
 func TestProbeOnce_HappyPath(t *testing.T) {

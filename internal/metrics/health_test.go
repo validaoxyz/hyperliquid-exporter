@@ -155,3 +155,45 @@ func TestSourceVocabularyIsUniqueAndFailureStagesAreBounded(t *testing.T) {
 		t.Fatalf("decode failure state = read:%d schema:%d", got.ReadOK, got.SchemaOK)
 	}
 }
+
+func TestSourceFailureStagesPublishReadAndSchemaState(t *testing.T) {
+	readFailures := []SourceFailureStage{
+		SourceFailureDiscovery,
+		SourceFailureStat,
+		SourceFailureOpen,
+		SourceFailureRead,
+		SourceFailureWalk,
+		SourceFailureRequest,
+		SourceFailureStatus,
+	}
+	for _, stage := range readFailures {
+		t.Run(string(stage), func(t *testing.T) {
+			resetHealthStateForTest(t)
+			RegisterSource(SourceMempool, true)
+			MarkSourceReadOutcome(SourceMempool, true)
+			MarkSourceSchemaOutcome(SourceMempool, true)
+
+			if !MarkSourceError(SourceMempool, stage) {
+				t.Fatalf("stage %q was rejected", stage)
+			}
+			got := snapshotSources()[0]
+			if got.ReadOK != 0 || got.SchemaOK != sourceStateUnknown {
+				t.Fatalf("stage %q state = read:%d schema:%d, want 0/%d", stage, got.ReadOK, got.SchemaOK, sourceStateUnknown)
+			}
+		})
+	}
+
+	for _, stage := range []SourceFailureStage{SourceFailureDecode, SourceFailureSchema} {
+		t.Run(string(stage), func(t *testing.T) {
+			resetHealthStateForTest(t)
+			RegisterSource(SourceMempool, true)
+			if !MarkSourceError(SourceMempool, stage) {
+				t.Fatalf("stage %q was rejected", stage)
+			}
+			got := snapshotSources()[0]
+			if got.ReadOK != 1 || got.SchemaOK != 0 {
+				t.Fatalf("stage %q state = read:%d schema:%d, want 1/0", stage, got.ReadOK, got.SchemaOK)
+			}
+		})
+	}
+}

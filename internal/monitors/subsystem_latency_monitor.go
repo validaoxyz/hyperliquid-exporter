@@ -2,9 +2,13 @@ package monitors
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,7 +81,19 @@ type latencySummary struct {
 	BucketWorkFrac float64 `json:"bucket_work_frac"`
 }
 
-const subsystemLatencyPollInterval = 30 * time.Second
+const (
+	subsystemLatencyPollInterval = 30 * time.Second
+	subsystemLatencyStaleAfter   = 15 * time.Minute
+)
+
+var (
+	errNoCompleteSummary = errors.New("no complete latency summary")
+	errPartialSummary    = errors.New("partial latency summary")
+)
+
+type subsystemLatencyState struct {
+	published map[string]struct{}
+}
 
 // StartSubsystemLatencyMonitor scans $NODE_HOME/data/latency_summaries every
 // subsystemLatencyPollInterval. For each allowlisted subsystem it reads the
@@ -88,39 +104,46 @@ const subsystemLatencyPollInterval = 30 * time.Second
 // re-fetches; no resume state to lose).
 func StartSubsystemLatencyMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	root := filepath.Join(cfg.NodeHome, "data", "latency_summaries")
-
-	if _, err := os.Stat(root); err != nil {
-		logger.InfoComponent("subsystem_latency",
-			"latency_summaries directory not present (%s); monitor idle", root)
-		<-ctx.Done()
-		return
-	}
-
 	logger.InfoComponent("subsystem_latency", "watching %s", root)
+	metrics.RegisterSource(metrics.SourceSubsystemLatency, true)
+	state := &subsystemLatencyState{published: make(map[string]struct{})}
 
 	ticker := time.NewTicker(subsystemLatencyPollInterval)
 	defer ticker.Stop()
 
-	tickSubsystemLatency(root)
-	metrics.MarkMonitorTick("subsystem_latency")
+	if err := tickSubsystemLatency(root, state, time.Now()); err != nil {
+		logger.DebugComponent("subsystem_latency", "initial scan: %v", err)
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			tickSubsystemLatency(root)
-			metrics.MarkMonitorTick("subsystem_latency")
+			if err := tickSubsystemLatency(root, state, time.Now()); err != nil {
+				logger.DebugComponent("subsystem_latency", "scan: %v", err)
+			}
 		}
 	}
 }
 
-func tickSubsystemLatency(root string) {
+func tickSubsystemLatency(root string, state *subsystemLatencyState, now time.Time) error {
+	metrics.MarkMonitorAttempt("subsystem_latency")
+	metrics.MarkSourceAttempt(metrics.SourceSubsystemLatency)
 	subDirs, err := os.ReadDir(root)
 	if err != nil {
-		logger.DebugComponent("subsystem_latency", "read root: %v", err)
-		return
+		if os.IsNotExist(err) {
+			withdrawSubsystemLatency(state)
+			metrics.MarkSourceAbsent(metrics.SourceSubsystemLatency)
+			metrics.MarkMonitorPublication("subsystem_latency")
+			return nil
+		}
+		metrics.MarkSourceError(metrics.SourceSubsystemLatency, metrics.SourceFailureRead)
+		return fmt.Errorf("read root: %w", err)
 	}
+
+	snapshot := make(map[string]latencySummary)
+	var newest time.Time
 	for _, sub := range subDirs {
 		if !sub.IsDir() {
 			continue
@@ -132,14 +155,39 @@ func tickSubsystemLatency(root string) {
 		path := filepath.Join(root, name)
 		datePath, err := latestDateFile(path)
 		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			metrics.MarkSourceError(metrics.SourceSubsystemLatency, metrics.SourceFailureRead)
+			return fmt.Errorf("latest date for %s: %w", name, err)
+		}
+		summary, sampleTime, err := readLastSummaryComplete(datePath)
+		if err != nil {
+			if errors.Is(err, errNoCompleteSummary) {
+				continue
+			}
+			metrics.MarkSourceError(metrics.SourceSubsystemLatency, metrics.SourceFailureSchema)
+			return fmt.Errorf("summary %s: %w", name, err)
+		}
+		if now.Sub(sampleTime) > subsystemLatencyStaleAfter {
 			continue
 		}
-		summary, ok := readLastSummary(datePath)
-		if !ok {
-			continue
+		snapshot[name] = summary
+		if sampleTime.After(newest) {
+			newest = sampleTime
 		}
-		publishSubsystemLatency(name, summary)
 	}
+
+	replaceSubsystemLatency(state, snapshot)
+	if len(snapshot) == 0 {
+		metrics.MarkSourceAvailable(metrics.SourceSubsystemLatency)
+	} else {
+		metrics.MarkSourceValidObservation(metrics.SourceSubsystemLatency, newest)
+		metrics.MarkMonitorValidObservation("subsystem_latency")
+	}
+	metrics.MarkSourcePublication(metrics.SourceSubsystemLatency)
+	metrics.MarkMonitorPublication("subsystem_latency")
+	return nil
 }
 
 // latestDateFile returns the highest-named (lexicographically — which is
@@ -168,15 +216,23 @@ func latestDateFile(dir string) (string, error) {
 // the tail bytes only (4 KiB is plenty — each record is ~400 bytes) so it
 // is fast for the 1 MB-plus daily files.
 func readLastSummary(path string) (latencySummary, bool) {
+	s, _, err := readLastSummaryComplete(path)
+	return s, err == nil
+}
+
+// readLastSummaryComplete returns only a newline-terminated JSONL record.
+// An unterminated tail is retained by the writer and ignored here; a malformed
+// complete record rejects the scan so callers keep the prior generation.
+func readLastSummaryComplete(path string) (latencySummary, time.Time, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return latencySummary{}, false
+		return latencySummary{}, time.Time{}, err
 	}
 	defer f.Close()
 
 	info, err := f.Stat()
 	if err != nil {
-		return latencySummary{}, false
+		return latencySummary{}, time.Time{}, err
 	}
 	const window = 4096
 	start := info.Size() - window
@@ -184,26 +240,108 @@ func readLastSummary(path string) (latencySummary, bool) {
 		start = 0
 	}
 	if _, err := f.Seek(start, io.SeekStart); err != nil {
-		return latencySummary{}, false
+		return latencySummary{}, time.Time{}, err
 	}
 	buf, err := io.ReadAll(bufio.NewReader(f))
 	if err != nil {
-		return latencySummary{}, false
+		return latencySummary{}, time.Time{}, err
 	}
-	lines := strings.Split(strings.TrimRight(string(buf), "\n"), "\n")
-	// scan upwards for the last parseable line — guards against a torn
-	// trailing write from the node.
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
-		if line == "" || !strings.HasPrefix(line, "{") {
-			continue
-		}
-		var s latencySummary
-		if err := json.Unmarshal([]byte(line), &s); err == nil {
-			return s, true
+	if start > 0 {
+		if firstNL := strings.IndexByte(string(buf), '\n'); firstNL >= 0 {
+			buf = buf[firstNL+1:]
+		} else {
+			// A non-empty bounded tail without a delimiter is an oversized
+			// unterminated record, not a successfully empty source. Reject the
+			// scan so callers retain the previous complete snapshot.
+			return latencySummary{}, time.Time{}, errPartialSummary
 		}
 	}
-	return latencySummary{}, false
+	lastNL := strings.LastIndexByte(string(buf), '\n')
+	if lastNL < 0 {
+		if len(bytes.TrimSpace(buf)) == 0 {
+			return latencySummary{}, time.Time{}, errNoCompleteSummary
+		}
+		return latencySummary{}, time.Time{}, errPartialSummary
+	}
+	lines := strings.Split(strings.TrimSpace(string(buf[:lastNL])), "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[len(lines)-1]) == "" {
+		return latencySummary{}, time.Time{}, errNoCompleteSummary
+	}
+	line := strings.TrimSpace(lines[len(lines)-1])
+	s, err := parseLatencySummaryRecord([]byte(line))
+	if err != nil {
+		return latencySummary{}, time.Time{}, fmt.Errorf("decode complete record: %w", err)
+	}
+	sampleTime, ok := parseVisorTime(s.Time)
+	if !ok {
+		return latencySummary{}, time.Time{}, fmt.Errorf("invalid sample time")
+	}
+	return s, sampleTime, nil
+}
+
+func parseLatencySummaryRecord(line []byte) (latencySummary, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(line, &raw); err != nil {
+		return latencySummary{}, err
+	}
+	var summary latencySummary
+	fields := []struct {
+		name string
+		dst  any
+	}{
+		{"time", &summary.Time}, {"total_n", &summary.TotalN}, {"total_mean", &summary.TotalMean},
+		{"mean", &summary.Mean}, {"med", &summary.Median}, {"p90", &summary.P90},
+		{"p95", &summary.P95}, {"max", &summary.Max}, {"std_dev", &summary.StdDev},
+		{"work_frac", &summary.WorkFrac},
+	}
+	for _, field := range fields {
+		if err := unmarshalRequiredJSON(raw[field.name], field.dst); err != nil {
+			return latencySummary{}, fmt.Errorf("required field %s: %w", field.name, err)
+		}
+	}
+	if summary.TotalN < 0 {
+		return latencySummary{}, fmt.Errorf("negative total_n")
+	}
+	for _, value := range []float64{summary.TotalMean, summary.Mean, summary.Median, summary.P90, summary.P95, summary.Max, summary.StdDev, summary.WorkFrac} {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return latencySummary{}, fmt.Errorf("non-finite summary value")
+		}
+	}
+	return summary, nil
+}
+
+func replaceSubsystemLatency(state *subsystemLatencyState, snapshot map[string]latencySummary) {
+	for subsystem, summary := range snapshot {
+		publishSubsystemLatency(subsystem, summary)
+	}
+	for subsystem := range state.published {
+		if _, ok := snapshot[subsystem]; !ok {
+			deleteSubsystemLatency(subsystem)
+		}
+	}
+	state.published = make(map[string]struct{}, len(snapshot))
+	for subsystem := range snapshot {
+		state.published[subsystem] = struct{}{}
+	}
+}
+
+func withdrawSubsystemLatency(state *subsystemLatencyState) {
+	for subsystem := range state.published {
+		deleteSubsystemLatency(subsystem)
+	}
+	state.published = make(map[string]struct{})
+}
+
+func deleteSubsystemLatency(subsystem string) {
+	metrics.HLNodeSubsystemLatencyMean.DeleteLabelValues(subsystem)
+	metrics.HLNodeSubsystemLatencyMedian.DeleteLabelValues(subsystem)
+	metrics.HLNodeSubsystemLatencyP90.DeleteLabelValues(subsystem)
+	metrics.HLNodeSubsystemLatencyP95.DeleteLabelValues(subsystem)
+	metrics.HLNodeSubsystemLatencyMax.DeleteLabelValues(subsystem)
+	metrics.HLNodeSubsystemLatencyStdDev.DeleteLabelValues(subsystem)
+	metrics.HLNodeSubsystemWorkFrac.DeleteLabelValues(subsystem)
+	metrics.HLNodeSubsystemSamplesTotal.DeleteLabelValues(subsystem)
+	metrics.HLNodeSubsystemLatencyLifetimeMean.DeleteLabelValues(subsystem)
 }
 
 func publishSubsystemLatency(subsystem string, s latencySummary) {

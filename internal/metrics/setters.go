@@ -118,23 +118,10 @@ func getOrCreateOpAttrs(actionType, category string) []api.AddOption {
 }
 
 func IncrementProposerCounter(proposer string) {
-	// the proposer field from replica_cmds contains the signer address
-	signer := proposer
-	validator := signer // default to signer if no mapping
-
-	// look up the val addr for this signer
-	if mapped, ok := GetValidatorForSigner(strings.ToLower(signer)); ok {
-		validator = mapped
-		logger.Debug("Mapped signer %s to validator %s", signer, validator)
-	} else {
-		logger.Debug("No mapping found for signer %s, using signer as validator", signer)
-	}
-
-	// get the val moniker
-	name := GetValidatorName(validator)
-	if name == "" {
-		// if we can't find a name, try with the original case
-		name = GetValidatorName(strings.ToLower(validator))
+	identity, ok := ResolveValidatorIdentity(proposer)
+	if !ok {
+		identity = ValidatorIdentity{Validator: "unknown", Signer: "unknown", Name: "unknown"}
+		logger.Debug("No current identity mapping for proposer; recording bounded unknown series")
 	}
 
 	// now register metric atomically
@@ -144,13 +131,10 @@ func IncrementProposerCounter(proposer string) {
 	ctx := context.Background()
 	// always set the name label so the series shape stays stable; use the
 	// "unknown" sentinel (as getValidatorLabels does) when we have no moniker
-	if name == "" {
-		name = "unknown"
-	}
 	labels := []attribute.KeyValue{
-		attribute.String("validator", validator),
-		attribute.String("signer", signer),
-		attribute.String("name", name),
+		attribute.String("validator", identity.Validator),
+		attribute.String("signer", identity.Signer),
+		attribute.String("name", identity.Name),
 	}
 
 	HLConsensusProposerCounter.Add(ctx, 1, api.WithAttributes(labels...))
@@ -216,31 +200,88 @@ type ValidatorSummarySnapshot struct {
 	Jailed, Active          bool
 }
 
+// ValidatorAggregateSnapshot is derived from exactly the same complete API
+// generation as ValidatorSummarySnapshot. Keeping it explicit makes the
+// atomic publication contract testable without taking a scrape in the middle
+// of a writer transaction.
+type ValidatorAggregateSnapshot struct {
+	TotalStake             float64
+	JailedStake            float64
+	NotJailedStake         float64
+	ActiveStake            float64
+	InactiveStake          float64
+	ValidatorCount         int64
+	ActiveAndUnjailedStake float64
+	ActiveAndUnjailedCount int64
+}
+
+var (
+	validatorSnapshotGeneration uint64
+	validatorSnapshotAggregates ValidatorAggregateSnapshot
+)
+
 // ReplaceValidatorSummaries reconciles the per-validator stake, jailed and
 // active gauges to the latest validatorSummaries response, replacing each
 // labeled map wholesale (same pattern as ReplaceValidatorLatencyEMA).
 // Validators that leave the set disappear from the gauges instead of
 // freezing at their last value forever.
 func ReplaceValidatorSummaries(snap []ValidatorSummarySnapshot) {
+	ReplaceValidatorSnapshot(snap)
+}
+
+// ReplaceValidatorSnapshot stages and commits the full signer/validator
+// registry, all per-row status families, and every row-derived aggregate
+// under one metrics lock. A callback therefore observes either the old
+// generation or the new one, never a mixed count/stake view.
+func ReplaceValidatorSnapshot(snap []ValidatorSummarySnapshot) {
 	stake := make(map[string]labeledValue, len(snap))
 	jailed := make(map[string]labeledValue, len(snap))
 	active := make(map[string]labeledValue, len(snap))
+	eligible := make(map[string]labeledValue, len(snap))
+	signerToValidator := make(map[string]string, len(snap))
+	validatorInfo := make(map[string]ValidatorInfo, len(snap))
+	var aggregates ValidatorAggregateSnapshot
 	for _, v := range snap {
+		validator := strings.ToLower(strings.TrimSpace(v.Validator))
+		signer := strings.ToLower(strings.TrimSpace(v.Signer))
+		name := normalizedValidatorName(v.Name)
 		labels := []attribute.KeyValue{
-			attribute.String("validator", v.Validator),
-			attribute.String("signer", v.Signer),
-			attribute.String("name", v.Name),
+			attribute.String("validator", validator),
+			attribute.String("signer", signer),
+			attribute.String("name", name),
 		}
-		j, a := 0.0, 0.0
+		j, a, e := 0.0, 0.0, 0.0
 		if v.Jailed {
 			j = 1
+			aggregates.JailedStake += v.Stake
+		} else {
+			aggregates.NotJailedStake += v.Stake
 		}
 		if v.Active {
 			a = 1
+			aggregates.ActiveStake += v.Stake
+		} else {
+			aggregates.InactiveStake += v.Stake
 		}
-		stake[v.Validator] = labeledValue{value: v.Stake, labels: labels}
-		jailed[v.Validator] = labeledValue{value: j, labels: labels}
-		active[v.Validator] = labeledValue{value: a, labels: labels}
+		if v.Active && !v.Jailed {
+			e = 1
+			aggregates.ActiveAndUnjailedCount++
+			aggregates.ActiveAndUnjailedStake += v.Stake
+		}
+		aggregates.TotalStake += v.Stake
+		aggregates.ValidatorCount++
+		stake[validator] = labeledValue{value: v.Stake, labels: labels}
+		jailed[validator] = labeledValue{value: j, labels: labels}
+		active[validator] = labeledValue{value: a, labels: labels}
+		eligible[validator] = labeledValue{value: e, labels: labels}
+		signerToValidator[signer] = validator
+		validatorInfo[validator] = ValidatorInfo{
+			Signer: signer,
+			Name:   name,
+			Stake:  v.Stake,
+			Active: v.Active,
+			Jailed: v.Jailed,
+		}
 	}
 
 	metricsMutex.Lock()
@@ -248,30 +289,66 @@ func ReplaceValidatorSummaries(snap []ValidatorSummarySnapshot) {
 	labeledValues[HLConsensusValidatorStakeGauge] = stake
 	labeledValues[HLConsensusValidatorJailedStatus] = jailed
 	labeledValues[HLConsensusValidatorActiveStatus] = active
+	labeledValues[HLConsensusValidatorAPIActiveAndUnjailedStatus] = eligible
+	currentValues[HLConsensusTotalStakeGauge] = aggregates.TotalStake
+	currentValues[HLConsensusJailedStakeGauge] = aggregates.JailedStake
+	currentValues[HLConsensusNotJailedStakeGauge] = aggregates.NotJailedStake
+	currentValues[HLConsensusActiveStakeGauge] = aggregates.ActiveStake
+	currentValues[HLConsensusInactiveStakeGauge] = aggregates.InactiveStake
+	currentValues[HLConsensusValidatorCountGauge] = aggregates.ValidatorCount
+	currentValues[HLConsensusAPIActiveAndUnjailedCountGauge] = aggregates.ActiveAndUnjailedCount
+	currentValues[HLConsensusAPIActiveAndUnjailedStakeGauge] = aggregates.ActiveAndUnjailedStake
+	validatorRegistry.signerToValidator = signerToValidator
+	validatorRegistry.validatorInfo = validatorInfo
+	validatorRegistry.updatedAt = time.Now()
+	reconcileVoteIdentityValuesLocked(signerToValidator, validatorInfo)
+	validatorSnapshotAggregates = aggregates
+	validatorSnapshotGeneration++
 }
 
-func SetTotalStake(stake float64) {
-	metricsMutex.Lock()
-	defer metricsMutex.Unlock()
-	currentValues[HLConsensusTotalStakeGauge] = stake
-}
-
-func SetJailedStake(stake float64) {
-	metricsMutex.Lock()
-	defer metricsMutex.Unlock()
-	currentValues[HLConsensusJailedStakeGauge] = stake
-}
-
-func SetNotJailedStake(stake float64) {
-	metricsMutex.Lock()
-	defer metricsMutex.Unlock()
-	currentValues[HLConsensusNotJailedStakeGauge] = stake
-}
-
-func SetValidatorCount(count int64) {
-	metricsMutex.Lock()
-	defer metricsMutex.Unlock()
-	currentValues[HLConsensusValidatorCountGauge] = count
+func reconcileVoteIdentityValuesLocked(signerToValidator map[string]string, validatorInfo map[string]ValidatorInfo) {
+	for _, instrument := range []api.Observable{HLConsensusVoteRoundGauge, HLConsensusVoteTimeDiffGauge} {
+		old := labeledValues[instrument]
+		if len(old) == 0 {
+			continue
+		}
+		rebuilt := make(map[string]labeledValue, len(old))
+		for _, value := range old {
+			var signer, validator string
+			identifier := strings.ToLower(strings.TrimSpace(ExpandAddress(value.identitySource)))
+			if mapped, ok := signerToValidator[identifier]; ok {
+				validator = mapped
+				signer = identifier
+			} else if _, ok := validatorInfo[identifier]; ok {
+				validator = identifier
+			}
+			for _, label := range value.labels {
+				switch string(label.Key) {
+				case "signer":
+					if signer == "" {
+						signer = strings.ToLower(label.Value.AsString())
+					}
+				case "validator":
+					if validator == "" {
+						validator = strings.ToLower(label.Value.AsString())
+					}
+				}
+			}
+			if mapped, ok := signerToValidator[signer]; ok {
+				validator = mapped
+			} else if _, ok := validatorInfo[validator]; !ok {
+				continue
+			}
+			info := validatorInfo[validator]
+			value.labels = identityLabels(ValidatorIdentity{
+				Validator: validator,
+				Signer:    info.Signer,
+				Name:      info.Name,
+			})
+			rebuilt[validator] = value
+		}
+		labeledValues[instrument] = rebuilt
+	}
 }
 
 func SetSoftwareVersion(commit string, date string) {
@@ -317,24 +394,6 @@ func SetIsValidator(isValidator bool) {
 	nodeIdentity.IsValidator = isValidator
 }
 
-func SetValidatorAddress(address string) {
-	metricsMutex.Lock()
-	defer metricsMutex.Unlock()
-	nodeIdentity.ValidatorAddress = address
-}
-
-func SetActiveStake(stake float64) {
-	metricsMutex.Lock()
-	defer metricsMutex.Unlock()
-	currentValues[HLConsensusActiveStakeGauge] = stake
-}
-
-func SetInactiveStake(stake float64) {
-	metricsMutex.Lock()
-	defer metricsMutex.Unlock()
-	currentValues[HLConsensusInactiveStakeGauge] = stake
-}
-
 func SetValidatorRTT(validator string, moniker string, ip string, latency float64) {
 	metricsMutex.Lock()
 	defer metricsMutex.Unlock()
@@ -353,6 +412,36 @@ func SetValidatorRTT(validator string, moniker string, ip string, latency float6
 		value:  latency,
 		labels: labels,
 	}
+}
+
+// ReplaceValidatorTCPConnectDurations reconciles the deprecated RTT-named
+// compatibility family to the current successful TCP-connect snapshot. New
+// code publishes the accurately named Prometheus family in parallel.
+type ValidatorTCPConnectDurationSnapshot struct {
+	Validator    string
+	Moniker      string
+	IP           string
+	Milliseconds float64
+}
+
+func ReplaceValidatorTCPConnectDurations(snap []ValidatorTCPConnectDurationSnapshot) {
+	rebuilt := make(map[string]labeledValue, len(snap))
+	for _, row := range snap {
+		if row.Validator == "" || row.IP == "" {
+			continue
+		}
+		rebuilt[row.Validator] = labeledValue{
+			value: row.Milliseconds,
+			labels: append([]attribute.KeyValue{
+				attribute.String("validator", row.Validator),
+				attribute.String("moniker", row.Moniker),
+				attribute.String("ip", row.IP),
+			}, getCommonLabels()...),
+		}
+	}
+	metricsMutex.Lock()
+	labeledValues[HLConsensusValidatorRTTGauge] = rebuilt
+	metricsMutex.Unlock()
 }
 
 func RecordEVMBlockTime(duration float64) {
@@ -601,6 +690,7 @@ func SetReplicaParseDuration(duration float64) {
 
 func SetValidatorLastVoteRound(validator string, round int64) {
 	labels := getValidatorLabels(validator)
+	identitySource := strings.ToLower(strings.TrimSpace(validator))
 
 	// extract the actual validator address from the labels for map key
 	var validatorAddr string
@@ -617,9 +707,14 @@ func SetValidatorLastVoteRound(validator string, round int64) {
 	if _, exists := labeledValues[HLConsensusVoteRoundGauge]; !exists {
 		labeledValues[HLConsensusVoteRoundGauge] = make(map[string]labeledValue)
 	}
-	labeledValues[HLConsensusVoteRoundGauge][validatorAddr] = labeledValue{
-		value:  float64(round),
-		labels: labels,
+	key := validatorAddr
+	if validatorAddr == "unknown" {
+		key = "unknown"
+	}
+	labeledValues[HLConsensusVoteRoundGauge][key] = labeledValue{
+		value:          float64(round),
+		labels:         labels,
+		identitySource: identitySource,
 	}
 }
 
@@ -630,6 +725,7 @@ func SetValidatorLastVoteRound(validator string, round int64) {
 // parse-time diff that froze at ~0 forever, useless for stall detection).
 func SetValidatorLastVoteTime(validator string, voteTime time.Time) {
 	labels := getValidatorLabels(validator)
+	identitySource := strings.ToLower(strings.TrimSpace(validator))
 
 	// extract the actual validator address from the labels for map key
 	var validatorAddr string
@@ -646,9 +742,14 @@ func SetValidatorLastVoteTime(validator string, voteTime time.Time) {
 	if _, exists := labeledValues[HLConsensusVoteTimeDiffGauge]; !exists {
 		labeledValues[HLConsensusVoteTimeDiffGauge] = make(map[string]labeledValue)
 	}
-	labeledValues[HLConsensusVoteTimeDiffGauge][validatorAddr] = labeledValue{
-		value:  float64(voteTime.Unix()),
-		labels: labels,
+	key := validatorAddr
+	if validatorAddr == "unknown" {
+		key = "unknown"
+	}
+	labeledValues[HLConsensusVoteTimeDiffGauge][key] = labeledValue{
+		value:          float64(voteTime.Unix()),
+		labels:         labels,
+		identitySource: identitySource,
 	}
 }
 
@@ -677,49 +778,14 @@ func SetCurrentConsensusRound(round int64) {
 
 // returns expanded validator, signer, and name labels for a validator or signer address
 func getValidatorLabels(addressInput string) []attribute.KeyValue {
-	// first expand the address if it's truncated
-	addressInput = ExpandAddress(addressInput)
-
-	// check if this is a signer address (0x-prefixed) that needs to be mapped to validator
-	var validator, signer, name string
-	var exists bool
-
-	if strings.HasPrefix(strings.ToLower(addressInput), "0x") {
-		// this is likely a signer address, try to map it to validator
-		if mappedValidator, signerExists := GetValidatorForSigner(strings.ToLower(addressInput)); signerExists {
-			// we found the validator for this signer
-			validator = mappedValidator
-			signer, name, exists = GetValidatorInfo(validator)
-			if !exists {
-				// fallback: we have the mapping but not the full info
-				signer = addressInput
-				name = "unknown"
-			}
-		} else {
-			// no mapping found, use the signer address for all fields
-			return []attribute.KeyValue{
-				attribute.String("validator", addressInput),
-				attribute.String("signer", addressInput),
-				attribute.String("name", "unknown"),
-			}
-		}
-	} else {
-		validator = addressInput
-		signer, name, exists = GetValidatorInfo(validator)
-		if !exists {
-			// if we don't have info, use validator address for all fields
-			return []attribute.KeyValue{
-				attribute.String("validator", validator),
-				attribute.String("signer", validator),
-				attribute.String("name", "unknown"),
-			}
-		}
+	identity, ok := ResolveValidatorIdentity(addressInput)
+	if !ok {
+		identity = ValidatorIdentity{Validator: "unknown", Signer: "unknown", Name: "unknown"}
 	}
-
 	return []attribute.KeyValue{
-		attribute.String("validator", validator),
-		attribute.String("signer", signer),
-		attribute.String("name", name),
+		attribute.String("validator", identity.Validator),
+		attribute.String("signer", identity.Signer),
+		attribute.String("name", identity.Name),
 	}
 }
 
@@ -871,6 +937,82 @@ func SetValidatorHeartbeatStatus(validator, statusType string, value float64) {
 	}
 }
 
+// ValidatorHeartbeatSnapshot is one fully validated status row. A nil
+// LastAckDuration means the source carried explicit JSON null; AckFieldPresent
+// false means the nested key was omitted.
+type ValidatorHeartbeatSnapshot struct {
+	Identity         ValidatorIdentity
+	SinceLastSuccess *float64
+	LastAckDuration  *float64
+	AckFieldPresent  bool
+}
+
+// ValidatorDisconnectSnapshot is one subject/reporter relation from the
+// latest complete status generation. SinceRound is in the consensus-round
+// domain and is never converted into wall-clock time.
+type ValidatorDisconnectSnapshot struct {
+	Subject    ValidatorIdentity
+	Reporter   ValidatorIdentity
+	SinceRound int64
+}
+
+func identityLabels(identity ValidatorIdentity) []attribute.KeyValue {
+	return []attribute.KeyValue{
+		attribute.String("validator", identity.Validator),
+		attribute.String("signer", identity.Signer),
+		attribute.String("name", normalizedValidatorName(identity.Name)),
+	}
+}
+
+// ReplaceConsensusStatusSnapshot atomically reconciles every OTel family
+// owned by one complete status record. An omitted source field is represented
+// by an empty slice and therefore withdraws the old generation; callers expose
+// field presence separately rather than synthesizing healthy zeroes.
+func ReplaceConsensusStatusSnapshot(heartbeats []ValidatorHeartbeatSnapshot, disconnected []ValidatorDisconnectSnapshot) {
+	heartbeatValues := make(map[string]labeledValue, len(heartbeats)*2)
+	ackObserved := make(map[string]labeledValue, len(heartbeats))
+	connectivity := make(map[string]labeledValue, len(disconnected))
+	disconnectRounds := make(map[string]labeledValue, len(disconnected))
+
+	for _, hb := range heartbeats {
+		base := identityLabels(hb.Identity)
+		if hb.SinceLastSuccess != nil {
+			labels := append(append([]attribute.KeyValue{}, base...), attribute.String("status_type", "since_last_success"))
+			heartbeatValues[hb.Identity.Signer+"\x00since_last_success"] = labeledValue{value: *hb.SinceLastSuccess, labels: labels}
+		}
+		if hb.AckFieldPresent {
+			observed := 0.0
+			if hb.LastAckDuration != nil {
+				observed = 1
+				labels := append(append([]attribute.KeyValue{}, base...), attribute.String("status_type", "last_ack_duration"))
+				heartbeatValues[hb.Identity.Signer+"\x00last_ack_duration"] = labeledValue{value: *hb.LastAckDuration, labels: labels}
+			}
+			ackObserved[hb.Identity.Signer] = labeledValue{value: observed, labels: base}
+		}
+	}
+
+	for _, relation := range disconnected {
+		key := relation.Subject.Signer + "\x00" + relation.Reporter.Signer
+		labels := []attribute.KeyValue{
+			attribute.String("validator", relation.Subject.Validator),
+			attribute.String("signer", relation.Subject.Signer),
+			attribute.String("name", normalizedValidatorName(relation.Subject.Name)),
+			attribute.String("reporter_validator", relation.Reporter.Validator),
+			attribute.String("reporter_signer", relation.Reporter.Signer),
+			attribute.String("reporter_name", normalizedValidatorName(relation.Reporter.Name)),
+		}
+		connectivity[key] = labeledValue{value: 0, labels: labels}
+		disconnectRounds[key] = labeledValue{value: float64(relation.SinceRound), labels: labels}
+	}
+
+	metricsMutex.Lock()
+	labeledValues[HLConsensusHeartbeatStatusGauge] = heartbeatValues
+	labeledValues[HLConsensusHeartbeatAckObservedGauge] = ackObserved
+	labeledValues[HLConsensusConnectivityGauge] = connectivity
+	labeledValues[HLConsensusDisconnectedSinceRoundGauge] = disconnectRounds
+	metricsMutex.Unlock()
+}
+
 // QC and TC metric setters
 
 func IncrementQCSignatures(validator string) {
@@ -903,6 +1045,27 @@ func SetQCParticipationRate(validator string, rate float64) {
 		value:  rate,
 		labels: labels,
 	}
+}
+
+// ReplaceQCParticipationRates publishes exactly the identities represented by
+// the current QC window. Historical signers are not seeded with synthetic
+// zeroes and departed identities disappear from the next generation.
+func ReplaceQCParticipationRates(rates map[string]float64) {
+	rebuilt := make(map[string]labeledValue, len(rates))
+	for identifier, rate := range rates {
+		labels := getValidatorLabels(identifier)
+		validator := "unknown"
+		for _, label := range labels {
+			if label.Key == "validator" {
+				validator = label.Value.AsString()
+				break
+			}
+		}
+		rebuilt[validator] = labeledValue{value: rate, labels: labels}
+	}
+	metricsMutex.Lock()
+	labeledValues[HLConsensusQCParticipationGauge] = rebuilt
+	metricsMutex.Unlock()
 }
 
 func RecordQCSize(size float64) {
@@ -1071,6 +1234,32 @@ func ReplaceValidatorLatencyEMA(emaByValidator map[string]float64) {
 }
 
 // P2P metric setters (non-validator peers)
+
+// ReplaceP2PChildSnapshot atomically replaces the complete OTLP compatibility
+// view of one explicit child-peers snapshot. Despite the historical
+// instrument name, the verified series count child identities, not sockets.
+func ReplaceP2PChildSnapshot(verified, unverified int64) {
+	byVerified := make(map[string]labeledValue, 2)
+	for label, count := range map[string]int64{"true": verified, "false": unverified} {
+		byVerified[label] = labeledValue{
+			value: float64(count),
+			labels: []attribute.KeyValue{
+				attribute.String("verified", label),
+			},
+		}
+	}
+	total := map[string]labeledValue{
+		"total": {
+			value:  float64(verified + unverified),
+			labels: []attribute.KeyValue{},
+		},
+	}
+
+	metricsMutex.Lock()
+	labeledValues[HLP2PNonValPeerConnectionsGauge] = byVerified
+	labeledValues[HLP2PNonValPeersTotalGauge] = total
+	metricsMutex.Unlock()
+}
 
 func SetP2PNonValPeerConnections(verified bool, count int64) {
 	verifiedStr := "false"

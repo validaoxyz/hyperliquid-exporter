@@ -3,6 +3,8 @@ package monitors
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,68 +19,88 @@ const publicIPPollInterval = 60 * time.Second
 
 // StartPublicIPMonitor watches $NODE_HOME/last_known_public_ip.json.
 // The file is a single JSON-encoded string, e.g. "203.0.113.51", and
-// hl-node rewrites it every ~13 minutes as a heartbeat (with the same
-// value if nothing changed). Three signals:
+// hl-node writes it when recording its public address. The mtime is an
+// observed file timestamp only; no universal rewrite cadence is promised.
+// Three signals:
 //
 //   - the literal IP, as a label on hl_node_public_ip_info{ip="..."} == 1
 //   - the file's mtime age, as hl_node_public_ip_age_seconds
 //   - a counter that ticks every time the content changes
 func StartPublicIPMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	path := filepath.Join(cfg.NodeHome, "last_known_public_ip.json")
-	if _, err := os.Stat(path); err != nil {
-		logger.InfoComponent("public_ip",
-			"last_known_public_ip.json not present (%s); monitor idle", path)
-		<-ctx.Done()
-		return
-	}
-
 	logger.InfoComponent("public_ip", "watching %s", path)
+	metrics.RegisterSource(metrics.SourcePublicIP, true)
 
 	var currentIP string
 	ticker := time.NewTicker(publicIPPollInterval)
 	defer ticker.Stop()
 
-	tickPublicIP(path, &currentIP)
-	metrics.MarkMonitorTick("public_ip")
+	if err := tickPublicIP(path, &currentIP, time.Now()); err != nil {
+		logger.DebugComponent("public_ip", "initial poll: %v", err)
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			tickPublicIP(path, &currentIP)
-			metrics.MarkMonitorTick("public_ip")
+			if err := tickPublicIP(path, &currentIP, time.Now()); err != nil {
+				logger.DebugComponent("public_ip", "poll: %v", err)
+			}
 		}
 	}
 }
 
-func tickPublicIP(path string, currentIP *string) {
+func tickPublicIP(path string, currentIP *string, now time.Time) error {
+	metrics.MarkMonitorAttempt("public_ip")
+	metrics.MarkSourceAttempt(metrics.SourcePublicIP)
 	info, err := os.Stat(path)
 	if err != nil {
-		return
+		if os.IsNotExist(err) {
+			if *currentIP != "" {
+				metrics.HLNodePublicIPInfo.DeleteLabelValues(*currentIP)
+				*currentIP = ""
+			}
+			metrics.HLNodePublicIPAgeSeconds.DeleteLabelValues()
+			metrics.MarkSourceAbsent(metrics.SourcePublicIP)
+			metrics.MarkMonitorPublication("public_ip")
+			return nil
+		}
+		metrics.MarkSourceError(metrics.SourcePublicIP, metrics.SourceFailureStat)
+		return fmt.Errorf("stat public-IP file: %w", err)
 	}
-	metrics.HLNodePublicIPAgeSeconds.Set(time.Since(info.ModTime()).Seconds())
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return
+		metrics.MarkSourceError(metrics.SourcePublicIP, metrics.SourceFailureRead)
+		return fmt.Errorf("read public-IP file: %w", err)
 	}
 	ip, ok := parsePublicIP(data)
 	if !ok || ip == "" {
-		return
+		metrics.MarkSourceError(metrics.SourcePublicIP, metrics.SourceFailureSchema)
+		return fmt.Errorf("invalid public-IP file")
 	}
-	if ip == *currentIP {
-		return
+	age := now.Sub(info.ModTime())
+	if age < 0 {
+		age = 0
 	}
-	if *currentIP != "" {
-		metrics.HLNodePublicIPInfo.DeleteLabelValues(*currentIP)
-		metrics.HLNodePublicIPChangesTotal.Inc()
-		logger.InfoComponent("public_ip", "public IP changed: %s -> %s", *currentIP, ip)
-	} else {
-		logger.InfoComponent("public_ip", "initial public IP: %s", ip)
+	metrics.HLNodePublicIPAgeSeconds.WithLabelValues().Set(age.Seconds())
+	if ip != *currentIP {
+		if *currentIP != "" {
+			metrics.HLNodePublicIPInfo.DeleteLabelValues(*currentIP)
+			metrics.HLNodePublicIPChangesTotal.Inc()
+			logger.InfoComponent("public_ip", "public IP changed: %s -> %s", *currentIP, ip)
+		} else {
+			logger.InfoComponent("public_ip", "initial public IP: %s", ip)
+		}
+		*currentIP = ip
+		metrics.HLNodePublicIPInfo.WithLabelValues(ip).Set(1)
 	}
-	*currentIP = ip
-	metrics.HLNodePublicIPInfo.WithLabelValues(ip).Set(1)
+	metrics.MarkSourceValidObservation(metrics.SourcePublicIP, info.ModTime())
+	metrics.MarkSourcePublication(metrics.SourcePublicIP)
+	metrics.MarkMonitorValidObservation("public_ip")
+	metrics.MarkMonitorPublication("public_ip")
+	return nil
 }
 
 // parsePublicIP accepts either a JSON-encoded string (the canonical
@@ -91,11 +113,17 @@ func parsePublicIP(data []byte) (string, bool) {
 	}
 	var ip string
 	if err := json.Unmarshal([]byte(s), &ip); err == nil {
+		if net.ParseIP(ip) == nil {
+			return "", false
+		}
 		return ip, true
 	}
 	// Fall back: strip wrapping quotes if any, return whatever's left.
 	s = strings.Trim(s, "\"'")
 	if s == "" {
+		return "", false
+	}
+	if net.ParseIP(s) == nil {
 		return "", false
 	}
 	return s, true

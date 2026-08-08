@@ -3,6 +3,7 @@ package monitors
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"time"
@@ -31,10 +32,14 @@ type tailStreamOpts struct {
 	rescanEvery time.Duration
 	eofSleep    time.Duration
 	bufSize     int // bufio reader size; 0 means 64 KiB
-	onLine      func(line string)
-	onIdle      func()            // optional: once per EOF pause, for batch flushing
-	onSwitch    func(path string) // optional: after switching to a new file
-	onFailure   func(tailStreamFailure)
+	// consumeStartupRecords is reserved for a source/layout that was proven
+	// to appear after the exporter started. Ordinary startup files remain
+	// historical and are sought to EOF.
+	consumeStartupRecords bool
+	onLine                func(line string)
+	onIdle                func()            // optional: once per EOF pause, for batch flushing
+	onSwitch              func(path string) // optional: after switching to a new file
+	onFailure             func(tailStreamFailure)
 }
 
 type tailStreamFailure string
@@ -158,9 +163,11 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 		if reader == nil || time.Since(lastScan) >= o.rescanEvery {
 			lastScan = time.Now()
 			latest, resolveErr := o.resolve()
-			if resolveErr == nil && !startupScanned {
+			if !startupScanned && (resolveErr == nil || errors.Is(resolveErr, os.ErrNotExist)) {
 				startupScanned = true
-				startupPath = latest
+				if resolveErr == nil {
+					startupPath = latest
+				}
 			}
 
 			switch {
@@ -175,7 +182,7 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 				// Only the exact file found by the first successful startup
 				// scan is historical. A first file discovered after a clean
 				// empty scan starts at byte zero.
-				skipExisting := startupPath != "" && latest == startupPath
+				skipExisting := !o.consumeStartupRecords && startupPath != "" && latest == startupPath
 				if !activate(latest, skipExisting) {
 					if !sleepCtx(ctx, time.Second) {
 						return
@@ -217,6 +224,7 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 		}
 
 		madeProgress := false
+		cleanEOF := false
 		for {
 			chunk, err := reader.ReadString('\n')
 			if err != nil {
@@ -241,6 +249,8 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 						o.onFailure(tailStreamFailureRead)
 					}
 					logger.WarningComponent(o.component, "%s: read error: %v", o.name, err)
+				} else {
+					cleanEOF = true
 				}
 				break
 			}
@@ -264,7 +274,7 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 			o.onLine(line)
 		}
 
-		if o.onIdle != nil {
+		if cleanEOF && o.onIdle != nil {
 			o.onIdle()
 		}
 

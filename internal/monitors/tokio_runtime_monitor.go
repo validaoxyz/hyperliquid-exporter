@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,91 +95,106 @@ type tokioTaskSample struct {
 // CPU-heavy work in poll(). dropped_count > 0 = task panicked.
 func StartTokioRuntimeMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	root := filepath.Join(cfg.NodeHome, "data", "tokio_spawn_forever_metrics", "hourly")
-	if _, err := os.Stat(root); err != nil {
-		logger.InfoComponent("tokio_runtime",
-			"tokio_spawn_forever_metrics directory not present (%s); monitor idle", root)
-		<-ctx.Done()
-		return
-	}
-
 	logger.InfoComponent("tokio_runtime", "watching %s", root)
+	metrics.RegisterSource(metrics.SourceTokioRuntime, true)
+	state := &tokioMonitorState{publishedTasks: make(map[string]struct{})}
 
 	ticker := time.NewTicker(tokioRuntimePollInterval)
 	defer ticker.Stop()
 
-	tickTokio(root)
-	metrics.MarkMonitorTick("tokio_runtime")
+	if err := tickTokio(root, state, time.Now()); err != nil {
+		logger.DebugComponent("tokio_runtime", "initial scan: %v", err)
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			tickTokio(root)
-			metrics.MarkMonitorTick("tokio_runtime")
+			if err := tickTokio(root, state, time.Now()); err != nil {
+				logger.DebugComponent("tokio_runtime", "scan: %v", err)
+			}
 		}
 	}
 }
 
-// tokioPublishedTasks tracks the task labels currently exposed so they can
-// be withdrawn when the source feed goes stale. Single-goroutine access.
-var tokioPublishedTasks = map[string]bool{}
+type tokioMonitorState struct {
+	publishedTasks map[string]struct{}
+}
 
-func tickTokio(root string) {
+func tickTokio(root string, state *tokioMonitorState, now time.Time) error {
+	metrics.MarkMonitorAttempt("tokio_runtime")
+	metrics.MarkSourceAttempt(metrics.SourceTokioRuntime)
+	if _, err := os.Stat(root); err != nil {
+		if os.IsNotExist(err) {
+			withdrawTokioSnapshot(state, true)
+			metrics.MarkSourceAbsent(metrics.SourceTokioRuntime)
+			metrics.MarkMonitorPublication("tokio_runtime")
+			return nil
+		}
+		metrics.MarkSourceError(metrics.SourceTokioRuntime, metrics.SourceFailureStat)
+		return fmt.Errorf("stat root: %w", err)
+	}
 	path, err := latestHourlyFile(root)
 	if err != nil {
-		return
+		if errors.Is(err, os.ErrNotExist) {
+			withdrawTokioSnapshot(state, true)
+			metrics.MarkSourceAvailable(metrics.SourceTokioRuntime)
+			metrics.MarkSourcePublication(metrics.SourceTokioRuntime)
+			metrics.MarkMonitorPublication("tokio_runtime")
+			return nil
+		}
+		metrics.MarkSourceError(metrics.SourceTokioRuntime, metrics.SourceFailureWalk)
+		return fmt.Errorf("latest hourly file: %w", err)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return
+		if os.IsNotExist(err) {
+			withdrawTokioSnapshot(state, true)
+			metrics.MarkSourceAbsent(metrics.SourceTokioRuntime)
+			metrics.MarkMonitorPublication("tokio_runtime")
+			return nil
+		}
+		metrics.MarkSourceError(metrics.SourceTokioRuntime, metrics.SourceFailureStat)
+		return fmt.Errorf("stat latest: %w", err)
 	}
 
-	age := time.Since(info.ModTime())
-	metrics.HLTokioSampleAgeSeconds.Set(age.Seconds())
+	age := now.Sub(info.ModTime())
+	if age < 0 {
+		age = 0
+	}
 	if age > tokioStaleAfter {
-		// source feed died while the node runs on: withdraw the gauges so
-		// dashboards see absent (not frozen-but-alive) values; the age
-		// gauge above keeps climbing as the operator-visible signal
-		for task := range tokioPublishedTasks {
-			deleteTokioSeries(task)
-		}
-		tokioPublishedTasks = map[string]bool{}
-		return
+		metrics.HLTokioSampleAgeSeconds.WithLabelValues().Set(age.Seconds())
+		withdrawTokioSnapshot(state, false)
+		metrics.MarkSourceReadOutcome(metrics.SourceTokioRuntime, true)
+		metrics.MarkSourceSchemaOutcome(metrics.SourceTokioRuntime, true)
+		metrics.MarkSourcePublication(metrics.SourceTokioRuntime)
+		metrics.MarkMonitorPublication("tokio_runtime")
+		return nil
 	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return
+		metrics.MarkSourceError(metrics.SourceTokioRuntime, metrics.SourceFailureRead)
+		return fmt.Errorf("read latest: %w", err)
 	}
-
-	// Walk lines backwards, keeping the FIRST sample we see for each
-	// allowlisted task name. Stop once we have every allowed name OR
-	// run out of file.
-	seen := map[string]bool{}
-	want := len(tokioTaskAllowlist)
-	end := len(data)
-	for end > 0 && len(seen) < want {
-		for end > 0 && data[end-1] == '\n' {
-			end--
-		}
-		if end == 0 {
-			break
-		}
-		start := bytes.LastIndexByte(data[:end], '\n') + 1
-		line := bytes.TrimSpace(data[start:end])
-		end = start - 1
-		if len(line) == 0 || line[0] != '[' {
-			continue
-		}
-		s, ok := parseTokioLine(line)
-		if !ok || !tokioTaskAllowlist[s.TaskName] || seen[s.TaskName] {
-			continue
-		}
-		publishTokioSample(s)
-		tokioPublishedTasks[s.TaskName] = true
-		seen[s.TaskName] = true
+	snapshot, sampleTime, err := parseTokioSnapshot(data)
+	if err != nil {
+		metrics.MarkSourceError(metrics.SourceTokioRuntime, metrics.SourceFailureSchema)
+		return err
 	}
+	replaceTokioSnapshot(state, snapshot)
+	if len(snapshot) == 0 {
+		metrics.HLTokioSampleAgeSeconds.DeleteLabelValues()
+		metrics.MarkSourceAvailable(metrics.SourceTokioRuntime)
+	} else {
+		metrics.HLTokioSampleAgeSeconds.WithLabelValues().Set(age.Seconds())
+		metrics.MarkSourceValidObservation(metrics.SourceTokioRuntime, sampleTime)
+		metrics.MarkMonitorValidObservation("tokio_runtime")
+	}
+	metrics.MarkSourcePublication(metrics.SourceTokioRuntime)
+	metrics.MarkMonitorPublication("tokio_runtime")
+	return nil
 }
 
 func deleteTokioSeries(task string) {
@@ -193,16 +211,55 @@ func deleteTokioSeries(task string) {
 }
 
 func parseTokioLine(line []byte) (tokioTaskSample, bool) {
-	var outer [2]json.RawMessage
+	s, _, err := parseTokioRecord(line)
+	return s, err == nil
+}
+
+func parseTokioRecord(line []byte) (tokioTaskSample, time.Time, error) {
+	var outer []json.RawMessage
 	if err := json.Unmarshal(line, &outer); err != nil {
-		return tokioTaskSample{}, false
+		return tokioTaskSample{}, time.Time{}, err
+	}
+	if len(outer) != 2 {
+		return tokioTaskSample{}, time.Time{}, fmt.Errorf("invalid tokio tuple length")
+	}
+	var timestamp string
+	if err := unmarshalRequiredJSON(outer[0], &timestamp); err != nil {
+		return tokioTaskSample{}, time.Time{}, err
+	}
+	sampleTime, ok := parseVisorTime(timestamp)
+	if !ok {
+		return tokioTaskSample{}, time.Time{}, fmt.Errorf("invalid tokio timestamp")
+	}
+	var raw map[string]json.RawMessage
+	if err := unmarshalRequiredJSON(outer[1], &raw); err != nil {
+		return tokioTaskSample{}, time.Time{}, err
 	}
 	var s tokioTaskSample
-	if err := json.Unmarshal(outer[1], &s); err != nil {
-		return tokioTaskSample{}, false
+	fields := []struct {
+		name string
+		dst  any
+	}{
+		{"task_name", &s.TaskName}, {"dropped_count", &s.DroppedCount},
+		{"total_idle_duration", &s.TotalIdleDuration}, {"total_scheduled_count", &s.TotalScheduledCount},
+		{"total_scheduled_duration", &s.TotalScheduledDuration}, {"total_poll_count", &s.TotalPollCount},
+		{"total_poll_duration", &s.TotalPollDuration}, {"total_fast_poll_count", &s.TotalFastPollCount},
+		{"total_slow_poll_count", &s.TotalSlowPollCount}, {"total_short_delay_count", &s.TotalShortDelayCount},
+		{"total_long_delay_count", &s.TotalLongDelayCount},
+	}
+	for _, field := range fields {
+		if err := unmarshalRequiredJSON(raw[field.name], field.dst); err != nil {
+			return tokioTaskSample{}, time.Time{}, fmt.Errorf("required tokio field %s: %w", field.name, err)
+		}
 	}
 	if s.TaskName == "" {
-		return tokioTaskSample{}, false
+		return tokioTaskSample{}, time.Time{}, fmt.Errorf("empty task name")
+	}
+	if s.DroppedCount < 0 || s.TotalScheduledCount < 0 || s.TotalPollCount < 0 || s.TotalFastPollCount < 0 || s.TotalSlowPollCount < 0 || s.TotalShortDelayCount < 0 || s.TotalLongDelayCount < 0 ||
+		math.IsNaN(s.TotalIdleDuration) || math.IsInf(s.TotalIdleDuration, 0) || s.TotalIdleDuration < 0 ||
+		math.IsNaN(s.TotalScheduledDuration) || math.IsInf(s.TotalScheduledDuration, 0) || s.TotalScheduledDuration < 0 ||
+		math.IsNaN(s.TotalPollDuration) || math.IsInf(s.TotalPollDuration, 0) || s.TotalPollDuration < 0 {
+		return tokioTaskSample{}, time.Time{}, fmt.Errorf("invalid tokio counter or duration")
 	}
 	// Strip the per-validator "home_validator=Validator(0x…)" suffix from
 	// the "listening for incoming connections" task. Without this strip,
@@ -211,7 +268,60 @@ func parseTokioLine(line []byte) (tokioTaskSample, bool) {
 	if idx := strings.Index(s.TaskName, " home_validator="); idx > 0 {
 		s.TaskName = s.TaskName[:idx]
 	}
-	return s, true
+	return s, sampleTime, nil
+}
+
+func parseTokioSnapshot(data []byte) (map[string]tokioTaskSample, time.Time, error) {
+	snapshot := make(map[string]tokioTaskSample)
+	var newest time.Time
+	lastComplete := bytes.LastIndexByte(data, '\n')
+	if lastComplete < 0 {
+		if len(bytes.TrimSpace(data)) > 0 {
+			return nil, time.Time{}, fmt.Errorf("partial tokio record")
+		}
+		return snapshot, newest, nil
+	}
+	for _, raw := range bytes.Split(data[:lastComplete], []byte("\n")) {
+		line := bytes.TrimSpace(raw)
+		if len(line) == 0 {
+			continue
+		}
+		sample, sampleTime, err := parseTokioRecord(line)
+		if err != nil {
+			return nil, time.Time{}, fmt.Errorf("decode complete tokio record: %w", err)
+		}
+		if !tokioTaskAllowlist[sample.TaskName] {
+			continue
+		}
+		snapshot[sample.TaskName] = sample
+		if sampleTime.After(newest) {
+			newest = sampleTime
+		}
+	}
+	return snapshot, newest, nil
+}
+
+func replaceTokioSnapshot(state *tokioMonitorState, snapshot map[string]tokioTaskSample) {
+	for task, sample := range snapshot {
+		publishTokioSample(sample)
+		state.publishedTasks[task] = struct{}{}
+	}
+	for task := range state.publishedTasks {
+		if _, ok := snapshot[task]; !ok {
+			deleteTokioSeries(task)
+			delete(state.publishedTasks, task)
+		}
+	}
+}
+
+func withdrawTokioSnapshot(state *tokioMonitorState, deleteAge bool) {
+	for task := range state.publishedTasks {
+		deleteTokioSeries(task)
+	}
+	state.publishedTasks = make(map[string]struct{})
+	if deleteAge {
+		metrics.HLTokioSampleAgeSeconds.DeleteLabelValues()
+	}
 }
 
 func publishTokioSample(s tokioTaskSample) {

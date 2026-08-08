@@ -2,9 +2,11 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	otlpmetrichttp "go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
@@ -15,20 +17,34 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 )
 
-// initializes the metrics system with the given configuration
-func InitMetrics(ctx context.Context, cfg MetricsConfig) error {
+const providerStartupCleanupTimeout = 5 * time.Second
+
+// InitMetrics initializes the metrics system and returns ownership of the SDK
+// provider. The caller must stop metric producers before invoking Shutdown on
+// the returned owner.
+func InitMetrics(ctx context.Context, cfg MetricsConfig) (*ProviderOwner, error) {
+	chain, err := config.NormalizeChain(cfg.Chain)
+	if err != nil {
+		return nil, fmt.Errorf("invalid configured chain: %w", err)
+	}
+	cfg.Chain = chain
+	if err := SetConfiguredChain(chain); err != nil {
+		return nil, fmt.Errorf("failed to initialize configured chain metric: %w", err)
+	}
+
 	// initialize node identity with values from config
 	if err := InitializeNodeIdentity(cfg); err != nil {
-		return fmt.Errorf("failed to initialize node identity: %w", err)
+		return nil, fmt.Errorf("failed to initialize node identity: %w", err)
 	}
 
 	// initialize the provider
-	if err := InitProvider(ctx, cfg); err != nil {
-		return fmt.Errorf("failed to initialize provider: %w", err)
+	owner, err := InitProvider(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize provider: %w", err)
 	}
 
 	if err := createInstruments(); err != nil {
-		return fmt.Errorf("failed to initialize instruments: %w", err)
+		return failMetricsInitialization(owner, fmt.Errorf("failed to initialize instruments: %w", err))
 	}
 
 	if cfg.EnablePrometheus {
@@ -37,15 +53,24 @@ func InitMetrics(ctx context.Context, cfg MetricsConfig) error {
 			port = 8086
 		}
 		if err := StartPrometheusServer(ctx, port, cfg.EnablePprof); err != nil {
-			return fmt.Errorf("failed to start Prometheus server: %w", err)
+			return failMetricsInitialization(owner, fmt.Errorf("failed to start Prometheus server: %w", err))
 		}
 	}
 
 	if err := RegisterCallbacks(); err != nil {
-		return fmt.Errorf("failed to register callbacks: %w", err)
+		return failMetricsInitialization(owner, fmt.Errorf("failed to register callbacks: %w", err))
 	}
 
-	return nil
+	return owner, nil
+}
+
+func failMetricsInitialization(owner *ProviderOwner, cause error) (*ProviderOwner, error) {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), providerStartupCleanupTimeout)
+	defer cancel()
+	if err := owner.Shutdown(cleanupCtx); err != nil {
+		cause = errors.Join(cause, fmt.Errorf("failed to shut down partially initialized provider: %w", err))
+	}
+	return nil, cause
 }
 
 func sanitizeEndpoint(endpoint string) string {
@@ -58,7 +83,13 @@ func sanitizeEndpoint(endpoint string) string {
 	return endpoint
 }
 
-func InitProvider(ctx context.Context, cfg MetricsConfig) error {
+func InitProvider(ctx context.Context, cfg MetricsConfig) (*ProviderOwner, error) {
+	chain, err := config.NormalizeChain(cfg.Chain)
+	if err != nil {
+		return nil, fmt.Errorf("invalid configured chain: %w", err)
+	}
+	cfg.Chain = chain
+
 	metricsMutex.RLock()
 	serverIP := nodeIdentity.ServerIP
 	isValidator := nodeIdentity.IsValidator
@@ -69,6 +100,7 @@ func InitProvider(ctx context.Context, cfg MetricsConfig) error {
 		semconv.SchemaURL,
 		attribute.String("instance", cfg.Alias),
 		attribute.String("job", fmt.Sprintf("hyperliquid-exporter/%s", cfg.Chain)),
+		attribute.String("chain", cfg.Chain),
 		attribute.String("server_ip", serverIP),
 		attribute.Bool("is_validator", isValidator),
 		attribute.String("validator_address", validatorAddress),
@@ -82,7 +114,7 @@ func InitProvider(ctx context.Context, cfg MetricsConfig) error {
 			prometheus.WithoutScopeInfo(),
 		)
 		if err != nil {
-			return fmt.Errorf("failed to create Prometheus exporter: %w", err)
+			return nil, fmt.Errorf("failed to create Prometheus exporter: %w", err)
 		}
 		opts = append(opts, sdkmetric.WithReader(promExporter))
 	}
@@ -99,7 +131,7 @@ func InitProvider(ctx context.Context, cfg MetricsConfig) error {
 
 		otlpExporter, err := otlpmetrichttp.New(ctx, options...)
 		if err != nil {
-			return fmt.Errorf("failed to create OTLP exporter: %w", err)
+			return nil, fmt.Errorf("failed to create OTLP exporter: %w", err)
 		}
 
 		reader := sdkmetric.NewPeriodicReader(
@@ -118,5 +150,5 @@ func InitProvider(ctx context.Context, cfg MetricsConfig) error {
 		metric.WithInstrumentationVersion("0.1.0"),
 	)
 
-	return nil
+	return newProviderOwner(provider.Shutdown), nil
 }

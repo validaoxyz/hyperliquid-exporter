@@ -8,4 +8,10 @@ package monitors
 
 func procFSAvailable() bool { return false }
 
-func findProcess(_ string) (processInfo, bool) { return processInfo{}, false }
+func findProcesses(names []string) (map[string]processSelection, error) {
+	selections := make(map[string]processSelection, len(names))
+	for _, name := range names {
+		selections[name] = processSelection{}
+	}
+	return selections, nil
+}

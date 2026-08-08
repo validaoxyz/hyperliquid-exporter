@@ -1,17 +1,18 @@
 package metrics
 
 import (
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/validaoxyz/hyperliquid-exporter/internal/cache"
 	"go.opentelemetry.io/otel/attribute"
 	api "go.opentelemetry.io/otel/metric"
 )
 
 type labeledValue struct {
-	value  float64
-	labels []attribute.KeyValue
+	value          float64
+	labels         []attribute.KeyValue
+	identitySource string
 }
 
 type NodeIdentity struct {
@@ -34,83 +35,160 @@ var (
 // TODO commonLabels holds the common labels to be added to all metrics
 var commonLabels []attribute.KeyValue
 
-// signerMap maps signer addr -> val address
-// using LRU cache
-var signerMap *cache.LRUCache
-
-// store additional info about a val
+// ValidatorInfo is the mutable API-derived identity attached to a validator.
+// It is deliberately separate from the immutable OTel resource identity.
 type ValidatorInfo struct {
 	Signer string
 	Name   string
+	Stake  float64
+	Active bool
+	Jailed bool
 }
 
-// maps val addr -> val info
-var validatorInfoCache *cache.LRUCache
+// ValidatorIdentity is the result of resolving an observed identifier. Kind is
+// explicit so an arbitrary 0x string is never silently relabelled as a
+// validator address.
+type ValidatorIdentity struct {
+	Validator string
+	Signer    string
+	Name      string
+	Kind      string // "validator" or "signer"
+}
 
-// set val addr for a signer
-func RegisterSignerMapping(signer, validator string) {
-	if signerMap == nil {
-		initSignerMap()
+// validatorRegistry is one synchronized, replaceable identity generation.
+// API polls replace both maps atomically. Legacy local status rows may add a
+// proven signer mapping before the first API response, but can never fabricate
+// validator metadata.
+var validatorRegistry = struct {
+	signerToValidator map[string]string
+	validatorInfo     map[string]ValidatorInfo
+	updatedAt         time.Time
+}{
+	signerToValidator: make(map[string]string),
+	validatorInfo:     make(map[string]ValidatorInfo),
+}
+
+// ReplaceProvisionalSignerMappings installs one complete local-status mapping
+// only before the first validator API generation. It exists solely for old
+// node builds whose status rows carried [validator, signer] pairs. Once the
+// API has published, local rows may not incrementally mutate that generation.
+func ReplaceProvisionalSignerMappings(mappings map[string]string) {
+	rebuilt := make(map[string]string, len(mappings))
+	for signer, validator := range mappings {
+		signer = strings.ToLower(strings.TrimSpace(signer))
+		validator = strings.ToLower(strings.TrimSpace(validator))
+		if signer != "" && validator != "" {
+			rebuilt[signer] = validator
+		}
 	}
-	signerMap.Set(signer, validator)
+	metricsMutex.Lock()
+	if validatorSnapshotGeneration == 0 {
+		validatorRegistry.signerToValidator = rebuilt
+		validatorRegistry.updatedAt = time.Time{}
+	}
+	metricsMutex.Unlock()
 }
 
 // get val addr for a signer
 func GetValidatorForSigner(signer string) (string, bool) {
-	if signerMap == nil {
-		initSignerMap()
-	}
-	val, exists := signerMap.Get(signer)
-	if !exists {
-		return "", false
-	}
-	return val.(string), true
-}
-
-// store val info (signer + name) for a val addr
-func RegisterValidatorInfo(validator, signer, name string) {
-	if validatorInfoCache == nil {
-		initValidatorInfoCache()
-	}
-	validatorInfoCache.Set(validator, ValidatorInfo{
-		Signer: signer,
-		Name:   name,
-	})
+	signer = strings.ToLower(strings.TrimSpace(ExpandAddress(signer)))
+	metricsMutex.RLock()
+	validator, exists := validatorRegistry.signerToValidator[signer]
+	metricsMutex.RUnlock()
+	return validator, exists
 }
 
 // get signer and name for a val addr
 func GetValidatorInfo(validator string) (signer string, name string, exists bool) {
-	if validatorInfoCache == nil {
-		initValidatorInfoCache()
-	}
-
-	val, exists := validatorInfoCache.Get(validator)
+	validator = strings.ToLower(strings.TrimSpace(ExpandAddress(validator)))
+	metricsMutex.RLock()
+	info, exists := validatorRegistry.validatorInfo[validator]
+	metricsMutex.RUnlock()
 	if !exists {
 		return "", "", false
 	}
-
-	info := val.(ValidatorInfo)
 	return info.Signer, info.Name, true
 }
 
-// init signer map with LRU cache
-func initSignerMap() {
-	metricsMutex.Lock()
-	defer metricsMutex.Unlock()
-	if signerMap == nil {
-		// init with reasonable size for val count
-		signerMap = cache.NewLRUCache(5000, 24*time.Hour)
+// ResolveValidatorIdentity resolves only identities proven by the current
+// registry generation. Unknown inputs collapse to an explicit unknown series
+// at the call site; they are not returned as if they were validators.
+func ResolveValidatorIdentity(identifier string) (ValidatorIdentity, bool) {
+	identifier = strings.ToLower(strings.TrimSpace(ExpandAddress(identifier)))
+	if identifier == "" {
+		return ValidatorIdentity{}, false
 	}
+
+	metricsMutex.RLock()
+	defer metricsMutex.RUnlock()
+	if validator, ok := validatorRegistry.signerToValidator[identifier]; ok {
+		info := validatorRegistry.validatorInfo[validator]
+		return ValidatorIdentity{
+			Validator: validator,
+			Signer:    identifier,
+			Name:      normalizedValidatorName(info.Name),
+			Kind:      "signer",
+		}, true
+	}
+	if info, ok := validatorRegistry.validatorInfo[identifier]; ok {
+		return ValidatorIdentity{
+			Validator: identifier,
+			Signer:    info.Signer,
+			Name:      normalizedValidatorName(info.Name),
+			Kind:      "validator",
+		}, true
+	}
+	return ValidatorIdentity{}, false
 }
 
-// init val info cache
-func initValidatorInfoCache() {
-	metricsMutex.Lock()
-	defer metricsMutex.Unlock()
-	if validatorInfoCache == nil {
-		// init with reasonable size for val count
-		validatorInfoCache = cache.NewLRUCache(5000, 24*time.Hour)
+// ResolveSignerSnapshot resolves one complete, source-typed signer generation
+// under a single registry read lock. The map is keyed by the normalized input
+// spelling so callers can resolve truncated wire identifiers without mixing
+// two API generations in one status snapshot. An identifier absent from the
+// current API generation remains explicitly a signer, while validator/name
+// stay unknown; the status schema, not a 0x prefix, supplies that kind.
+func ResolveSignerSnapshot(signers []string) map[string]ValidatorIdentity {
+	type signerInput struct {
+		key      string
+		expanded string
 	}
+	inputs := make([]signerInput, 0, len(signers))
+	for _, signer := range signers {
+		key := strings.ToLower(strings.TrimSpace(signer))
+		if key == "" {
+			continue
+		}
+		inputs = append(inputs, signerInput{
+			key:      key,
+			expanded: strings.ToLower(strings.TrimSpace(ExpandAddress(key))),
+		})
+	}
+
+	out := make(map[string]ValidatorIdentity, len(inputs))
+	metricsMutex.RLock()
+	defer metricsMutex.RUnlock()
+	for _, input := range inputs {
+		identity := ValidatorIdentity{
+			Validator: "unknown",
+			Signer:    input.expanded,
+			Name:      "unknown",
+			Kind:      "signer",
+		}
+		if validator, ok := validatorRegistry.signerToValidator[input.expanded]; ok {
+			info := validatorRegistry.validatorInfo[validator]
+			identity.Validator = validator
+			identity.Name = normalizedValidatorName(info.Name)
+		}
+		out[input.key] = identity
+	}
+	return out
+}
+
+func normalizedValidatorName(name string) string {
+	if strings.TrimSpace(name) == "" {
+		return "unknown"
+	}
+	return name
 }
 
 // Note: there is deliberately no periodic truncation of labeledValues.

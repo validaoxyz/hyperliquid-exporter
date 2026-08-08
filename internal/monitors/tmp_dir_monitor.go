@@ -2,8 +2,8 @@ package monitors
 
 import (
 	"context"
+	"errors"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -18,19 +18,31 @@ const (
 	tmpDirStaleAge     = 24 * time.Hour
 )
 
-// StartTmpDirMonitor walks $NODE_HOME/tmp once every 5 minutes and
-// publishes two gauges: total byte size and a count of files older than
-// 24h. The latter catches orphaned writes from past crashes — on the
+const (
+	tmpClassReceipt  = "receipt"
+	tmpClassMaterial = "material"
+)
+
+var tmpClasses = []string{tmpClassReceipt, tmpClassMaterial}
+
+type tmpDirSnapshot struct {
+	totalBytes         int64
+	staleFiles         int64
+	shellExecFiles     int64
+	filesByClass       map[string]int64
+	bytesByClass       map[string]int64
+	materialStaleFiles int64
+	materialStaleBytes int64
+}
+
+// StartTmpDirMonitor walks $NODE_HOME/tmp once every 5 minutes and publishes
+// compatibility totals plus receipt/material classes. Material stale bytes
+// and files catch orphaned writes from past crashes — on the
 // test peer we observed ~2.5 GB of stale tmp files dating to May/Jul
 // 2025, which is what an alert would have caught.
 func StartTmpDirMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	root := filepath.Join(cfg.NodeHome, "tmp")
-	if _, err := os.Stat(root); err != nil {
-		logger.InfoComponent("tmp_dir",
-			"$NODE_HOME/tmp not present (%s); monitor idle", root)
-		<-ctx.Done()
-		return
-	}
+	metrics.RegisterSource(metrics.SourceTmpDir, true)
 
 	logger.InfoComponent("tmp_dir", "watching %s every %s", root, tmpDirPollInterval)
 
@@ -52,33 +64,107 @@ func StartTmpDirMonitor(ctx context.Context, cfg config.Config, errCh chan<- err
 }
 
 func tickTmpDir(root string) {
-	var total int64
-	var stale int64
-	var shellExec int64
-	threshold := time.Now().Add(-tmpDirStaleAge)
+	tickTmpDirWith(root, time.Now, scanTmpDir)
+}
+
+type tmpDirScanFunc func(string, time.Time) (tmpDirSnapshot, error)
+
+func tickTmpDirWith(root string, now func() time.Time, scan tmpDirScanFunc) bool {
+	metrics.MarkMonitorAttempt("tmp_dir")
+	metrics.MarkSourceAttempt(metrics.SourceTmpDir)
+	observedAt := now()
+	snapshot, err := scan(root, observedAt)
+	if err != nil {
+		metrics.HLNodeTmpScanUp.Set(0)
+		if errors.Is(err, fs.ErrNotExist) {
+			metrics.MarkSourceAbsent(metrics.SourceTmpDir)
+		} else {
+			metrics.MarkSourceError(metrics.SourceTmpDir, metrics.SourceFailureWalk)
+		}
+		logger.DebugComponent("tmp_dir", "tmp walk incomplete; retaining last complete snapshot: %v", err)
+		return false
+	}
+
+	metrics.HLNodeTmpBytes.Set(float64(snapshot.totalBytes))
+	metrics.HLNodeTmpStaleFiles.Set(float64(snapshot.staleFiles))
+	metrics.HLNodeShellExecPending.Set(float64(snapshot.shellExecFiles))
+	for _, class := range tmpClasses {
+		metrics.HLNodeTmpFiles.WithLabelValues(class).Set(float64(snapshot.filesByClass[class]))
+		metrics.HLNodeTmpBytesByClass.WithLabelValues(class).Set(float64(snapshot.bytesByClass[class]))
+	}
+	metrics.HLNodeTmpMaterialStaleFiles.Set(float64(snapshot.materialStaleFiles))
+	metrics.HLNodeTmpMaterialStaleBytes.Set(float64(snapshot.materialStaleBytes))
+	metrics.HLNodeTmpScanUp.Set(1)
+	completedAt := now()
+	metrics.HLNodeTmpLastCompleteTimestampSeconds.Set(float64(completedAt.Unix()))
+	metrics.MarkSourceValidObservation(metrics.SourceTmpDir, time.Time{})
+	metrics.MarkSourcePublication(metrics.SourceTmpDir)
+	metrics.MarkMonitorValidObservation("tmp_dir")
+	metrics.MarkMonitorPublication("tmp_dir")
+	return true
+}
+
+func scanTmpDir(root string, now time.Time) (tmpDirSnapshot, error) {
+	return scanTmpDirWith(root, now, filepath.WalkDir)
+}
+
+type tmpWalkDirFunc func(string, fs.WalkDirFunc) error
+
+func scanTmpDirWith(root string, now time.Time, walk tmpWalkDirFunc) (tmpDirSnapshot, error) {
+	snapshot := tmpDirSnapshot{
+		filesByClass: map[string]int64{
+			tmpClassReceipt:  0,
+			tmpClassMaterial: 0,
+		},
+		bytesByClass: map[string]int64{
+			tmpClassReceipt:  0,
+			tmpClassMaterial: 0,
+		},
+	}
+	threshold := now.Add(-tmpDirStaleAge)
 	shellExecDir := filepath.Join(root, "shell_rs_out")
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+	err := walk(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
 			return nil
 		}
 		info, err := d.Info()
 		if err != nil {
-			return nil
+			return err
 		}
-		total += info.Size()
+		size := info.Size()
+		snapshot.totalBytes += size
 		if info.ModTime().Before(threshold) {
-			stale++
+			snapshot.staleFiles++
 		}
 		// Sub-bucket: count files under tmp/shell_rs_out/ separately.
 		// Each visor shell-exec drops a (usually empty) file here; a
 		// healthy node should keep this count low. Sustained growth
 		// means the visor's cleanup pass is broken.
-		if strings.HasPrefix(path, shellExecDir+string(filepath.Separator)) || path == shellExecDir {
-			shellExec++
+		underShellExec := strings.HasPrefix(path, shellExecDir+string(filepath.Separator))
+		if underShellExec {
+			snapshot.shellExecFiles++
+		}
+		class := tmpFileClass(underShellExec, info)
+		snapshot.filesByClass[class]++
+		snapshot.bytesByClass[class] += size
+		if class == tmpClassMaterial && size > 0 && info.ModTime().Before(threshold) {
+			snapshot.materialStaleFiles++
+			snapshot.materialStaleBytes += size
 		}
 		return nil
 	})
-	metrics.HLNodeTmpBytes.Set(float64(total))
-	metrics.HLNodeTmpStaleFiles.Set(float64(stale))
-	metrics.HLNodeShellExecPending.Set(float64(shellExec))
+	if err != nil {
+		return tmpDirSnapshot{}, err
+	}
+	return snapshot, nil
+}
+
+func tmpFileClass(underShellExec bool, info fs.FileInfo) string {
+	if underShellExec && info.Mode().IsRegular() && info.Size() == 0 {
+		return tmpClassReceipt
+	}
+	return tmpClassMaterial
 }

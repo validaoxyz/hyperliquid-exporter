@@ -1,10 +1,27 @@
 package monitors
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
+
+func completeRocksDBLog(at time.Time, stops int64, cache string) string {
+	parts := make([]string, 0, len(rocksDBStallReasons))
+	for _, reason := range rocksDBStallReasons {
+		value := int64(0)
+		if reason == "l0-file-count-limit-stops" {
+			value = stops
+		}
+		parts = append(parts, fmt.Sprintf("%s: %d", reason, value))
+	}
+	return fmt.Sprintf("%s 1 [db/db_impl/db_impl.cc:1084] ------- DUMPING STATS -------\nWrite Stall (count): %s, Block cache LRUCache@0x1 capacity: 2.00 GB usage: %s\n", at.Format("2006/01/02-15:04:05.000000"), strings.Join(parts, ", "), cache)
+}
 
 func TestParseWriteStallLine(t *testing.T) {
 	// Real line trimmed from a hl-node RocksDB LOG. Note the trailing
@@ -54,15 +71,8 @@ func TestReadRocksDBStats_RealSample(t *testing.T) {
 	logPath := filepath.Join(dir, "LOG")
 	// Two DUMPING STATS blocks. The reader should pick the LAST one
 	// (the one with higher counters), not the first.
-	contents := `2026/05/25-11:12:23.794279 3528027 [db/db_impl/db_impl.cc:1084] ------- DUMPING STATS -------
-... random unrelated text ...
-Write Stall (count): l0-file-count-limit-stops: 1, total-stops: 1, Block cache LRUCache@0x1 capacity: 1.00 GB usage: 1.00 KB
-
-2026/05/25-11:22:23.794672 3528027 [db/db_impl/db_impl.cc:1084] ------- DUMPING STATS -------
-some more text
-Write Stall (count): l0-file-count-limit-stops: 9, total-stops: 9, Block cache LRUCache@0x2 capacity: 2.00 GB usage: 5.00 MB
-
-`
+	contents := completeRocksDBLog(time.Date(2026, 5, 25, 11, 12, 23, 794279000, time.UTC), 1, "1.00 KB") +
+		completeRocksDBLog(time.Date(2026, 5, 25, 11, 22, 23, 794672000, time.UTC), 9, "5.00 MB")
 	if err := os.WriteFile(logPath, []byte(contents), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -76,6 +86,85 @@ Write Stall (count): l0-file-count-limit-stops: 9, total-stops: 9, Block cache L
 	wantCache := int64(5 * 1024 * 1024)
 	if stats.cacheUsageBytes != wantCache {
 		t.Errorf("cache usage: got %d want %d", stats.cacheUsageBytes, wantCache)
+	}
+}
+
+func TestRocksDBCompleteSnapshotRollbackAbsenceAndRecovery(t *testing.T) {
+	nodeHome := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Second)
+	dir := filepath.Join(nodeHome, "hyperliquid_data", "db_hub", "Rpc")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.sst"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "LOG")
+	if err := os.WriteFile(logPath, []byte(completeRocksDBLog(now, 3, "4.00 MB")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	state := newRocksDBMonitorState()
+	tickRocksDB(nodeHome, state, now.Add(time.Second))
+	labels := map[string]string{"db": "db_hub_rpc", "reason": "l0-file-count-limit-stops"}
+	if value, ok := b03CollectorValue(t, metrics.HLRocksDBWriteStallsTotal, labels); !ok || value != 3 {
+		t.Fatalf("complete rocksdb snapshot = %v, %v", value, ok)
+	}
+	if value, ok := b03CollectorValue(t, metrics.HLRocksDBSSTFiles, map[string]string{"db": "db_hub_rpc"}); !ok || value != 1 {
+		t.Fatalf("sst count = %v, %v", value, ok)
+	}
+
+	// A syntactically present but incomplete block retains every prior child.
+	if err := os.WriteFile(logPath, []byte(fmt.Sprintf("%s 1 [x] ------- DUMPING STATS -------\nWrite Stall (count): l0-file-count-limit-stops: 99\n", now.Add(time.Minute).Format("2006/01/02-15:04:05.000000"))), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tickRocksDB(nodeHome, state, now.Add(2*time.Second))
+	if value, ok := b03CollectorValue(t, metrics.HLRocksDBWriteStallsTotal, labels); !ok || value != 3 {
+		t.Fatalf("incomplete block replaced last good = %v, %v", value, ok)
+	}
+	if value, ok := b03CollectorValue(t, metrics.HLRocksDBStatsParseOK, map[string]string{"db": "db_hub_rpc"}); !ok || value != 0 {
+		t.Fatalf("incomplete parse state = %v, %v", value, ok)
+	}
+	failedLastValid := state.dbs["db_hub_rpc"].lastValid
+	// Re-validating the same retained stats generation is still a successful
+	// per-DB recovery and must refresh its last-valid receipt time. The common
+	// source observation timestamp remains tied to actual sample advancement.
+	if err := os.WriteFile(logPath, []byte(completeRocksDBLog(now, 3, "4.00 MB")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tickRocksDB(nodeHome, state, now.Add(2500*time.Millisecond))
+	if !state.dbs["db_hub_rpc"].lastValid.After(failedLastValid) {
+		t.Fatal("RocksDB same-generation recovery did not refresh per-DB last-valid time")
+	}
+
+	// Present-empty is distinct from absent and still retains last good data.
+	if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tickRocksDB(nodeHome, state, now.Add(3*time.Second))
+	if value, ok := b03CollectorValue(t, metrics.HLRocksDBSourcePresent, map[string]string{"db": "db_hub_rpc"}); !ok || value != 1 {
+		t.Fatalf("empty LOG presence = %v, %v", value, ok)
+	}
+	if value, ok := b03CollectorValue(t, metrics.HLRocksDBWriteStallsTotal, labels); !ok || value != 3 {
+		t.Fatal("empty LOG cleared last complete stats")
+	}
+
+	if err := os.Remove(logPath); err != nil {
+		t.Fatal(err)
+	}
+	tickRocksDB(nodeHome, state, now.Add(4*time.Second))
+	if b03CollectorHasLabels(t, metrics.HLRocksDBWriteStallsTotal, labels) {
+		t.Fatal("absent RocksDB LOG retained current stats")
+	}
+	if value, ok := b03CollectorValue(t, metrics.HLRocksDBSourcePresent, map[string]string{"db": "db_hub_rpc"}); !ok || value != 0 {
+		t.Fatalf("absent LOG presence = %v, %v", value, ok)
+	}
+
+	if err := os.WriteFile(logPath, []byte(completeRocksDBLog(now.Add(5*time.Second), 7, "8.00 MB")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tickRocksDB(nodeHome, state, now.Add(6*time.Second))
+	if value, ok := b03CollectorValue(t, metrics.HLRocksDBWriteStallsTotal, labels); !ok || value != 7 {
+		t.Fatalf("RocksDB recovery = %v, %v", value, ok)
 	}
 }
 

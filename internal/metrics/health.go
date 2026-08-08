@@ -141,6 +141,13 @@ func IncMonitorError(name string) {
 	HLExporterMonitorErrorsTotal.WithLabelValues(name).Inc()
 }
 
+// IncMonitorErrorDrop records a report that could not enter one monitor's
+// independent cap-1 error channel. The caller is responsible for reducing
+// the monitor label to the fixed exporter vocabulary.
+func IncMonitorErrorDrop(name string) {
+	HLExporterMonitorErrorDropsTotal.WithLabelValues(name).Inc()
+}
+
 func getOrCreate(name string) *monitorState {
 	monitorsMu.RLock()
 	state, ok := monitors[name]

@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
+
+	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
 func TestLatestHourlyFile_NumericHourSort(t *testing.T) {
@@ -35,6 +38,95 @@ func TestLatestHourlyFile_NumericHourSort(t *testing.T) {
 		t.Errorf("got %q, want %q (suffix %q)", got, want, wantSuffix)
 	}
 }
+
+func TestPublishVisorStateHardforkAndScheduledFreezeWithdrawOnOmission(t *testing.T) {
+	freeze := int64(900)
+	hardfork := int64(1476)
+	publishVisorState(visorState{
+		Height: 1000, InitialHeight: 800,
+		ScheduledFreezeHeight: &freeze,
+		HardforkVersion:       &hardfork,
+	}, time.Now())
+	if got := validatorMetricValue(t, metrics.HLVisorHardforkVersion.WithLabelValues("visor_state")); got != 1476 {
+		t.Fatalf("hardfork version = %v", got)
+	}
+	if got := validatorMetricValue(t, metrics.HLVisorScheduledFreezeHeightCurrent.WithLabelValues("visor_state")); got != 900 {
+		t.Fatalf("scheduled freeze = %v", got)
+	}
+
+	publishVisorState(visorState{Height: 1001, InitialHeight: 800}, time.Now())
+	if validatorCollectorHasLabels(metrics.HLVisorHardforkVersion, map[string]string{"source": "visor_state"}) {
+		t.Fatal("omitted hardfork version left a current series")
+	}
+	if validatorCollectorHasLabels(metrics.HLVisorScheduledFreezeHeightCurrent, map[string]string{"source": "visor_state"}) {
+		t.Fatal("null scheduled freeze left a current series")
+	}
+	if got := validatorMetricValue(t, metrics.HLVisorHardforkVersionAvailable); got != 0 {
+		t.Fatalf("hardfork availability = %v", got)
+	}
+	if got := validatorMetricValue(t, metrics.HLVisorScheduledFreezeHeightAvailable); got != 0 {
+		t.Fatalf("freeze availability = %v", got)
+	}
+}
+
+func TestDecodeVisorStateOptionalVersionFieldsAreIndependent(t *testing.T) {
+	for name, tc := range map[string]struct {
+		field       string
+		wantVersion *int64
+	}{
+		"present":    {`1476`, int64Pointer(1476)},
+		"zero":       {`0`, int64Pointer(0)},
+		"negative":   {`-1`, nil},
+		"wrong type": {`"1476"`, nil},
+		"null":       {`null`, nil},
+		"omitted":    {``, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			optional := ""
+			if tc.field != "" {
+				optional = `,"hardfork_version":` + tc.field
+			}
+			s, err := decodeVisorState([]byte(`{"height":100,"initial_height":90` + optional + `}`))
+			if err != nil || s.Height != 100 {
+				t.Fatalf("decoded core state = %+v, %v", s, err)
+			}
+			if tc.wantVersion == nil {
+				if s.HardforkVersion != nil {
+					t.Fatalf("hardfork version = %v, want unavailable", *s.HardforkVersion)
+				}
+			} else if s.HardforkVersion == nil || *s.HardforkVersion != *tc.wantVersion {
+				t.Fatalf("hardfork version = %v, want %v", s.HardforkVersion, *tc.wantVersion)
+			}
+		})
+	}
+}
+
+func TestReadLatestVisorStateUsesValidatedHourlyFallback(t *testing.T) {
+	root := t.TempDir()
+	snapshot := filepath.Join(root, "missing-live.json")
+	hourDir := filepath.Join(root, "hourly", "20260808")
+	if err := os.MkdirAll(hourDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hour := filepath.Join(hourDir, "18")
+	records := "[\"2026-08-08T18:00:00.000000000\",{\"height\":1475,\"initial_height\":1400}]\n" +
+		"[\"2026-08-08T18:01:00.000000000\",{\"height\":1476,\"initial_height\":1400,\"hardfork_version\":1476}]\n"
+	if err := os.WriteFile(hour, []byte(records), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, observedAt, err := readLatestVisorState(snapshot, filepath.Join(root, "hourly"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Height != 1476 || s.HardforkVersion == nil || *s.HardforkVersion != 1476 {
+		t.Fatalf("fallback state = %+v", s)
+	}
+	if observedAt.Format("15:04") != "18:01" {
+		t.Fatalf("fallback timestamp = %v", observedAt)
+	}
+}
+
+func int64Pointer(value int64) *int64 { return &value }
 
 func TestLatestHourlyFile_LatestDate(t *testing.T) {
 	root := t.TempDir()

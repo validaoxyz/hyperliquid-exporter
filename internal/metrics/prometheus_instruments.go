@@ -33,15 +33,15 @@ var (
 	})
 	HLVisorInitialHeight = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_visor_initial_height",
-		Help: "Height at which the current visor instance started (sync starting point).",
+		Help: "initial_height from the latest valid visor state; this is scoped to that reported process generation.",
 	})
 	HLVisorBlocksApplied = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_visor_blocks_applied",
-		Help: "Blocks the visor has applied since startup (height - initial_height).",
+		Help: "Nonnegative process-generation observation height - initial_height from the latest valid visor state; reset to 0 when either operand is unavailable.",
 	})
 	HLVisorScheduledFreezeHeight = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_visor_scheduled_freeze_height",
-		Help: "Height at which the visor is scheduled to freeze (0 if not scheduled).",
+		Help: "Deprecated compatibility value for scheduled_freeze_height from the latest valid visor state; consult hl_visor_scheduled_freeze_height_available because 0 also represents unavailable.",
 	})
 	// Difference between the chain-consensus timestamp recorded for the
 	// latest applied block and the local wall-clock time at the moment
@@ -98,7 +98,7 @@ var (
 	}, subsystemLabels)
 	HLNodeSubsystemWorkFrac = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_node_subsystem_work_fraction",
-		Help: "Fraction of wall-clock time the subsystem spent doing work in the sample.",
+		Help: "Raw upstream work_fraction value for the subsystem's latest sampling window; it is not constrained to the interval 0..1.",
 	}, subsystemLabels)
 	HLNodeSubsystemSamplesTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_node_subsystem_samples_total",
@@ -138,56 +138,28 @@ var (
 
 // TCP-traffic metrics (from internal/monitors/tcp_traffic_monitor.go).
 // Sourced from $NODE_HOME/data/tcp_traffic/hourly. The exporter only
-// publishes the top-N peers per direction plus an "other" bucket, so
-// label cardinality is bounded regardless of how many peers the node
-// connects to. The raw values are per-30s-interval throughputs whose
-// unit is not documented by hl-node; treat them as a comparative rate.
+// publishes the top-N positive endpoint values per traffic direction plus an
+// "other" bucket. The upstream field is a point-rate-like value with unresolved
+// formal unit and cadence; it is not a byte counter or a connection role.
 var (
 	HLP2PPeerTraffic = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_p2p_peer_traffic",
-		Help: "Per-peer TCP throughput from the latest tcp_traffic sample (unit: raw hl-node value, ~per-30s-interval rate). Labels: ip, direction (in/out). The literal label value ip=\"other\" sums all peers below the top-N cutoff.",
+		Help: "Raw unresolved-unit tcp_traffic point value from the latest complete snapshot for each top-16 positive endpoint and traffic direction; ip=\"other\" sums the remaining positive endpoints. This is not a byte counter, connection origin, or topology role.",
 	}, []string{"ip", "direction"})
 
 	HLP2PTotalTraffic = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_p2p_total_traffic",
-		Help: "Sum of TCP throughput across all peers, per direction.",
+		Help: "Sum of the raw unresolved-unit tcp_traffic point field across all reported endpoint rows in the latest complete snapshot, per traffic direction.",
 	}, []string{"direction"})
 
 	HLP2PPeerCount = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_p2p_peer_count",
-		Help: "Number of distinct peers seen in the latest tcp_traffic sample, per direction.",
+		Help: "Number of distinct canonical IP endpoint rows reported in the latest complete tcp_traffic sample per traffic direction, including zero-valued rows; this is observation, not connectivity.",
 	}, []string{"direction"})
 
 	HLP2PSampleAgeSeconds = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_p2p_sample_age_seconds",
-		Help: "Age of the most recent tcp_traffic sample read by the exporter, in seconds.",
-	})
-)
-
-// Parent-peer metrics (from internal/monitors/parent_peer_monitor.go).
-// For a non-validator node, the "parent peer" is the inbound peer
-// delivering the most bytes — effectively the upstream source of block
-// data. Losing it = the node likely stops syncing. Inspired by
-// dwellir-public/hyperliquid-exporter.
-var (
-	HLNodeParentPeerInfo = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "hl_node_parent_peer_info",
-		Help: "1 for the IP currently identified as the node's parent peer. Only ever has one series active at a time.",
-	}, []string{"ip"})
-
-	HLNodeParentPeerTraffic = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "hl_node_parent_peer_traffic",
-		Help: "Inbound throughput attributed to the current parent peer in the latest sample (same units as hl_p2p_peer_traffic).",
-	})
-
-	HLNodeParentPeerTenureSeconds = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "hl_node_parent_peer_tenure_seconds",
-		Help: "Time the current parent peer has held the role since the exporter last observed a switch.",
-	})
-
-	HLNodeParentPeerSwitches = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "hl_node_parent_peer_switches_total",
-		Help: "Number of times the parent peer has changed since the exporter started.",
+		Help: "Wall-clock seconds since exporter receipt of the latest complete valid tcp_traffic snapshot; advances without new records.",
 	})
 )
 
@@ -234,7 +206,7 @@ var (
 var (
 	HLP2PGossipEventsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "hl_p2p_gossip_events_total",
-		Help: "Cumulative count of gossip-connection events emitted by hl-node, by event type.",
+		Help: "Newline-committed gossip-connection events observed after exporter start, by fixed event type; retained startup history is not replayed and the counter resets on exporter restart.",
 	}, []string{"event_type"})
 )
 
@@ -311,6 +283,10 @@ var (
 		Name: "hl_exporter_monitor_errors_total",
 		Help: "Total reported errors for each monitor since exporter start.",
 	}, []string{"monitor"})
+	HLExporterMonitorErrorDropsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "hl_exporter_monitor_error_drops_total",
+		Help: "Monitor error reports dropped because that monitor's independent bounded error channel was full.",
+	}, []string{"monitor"})
 	HLExporterReady = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_exporter_ready",
 		Help: "1 once every configured monitor has started at least one worker; source availability and freshness are reported separately.",
@@ -334,6 +310,10 @@ func goVersion() string {
 // into the per-monitor gauges. Invoked periodically from a small goroutine
 // so the values stay fresh between scrapes.
 func PublishMonitorHealthSnapshot() {
+	WithPrometheusSnapshotUpdate(publishMonitorHealthSnapshot)
+}
+
+func publishMonitorHealthSnapshot() {
 	for _, s := range snapshotMonitors() {
 		if s.Registered {
 			HLExporterMonitorRegistered.WithLabelValues(s.Name).Set(1)
@@ -400,7 +380,7 @@ var (
 		Help: "Seconds since the most recent successful periodic snapshot (now - mtime of newest status sentinel).",
 	})
 	HLNodeSnapshotKnown = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "hl_node_snapshot_known_count",
+		Name: "hl_node_snapshot_sentinels_retained",
 		Help: "Number of snapshot-completion sentinels in the retained scan window of at most the two newest valid date directories; this is not cadence or capacity headroom.",
 	})
 )
@@ -409,19 +389,19 @@ var (
 var (
 	HLVisorFreezeAbciHeight = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_visor_freeze_abci_height",
-		Help: "Replay floor written by hl-visor to hyperliquid_data/freeze_abci_height at process start.",
+		Help: "Deprecated compatibility value read from hyperliquid_data/freeze_abci_height; this persisted core/ABCI height can survive process restarts and is not a current scheduled freeze.",
 	})
 	HLVisorBlocksAboveFreeze = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_visor_blocks_above_freeze",
-		Help: "hl_visor_height - hl_visor_freeze_abci_height (blocks applied since the current visor instance started).",
+		Help: "Deprecated compatibility value: nonnegative latest visor height minus persisted hyperliquid_data/freeze_abci_height when both are readable; not process-generation progress.",
 	})
 	HLEVMDBCheckpointHeight = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_evm_db_checkpoint_height",
-		Help: "Latest checkpoint height the named EVM DB tier has flushed to disk.",
+		Help: "Deprecated misleading name: core/ABCI height read from hyperliquid_data/evm_db_hub_<tier>/cp_checkpoint_height; not EVM block height or current execution head.",
 	}, []string{"tier"}) // tier ∈ {"fast","slow"}
 	HLEVMDBCheckpointLagBlocks = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_evm_db_checkpoint_lag_blocks",
-		Help: "hl_evm_db_checkpoint_height{tier=\"fast\"} - {tier=\"slow\"} (positive = slow tier behind fast).",
+		Help: "Deprecated misleading name: fast minus slow persisted core/ABCI cp_checkpoint_height files when both are readable; not an EVM execution lag.",
 	})
 )
 
@@ -491,27 +471,27 @@ func InitExchangeStatusDeltaInstrument() {
 var (
 	HLP2PLz4CompressionRatio = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_p2p_lz4_compression_ratio",
-		Help: "lz4 compression ratio (bytes-after / bytes-before) for a peer in the latest sample. 1.0 = uncompressible. The literal ip=\"other\" sums all peers below the top-N cutoff.",
+		Help: "Deprecated latest-window gauge: byte-field-weighted mean of upstream-reported per-port ratios for a bounded endpoint/direction; not a derived aggregate compression ratio. Do not use rate/increase.",
 	}, []string{"ip", "direction"})
 	HLP2PLz4BytesTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_p2p_lz4_bytes_total",
-		Help: "Cumulative compressed bytes since the source process started, per peer/direction.",
+		Help: "Deprecated latest-window gauge of the unresolved upstream byte field per bounded endpoint/direction; not cumulative despite the name. Do not use rate/increase.",
 	}, []string{"ip", "direction"})
 	HLP2PLz4PacketsTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_p2p_lz4_packets_total",
-		Help: "Cumulative compressed packets since the source process started, per peer/direction.",
+		Help: "Deprecated latest-window gauge of the upstream packet field per bounded endpoint/direction; not cumulative despite the name. Do not use rate/increase.",
 	}, []string{"ip", "direction"})
 	HLP2PLz4GlobalRatio = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_p2p_lz4_global_ratio",
-		Help: "lz4 compression ratio across all peers (global aggregate row).",
+		Help: "Deprecated latest-window gauge of the source-provided global ratio; not a locally derived compression ratio.",
 	})
 	HLP2PLz4GlobalBytes = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_p2p_lz4_global_bytes_total",
-		Help: "Cumulative compressed bytes across all peers since the source process started.",
+		Help: "Deprecated latest-window gauge of the source-provided unresolved global byte field; not cumulative despite the name. Do not use rate/increase.",
 	})
 	HLP2PLz4GlobalPackets = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_p2p_lz4_global_packets_total",
-		Help: "Cumulative compressed packets across all peers since the source process started.",
+		Help: "Deprecated latest-window gauge of the source-provided global packet field; not cumulative despite the name. Do not use rate/increase.",
 	})
 )
 
@@ -527,16 +507,16 @@ var (
 	}, []string{"stream", "level"})
 )
 
-// public_ip — heartbeat + change detection on last_known_public_ip.json.
+// public_ip — observed file age + change detection on last_known_public_ip.json.
 var (
 	HLNodePublicIPInfo = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_node_public_ip_info",
 		Help: "1 for the IP currently reported as the node's public address.",
 	}, []string{"ip"})
-	HLNodePublicIPAgeSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+	HLNodePublicIPAgeSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_node_public_ip_age_seconds",
-		Help: "Age of last_known_public_ip.json (now - mtime); should refresh every ~13 min while hl-node runs.",
-	})
+		Help: "Wall-clock seconds since the observed mtime of last_known_public_ip.json; no universal rewrite cadence is implied.",
+	}, []string{})
 	HLNodePublicIPChangesTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "hl_node_public_ip_changes_total",
 		Help: "Cumulative count of public-IP changes observed since the exporter started.",
@@ -569,10 +549,10 @@ var (
 	// HLTokioSampleAgeSeconds ages the newest tokio sample. The feed can die
 	// while the node stays healthy (observed live: a 26h gap); when it does,
 	// the per-task gauges are withdrawn and only this age keeps climbing.
-	HLTokioSampleAgeSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+	HLTokioSampleAgeSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_tokio_sample_age_seconds",
 		Help: "Age of the newest tokio task sample. When this passes ~15m the hl_tokio_task_* gauges are withdrawn (stale source) until the feed resumes.",
-	})
+	}, []string{})
 	HLTokioTaskDroppedTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_tokio_task_dropped_total",
 		Help: "Cumulative dropped (panicked or cancelled) task count.",
@@ -604,12 +584,11 @@ var (
 // Phase-D round-5 additions.
 // =====================================================================
 
-// TCP connection state, parsed from /proc/net/tcp{,6}. Cardinality is
-// bounded: 4 listening ports × ~5 states.
+// Deprecated TCP compatibility aggregate, parsed from /proc/net/tcp{,6}.
 var (
 	HLP2PTCPConnections = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_p2p_tcp_connections",
-		Help: "Count of TCP connections on each hl-node listening port, grouped by socket state. Sourced from /proc/net/tcp{,6}.",
+		Help: "Deprecated aggregate of kernel TCP socket rows associated with a configured service port on either literal socket side, grouped by state; use hl_p2p_tcp_socket_connections.",
 	}, []string{"port", "state"})
 )
 
@@ -651,7 +630,7 @@ var (
 	}, []string{"step", "quantile"})
 	HLLatencyBucketGuardWorkFraction = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_latency_bucket_guard_work_fraction",
-		Help: "Fraction of wall-clock time (0..1 duty cycle) each bucket_guard sub-step spent doing work in the last sampling window.",
+		Help: "Raw upstream work_fraction value for each bucket_guard sub-step's latest sampling window; it is not constrained to the interval 0..1.",
 	}, []string{"step"})
 	HLTCPLz4Latency = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_tcp_lz4_latency_seconds",
@@ -659,7 +638,7 @@ var (
 	}, []string{"direction", "port", "quantile"})
 	HLTCPLz4WorkFraction = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_tcp_lz4_work_fraction",
-		Help: "Fraction of wall-clock time (0..1 duty cycle) the lz4 codec spent doing work per direction/port in the last sampling window.",
+		Help: "Raw upstream work_fraction value for each lz4 direction/port's latest sampling window; it is not constrained to the interval 0..1.",
 	}, []string{"direction", "port"})
 )
 
@@ -668,7 +647,7 @@ var (
 var (
 	HLNodeCritLocation = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_node_crit_location",
-		Help: "Per-source-location crit count from /tmp/crit_msg_latest_stats/hl-node.json. Value is the location's cumulative count since the source process started.",
+		Help: "Per-source-location count from the matched hl-visor rich critical-message generation. Value is cumulative since the visor process started.",
 	}, []string{"file", "line"})
 	HLNodeCritLocationLastSeenSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_node_crit_location_last_seen_seconds",
@@ -698,39 +677,39 @@ var (
 // the exporter started observing; rate()/increase() are valid.
 var (
 	HLConsensusCommittedBlocks = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "hl_consensus_committed_blocks",
+		Name: "hl_consensus_committed_blocks_total",
 		Help: "Blocks committed by this validator since the exporter started observing. Counter; use rate().",
 	})
 	HLConsensusCommittedTxs = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "hl_consensus_committed_txs",
+		Name: "hl_consensus_committed_txs_total",
 		Help: "Transactions committed by this validator since the exporter started observing. Counter; use rate().",
 	})
 	HLConsensusCommittedTxBytes = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "hl_consensus_committed_tx_bytes",
+		Name: "hl_consensus_committed_tx_bytes_total",
 		Help: "Bytes of committed transactions since the exporter started observing. Counter; use rate().",
 	})
 	HLConsensusDroppedTxs = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "hl_consensus_dropped_txs",
+		Name: "hl_consensus_dropped_txs_total",
 		Help: "Transactions dropped by this validator's mempool / consensus pipeline since the exporter started observing. Any non-zero rate is operator-actionable: the validator is shedding load.",
 	})
 	HLConsensusRoundCatchup = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "hl_consensus_round_catchup",
-		Help: "Catch-up events (validator was behind and recovered) since the exporter started observing. Sustained rate = the validator keeps falling behind.",
+		Name: "hl_consensus_round_catchup_total",
+		Help: "Positive RoundCatchUp delta accumulated since the exporter started observing; upstream direction semantics are intentionally unspecified.",
 	})
 	HLConsensusRoundQC = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "hl_consensus_round_qc",
+		Name: "hl_consensus_round_qc_total",
 		Help: "Quorum Certificate rounds since the exporter started observing. In a healthy network this tracks committed_blocks closely.",
 	})
 	HLConsensusRoundTC = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "hl_consensus_round_tc",
+		Name: "hl_consensus_round_tc_total",
 		Help: "Timeout Certificate rounds (view changes) since the exporter started observing. Sustained rate = network instability.",
 	})
 	HLConsensusRPCRequestsRegistered = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "hl_consensus_rpc_requests_registered",
+		Name: "hl_consensus_rpc_requests_registered_total",
 		Help: "Validator-RPC requests served since the exporter started observing.",
 	})
 	HLConsensusRPCRequestsSent = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "hl_consensus_rpc_requests_sent",
+		Name: "hl_consensus_rpc_requests_sent_total",
 		Help: "Validator-RPC requests initiated since the exporter started observing.",
 	})
 )
@@ -740,8 +719,8 @@ var (
 // 5-minute validatorSummaries poll and works without internet access.
 var HLConsensusValidatorJailedLocal = promauto.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "hl_consensus_validator_jailed_local",
-	Help: "1 for each validator the local node currently reports jailed (node-local view, ~2min cadence). Series is removed when the validator unjails; join on the validator label for names.",
-}, []string{"validator"})
+	Help: "1 for each signer in current_jailed_validators from the latest successfully parsed local status row; unknown registry joins remain explicit and no cadence is assumed.",
+}, []string{"validator", "signer", "name"})
 
 // Replay-event tracking from $NODE_HOME/data/node_logs/replay/.
 // Each subdir is named "<height>_<iso>" and is created when the node
@@ -849,7 +828,7 @@ var (
 
 	HLLatencyConsensusWorkFraction = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_latency_consensus_work_fraction",
-		Help: "Fraction of wall-clock time (0..1 duty cycle) each consensus state-machine step spent doing work in the last sampling window.",
+		Help: "Raw upstream work_fraction value for each consensus step's latest sampling window; it is not constrained to the interval 0..1.",
 	}, []string{"step"})
 
 	HLLatencyL1Task = promauto.NewGaugeVec(prometheus.GaugeOpts{
@@ -859,7 +838,7 @@ var (
 
 	HLLatencyL1TaskWorkFraction = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_latency_l1_task_work_fraction",
-		Help: "Fraction of wall-clock time (0..1 duty cycle) each L1 block-apply phase spent doing work in the last sampling window.",
+		Help: "Raw upstream work_fraction value for each L1 phase's latest sampling window; it is not constrained to the interval 0..1.",
 	}, []string{"step"})
 )
 
@@ -868,33 +847,20 @@ var (
 var (
 	HLP2PUniquePeersSeen = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_p2p_unique_peers_seen",
-		Help: "Distinct peer IPs observed within a rolling window. `window` ∈ {5m, 1h, 24h}.",
+		Help: "Deprecated alias: qualified process-local traffic endpoints refreshed within the fixed window after two consecutive top-16 positive snapshots; observation is not connectivity.",
 	}, []string{"window"})
 	HLP2PPeersTotal = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "hl_p2p_peers",
-		Help: "Unique peer IPs with positive traffic in the latest tcp_traffic sample (\"right now\"). For rolling-window unique counts see hl_p2p_unique_peers_seen{window}.",
+		Help: "Deprecated alias: unique canonical IPs with any positive value in the latest complete tcp_traffic snapshot; observation is not connectivity.",
 	})
 	HLP2PPeersAddedTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "hl_p2p_peers_added_total",
-		Help: "Cumulative count of new peers registered since exporter start.",
+		Help: "Deprecated alias: qualified process-local traffic-endpoint admissions since exporter start after two consecutive eligible snapshots.",
 	})
 	HLP2PPeersEvictedTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "hl_p2p_peers_evicted_total",
-		Help: "Cumulative count of peers evicted (LRU + TTL combined) since exporter start.",
+		Help: "Deprecated alias: qualified process-local traffic-endpoint evictions since exporter start, summed across TTL and capacity reasons.",
 	})
-)
-
-// Per-IP gauges, gated by --per-peer-metrics. Cardinality bounded by
-// the peer set's LRU cap (2048) + TTL (24h).
-var (
-	HLP2PPeerLastSeenSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "hl_p2p_peer_last_seen_seconds",
-		Help: "Unix timestamp at which the named peer IP was last observed in any data source.",
-	}, []string{"ip"})
-	HLP2PPeerFirstSeenSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "hl_p2p_peer_first_seen_seconds",
-		Help: "Unix timestamp at which the named peer IP was first observed in the current peer-set lifetime.",
-	}, []string{"ip"})
 )
 
 // Jailing-config gauges register on first successful read of
@@ -996,7 +962,7 @@ var HLNodeCritLocationIgnored = promauto.NewGaugeVec(prometheus.GaugeOpts{
 // hold several connections; hl_p2p_non_val_peers_total counts peers).
 var HLP2PNonValConnections = promauto.NewGauge(prometheus.GaugeOpts{
 	Name: "hl_p2p_non_val_connections",
-	Help: "Sum of connection_count across non-validator gossip peers from the latest child_peers status.",
+	Help: "Deprecated alias: sum of source connection_count across explicit children in the latest fresh child_peers status snapshot; this is not a peer count.",
 })
 
 // Lifetime mean latency per subsystem (total_mean in the summary rows) as
@@ -1011,7 +977,7 @@ var HLNodeSubsystemLatencyLifetimeMean = promauto.NewGaugeVec(prometheus.GaugeOp
 // rate-limits someone. Zero on a healthy node.
 var HLNodeRateLimitedFiles = promauto.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "hl_node_rate_limited_files",
-	Help: "Non-empty rate_limited_ips files in the newest date dir, per stream (abci_stream, gossip_rpc_blocks, gossip_rpc_requests). Non-zero = the node is actively rate-limiting peers.",
+	Help: "Deprecated alias: non-empty regular files retained in the lexicographically newest rate_limited_ips date directory per fixed stream; evidence is not active rate limiting or an offender count.",
 }, []string{"stream"})
 
 // Restart/crash taxonomy from data/visor_child_stderr: hl-visor drops one

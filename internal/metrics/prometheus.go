@@ -19,7 +19,7 @@ const (
 )
 
 func StartPrometheusServer(ctx context.Context, port int, enablePprof bool) error {
-	mux := newPrometheusMux(enablePprof, prometheus.DefaultGatherer)
+	mux := newPrometheusMux(enablePprof, protectPrometheusSnapshots(prometheus.DefaultGatherer))
 	server := newPrometheusServer(port, mux)
 
 	go func() {

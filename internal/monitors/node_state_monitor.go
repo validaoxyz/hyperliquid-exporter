@@ -50,6 +50,7 @@ func latestVisorHeight() int64 { return atomic.LoadInt64(&visorHeightForLag) }
 // Each file holds a single ASCII integer; the cost of reading all three
 // per tick is negligible compared to any other monitor.
 func StartNodeStateMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
+	metrics.RegisterSource(metrics.SourceNodeState, true)
 	freezePath := filepath.Join(cfg.NodeHome, "hyperliquid_data", "freeze_abci_height")
 	fastPath := filepath.Join(cfg.NodeHome, "hyperliquid_data", "evm_db_hub_fast", "cp_checkpoint_height")
 	slowPath := filepath.Join(cfg.NodeHome, "hyperliquid_data", "evm_db_hub_slow", "cp_checkpoint_height")
@@ -74,7 +75,11 @@ func StartNodeStateMonitor(ctx context.Context, cfg config.Config, errCh chan<- 
 }
 
 func tickNodeState(freezePath, fastPath, slowPath string) {
+	metrics.MarkSourceAttempt(metrics.SourceNodeState)
+	published := false
 	if freeze, ok := readSingleInt(freezePath); ok {
+		metrics.HLNodePersistedStateFileAvailable.WithLabelValues("freeze_abci_height").Set(1)
+		metrics.HLNodePersistedFreezeABCIHeight.WithLabelValues("freeze_abci_height").Set(float64(freeze))
 		metrics.HLVisorFreezeAbciHeight.Set(float64(freeze))
 		// freeze is known here (readSingleInt parsed it). Set the gauge
 		// unconditionally once the visor has reported a real height, so a
@@ -87,18 +92,53 @@ func tickNodeState(freezePath, fastPath, slowPath string) {
 				above = 0
 			}
 			metrics.HLVisorBlocksAboveFreeze.Set(float64(above))
+			metrics.HLNodeVisorHeightAbovePersistedFreeze.WithLabelValues("visor_minus_persisted_freeze").Set(float64(above))
+		} else {
+			metrics.HLVisorBlocksAboveFreeze.Set(0)
+			metrics.HLNodeVisorHeightAbovePersistedFreeze.DeleteLabelValues("visor_minus_persisted_freeze")
 		}
+		published = true
+	} else {
+		metrics.HLNodePersistedStateFileAvailable.WithLabelValues("freeze_abci_height").Set(0)
+		metrics.HLNodePersistedFreezeABCIHeight.DeleteLabelValues("freeze_abci_height")
+		metrics.HLNodeVisorHeightAbovePersistedFreeze.DeleteLabelValues("visor_minus_persisted_freeze")
+		metrics.HLVisorFreezeAbciHeight.Set(0)
+		metrics.HLVisorBlocksAboveFreeze.Set(0)
 	}
 	fast, fastOK := readSingleInt(fastPath)
 	slow, slowOK := readSingleInt(slowPath)
 	if fastOK {
+		metrics.HLNodePersistedStateFileAvailable.WithLabelValues("evm_db_hub_fast/cp_checkpoint_height").Set(1)
+		metrics.HLNodePersistedABCIHeight.WithLabelValues("evm_db_hub_fast_cp_checkpoint_height").Set(float64(fast))
 		metrics.HLEVMDBCheckpointHeight.WithLabelValues("fast").Set(float64(fast))
+		published = true
+	} else {
+		metrics.HLNodePersistedStateFileAvailable.WithLabelValues("evm_db_hub_fast/cp_checkpoint_height").Set(0)
+		metrics.HLNodePersistedABCIHeight.DeleteLabelValues("evm_db_hub_fast_cp_checkpoint_height")
+		metrics.HLEVMDBCheckpointHeight.DeleteLabelValues("fast")
 	}
 	if slowOK {
+		metrics.HLNodePersistedStateFileAvailable.WithLabelValues("evm_db_hub_slow/cp_checkpoint_height").Set(1)
+		metrics.HLNodePersistedABCIHeight.WithLabelValues("evm_db_hub_slow_cp_checkpoint_height").Set(float64(slow))
 		metrics.HLEVMDBCheckpointHeight.WithLabelValues("slow").Set(float64(slow))
+		published = true
+	} else {
+		metrics.HLNodePersistedStateFileAvailable.WithLabelValues("evm_db_hub_slow/cp_checkpoint_height").Set(0)
+		metrics.HLNodePersistedABCIHeight.DeleteLabelValues("evm_db_hub_slow_cp_checkpoint_height")
+		metrics.HLEVMDBCheckpointHeight.DeleteLabelValues("slow")
 	}
 	if fastOK && slowOK {
 		metrics.HLEVMDBCheckpointLagBlocks.Set(float64(fast - slow))
+		metrics.HLNodePersistedABCIHeightGap.WithLabelValues("fast_minus_slow").Set(float64(fast - slow))
+	} else {
+		metrics.HLNodePersistedABCIHeightGap.DeleteLabelValues("fast_minus_slow")
+		metrics.HLEVMDBCheckpointLagBlocks.Set(0)
+	}
+	if published {
+		metrics.MarkSourceValidObservation(metrics.SourceNodeState, time.Time{})
+		metrics.MarkSourcePublication(metrics.SourceNodeState)
+	} else {
+		metrics.MarkSourceAbsent(metrics.SourceNodeState)
 	}
 }
 
@@ -115,7 +155,7 @@ func readSingleInt(path string) (int64, bool) {
 		return 0, false
 	}
 	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
+	if err != nil || n < 0 {
 		return 0, false
 	}
 	return n, true

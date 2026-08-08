@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"math"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -16,172 +20,286 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/peerset"
 )
 
-// tcpTrafficPollInterval matches the node's own ~30s sample cadence. There
-// is no value in polling faster than the file changes.
-const tcpTrafficPollInterval = 30 * time.Second
+const (
+	tcpTrafficPollInterval = 30 * time.Second
+	tcpTrafficTopN         = 16
+	tcpAdmissionMaxGap     = 90 * time.Second
+)
 
-// tcpTrafficTopN bounds the published per-IP cardinality per direction.
-// Everything below the cutoff is rolled into a single ip="other" bucket.
-// 16 keeps the dashboard readable while still surfacing the top inbound
-// + outbound peers that operators actually care about.
-const tcpTrafficTopN = 16
-
-// peerSample is one (direction, ip) → throughput row from the latest
-// tcp_traffic line.
 type peerSample struct {
-	dir   string // "in" or "out"
+	dir   string
 	ip    string
 	value float64
 }
 
-// LatestTCPTrafficSample exposes the most recent parsed tcp_traffic sample
-// to other monitors (specifically parent_peer_monitor) so they don't each
-// re-parse the file. The whole struct is replaced atomically under mu so
-// readers get a consistent (ts, inbound, outbound) triple.
-type LatestTCPTrafficSample struct {
-	mu        sync.Mutex
+type tcpTrafficRecord struct {
 	timestamp time.Time
-	inbound   []peerSample // sorted desc by value
-	outbound  []peerSample // sorted desc by value
+	inbound   []peerSample
+	outbound  []peerSample
+	byPort    map[string]map[string]float64
+}
+
+type tcpTrafficParseError struct {
+	stage string
+	err   error
+}
+
+func (e *tcpTrafficParseError) Error() string { return e.stage + ": " + e.err.Error() }
+
+type trafficAdmissionCandidate struct {
+	streak int
+}
+
+type tcpTrafficMonitorState struct {
+	prevPublished map[string]map[string]bool
+	lastRecord    string
+	lastReceipt   time.Time
+	lastSource    time.Time
+	admission     map[string]trafficAdmissionCandidate
+	registry      *peerset.Set
+	servicePorts  []uint16
+}
+
+func newTCPTrafficMonitorState(configured ...[]uint16) *tcpTrafficMonitorState {
+	ports := tcpListenPorts
+	if len(configured) > 0 && len(configured[0]) > 0 {
+		ports = configured[0]
+	}
+	ports, _ = validateTCPServicePorts(ports)
+	return &tcpTrafficMonitorState{
+		prevPublished: map[string]map[string]bool{"in": {}, "out": {}},
+		admission:     make(map[string]trafficAdmissionCandidate),
+		registry:      peerset.Default(),
+		servicePorts:  ports,
+	}
+}
+
+type LatestTCPTrafficSample struct {
+	mu         sync.RWMutex
+	timestamp  time.Time
+	receivedAt time.Time
+	inbound    []peerSample
+	outbound   []peerSample
 }
 
 var sharedTCPTraffic LatestTCPTrafficSample
 
-// LatestTCPTrafficSnapshot returns the most recent tcp_traffic sample plus
-// its source timestamp. Empty slices and a zero time are returned when no
-// sample has been read yet. The returned slices alias the monitor's
-// internal state; treat them as read-only.
+// LatestTCPTrafficSnapshot is the compatibility accessor used by tests and
+// older internal callers. The returned slices are copies.
 func LatestTCPTrafficSnapshot() (ts time.Time, in []peerSample, out []peerSample) {
-	sharedTCPTraffic.mu.Lock()
-	defer sharedTCPTraffic.mu.Unlock()
-	return sharedTCPTraffic.timestamp, sharedTCPTraffic.inbound, sharedTCPTraffic.outbound
+	ts, _, in, out = LatestTCPTrafficObservation()
+	return ts, in, out
 }
 
-// StartTCPTrafficMonitor watches $NODE_HOME/data/tcp_traffic/hourly. Each
-// line of the latest hour-file is a snapshot of per-peer throughput. We
-// only consume the last line per tick.
+// LatestTCPTrafficObservation returns one coherent accepted snapshot and its
+// exporter receipt time. Receipt time, never source time, governs freshness.
+func LatestTCPTrafficObservation() (sourceTime, receivedAt time.Time, in, out []peerSample) {
+	sharedTCPTraffic.mu.RLock()
+	defer sharedTCPTraffic.mu.RUnlock()
+	return sharedTCPTraffic.timestamp, sharedTCPTraffic.receivedAt,
+		append([]peerSample(nil), sharedTCPTraffic.inbound...),
+		append([]peerSample(nil), sharedTCPTraffic.outbound...)
+}
+
 func StartTCPTrafficMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	root := filepath.Join(cfg.NodeHome, "data", "tcp_traffic", "hourly")
+	metrics.RegisterSource(metrics.SourceTCPTraffic, true)
+	logger.InfoComponent("tcp_traffic", "watching %s (late discovery enabled)", root)
 
-	if _, err := os.Stat(root); err != nil {
-		logger.InfoComponent("tcp_traffic",
-			"tcp_traffic directory not present (%s); monitor idle", root)
+	ports, err := tcpServicePortsForConfig(cfg)
+	if err != nil {
+		metrics.MarkSourceError(metrics.SourceTCPTraffic, metrics.SourceFailureSchema)
+		logger.ErrorComponent("tcp_traffic", "invalid service-port configuration: %v", err)
 		<-ctx.Done()
 		return
 	}
-
-	logger.InfoComponent("tcp_traffic", "watching %s", root)
-
+	state := newTCPTrafficMonitorState(ports)
 	ticker := time.NewTicker(tcpTrafficPollInterval)
 	defer ticker.Stop()
 
-	// Track which IPs are currently in the gauge vec per direction so we
-	// can Delete() series when an IP drops out of the top-N. Without this
-	// the per-IP cardinality would creep upward over time.
-	prevPublished := map[string]map[string]bool{
-		"in":  {},
-		"out": {},
-	}
-
-	tickTCPTraffic(root, prevPublished)
-	metrics.MarkMonitorTick("tcp_traffic")
-
+	tickTCPTraffic(root, state)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			tickTCPTraffic(root, prevPublished)
-			metrics.MarkMonitorTick("tcp_traffic")
+			tickTCPTraffic(root, state)
 		}
 	}
 }
 
-func tickTCPTraffic(root string, prevPublished map[string]map[string]bool) {
+func tickTCPTraffic(root string, state *tcpTrafficMonitorState) {
+	metrics.MarkMonitorAttempt("tcp_traffic")
+	metrics.MarkSourceAttempt(metrics.SourceTCPTraffic)
+	now := time.Now()
+	if !state.lastReceipt.IsZero() {
+		metrics.HLP2PSampleAgeSeconds.Set(nonnegativeDuration(now.Sub(state.lastReceipt)).Seconds())
+	}
+
 	filePath, err := latestHourlyFile(root)
 	if err != nil {
+		trafficFailure("discover", err)
 		return
 	}
 	data, err := os.ReadFile(filePath)
 	if err != nil {
+		trafficFailure("read", err)
 		return
 	}
 	line, ok := lastFullLine(data)
 	if !ok {
+		trafficFailure("record", errors.New("no complete newline-committed record"))
 		return
 	}
-	sampleTime, in, out, ok := parseTCPTrafficLine(line)
-	if !ok {
+	record, err := parseTCPTrafficRecordWithPorts(line, state.servicePorts)
+	if err != nil {
+		stage := "record"
+		var parseErr *tcpTrafficParseError
+		if errors.As(err, &parseErr) {
+			stage = parseErr.stage
+		}
+		trafficFailure(stage, err)
 		return
 	}
 
-	sort.Slice(in, func(a, b int) bool { return in[a].value > in[b].value })
-	sort.Slice(out, func(a, b int) bool { return out[a].value > out[b].value })
-
-	sharedTCPTraffic.mu.Lock()
-	sharedTCPTraffic.timestamp = sampleTime
-	sharedTCPTraffic.inbound = in
-	sharedTCPTraffic.outbound = out
-	sharedTCPTraffic.mu.Unlock()
-
-	// Feed the peer set. Only peers with positive traffic in the current
-	// sample get a fresh LastSeen; peers the node lists at value=0 are
-	// known-but-idle and would otherwise refresh on every poll, making
-	// the rolling-window unique counts indistinguishable from the set
-	// size. Idle peers age out naturally per the 24h TTL.
-	now := time.Now()
-	if !sampleTime.IsZero() {
-		now = sampleTime
+	if string(line) == state.lastRecord {
+		markTCPTrafficSourceSuccess()
+		return
 	}
-	ps := peerset.Default()
-	active := make(map[string]struct{}, 64)
-	for _, p := range in {
-		if p.value <= 0 {
-			continue
+	if !state.lastSource.IsZero() && !record.timestamp.After(state.lastSource) {
+		trafficFailure("timestamp", errors.New("traffic source timestamp did not advance"))
+		return
+	}
+
+	receipt := time.Now()
+	state.lastRecord = string(line)
+	commitTCPTraffic(record, receipt, state)
+	state.lastReceipt = receipt
+	state.lastSource = record.timestamp
+}
+
+func trafficFailure(stage string, err error) {
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		metrics.HLP2PTCPTrafficSourceUp.Set(0)
+		metrics.HLP2PTCPTrafficErrorsTotal.WithLabelValues(stage).Inc()
+		if stage == "discover" {
+			metrics.MarkSourceError(metrics.SourceTCPTraffic, metrics.SourceFailureDiscovery)
+			if errors.Is(err, os.ErrNotExist) {
+				metrics.MarkSourceAbsent(metrics.SourceTCPTraffic)
+			}
+		} else if stage == "read" {
+			metrics.MarkSourceError(metrics.SourceTCPTraffic, metrics.SourceFailureRead)
+		} else {
+			metrics.MarkSourceError(metrics.SourceTCPTraffic, metrics.SourceFailureSchema)
 		}
-		ps.Register(p.ip, "in", now)
-		active[p.ip] = struct{}{}
-	}
-	for _, p := range out {
-		if p.value <= 0 {
-			continue
+		metrics.IncMonitorError("tcp_traffic")
+	})
+}
+
+func commitTCPTraffic(record tcpTrafficRecord, receipt time.Time, state *tcpTrafficMonitorState) {
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		publishTCPTrafficSourceSuccess()
+		sharedTCPTraffic.mu.Lock()
+		sharedTCPTraffic.timestamp = record.timestamp
+		sharedTCPTraffic.receivedAt = receipt
+		sharedTCPTraffic.inbound = append([]peerSample(nil), record.inbound...)
+		sharedTCPTraffic.outbound = append([]peerSample(nil), record.outbound...)
+		sharedTCPTraffic.mu.Unlock()
+
+		current := positiveEndpointSet(record.inbound, record.outbound)
+		metrics.HLP2PTrafficEndpointsCurrent.Set(float64(len(current)))
+		metrics.HLP2PPeersTotal.Set(float64(len(current))) // one-release alias
+		advanceTrafficAdmissions(record, receipt, state)
+
+		publishTCPDirection("in", record.inbound, state.prevPublished["in"])
+		publishTCPDirection("out", record.outbound, state.prevPublished["out"])
+		publishTrafficPorts(record.byPort, state.servicePorts)
+		metrics.HLP2PTCPTrafficSampleTimestampSeconds.Set(unixTimestampSeconds(record.timestamp))
+		metrics.HLP2PSampleAgeSeconds.Set(0)
+
+		metrics.MarkSourceValidObservation(metrics.SourceTCPTraffic, record.timestamp)
+		metrics.MarkSourcePublication(metrics.SourceTCPTraffic)
+		metrics.MarkMonitorValidObservation("tcp_traffic")
+		metrics.MarkMonitorPublication("tcp_traffic")
+	})
+}
+
+func markTCPTrafficSourceSuccess() {
+	metrics.WithPrometheusSnapshotUpdate(publishTCPTrafficSourceSuccess)
+}
+
+func publishTCPTrafficSourceSuccess() {
+	metrics.HLP2PTCPTrafficSourceUp.Set(1)
+	metrics.MarkSourceReadOutcome(metrics.SourceTCPTraffic, true)
+	metrics.MarkSourceSchemaOutcome(metrics.SourceTCPTraffic, true)
+}
+
+func positiveEndpointSet(in, out []peerSample) map[string]struct{} {
+	active := make(map[string]struct{}, len(in)+len(out))
+	for _, list := range [][]peerSample{in, out} {
+		for _, sample := range list {
+			if sample.value > 0 {
+				active[sample.ip] = struct{}{}
+			}
 		}
-		ps.Register(p.ip, "out", now)
-		active[p.ip] = struct{}{}
 	}
-	// hl_p2p_peers = unique IPs with positive traffic in this
-	// sample. Truly "right now" — distinct from the rolling-window
-	// counts in hl_p2p_unique_peers_seen{window=5m,1h,24h} which look
-	// back over the peer set.
-	metrics.HLP2PPeersTotal.Set(float64(len(active)))
+	return active
+}
 
-	publishTCPDirection("in", in, prevPublished["in"])
-	publishTCPDirection("out", out, prevPublished["out"])
-
-	if !sampleTime.IsZero() {
-		metrics.HLP2PSampleAgeSeconds.Set(time.Since(sampleTime).Seconds())
+func advanceTrafficAdmissions(record tcpTrafficRecord, receipt time.Time, state *tcpTrafficMonitorState) {
+	if !state.lastReceipt.IsZero() && receipt.Sub(state.lastReceipt) > tcpAdmissionMaxGap {
+		clear(state.admission)
+	}
+	eligible := make(map[string]struct{}, tcpTrafficTopN*2)
+	for _, list := range [][]peerSample{record.inbound, record.outbound} {
+		n := 0
+		for _, sample := range list {
+			if sample.value <= 0 {
+				continue
+			}
+			if n >= tcpTrafficTopN {
+				break
+			}
+			eligible[sample.ip] = struct{}{}
+			n++
+		}
+	}
+	for ip := range state.admission {
+		if _, ok := eligible[ip]; !ok {
+			delete(state.admission, ip)
+		}
+	}
+	for ip := range eligible {
+		candidate := state.admission[ip]
+		candidate.streak++
+		state.admission[ip] = candidate
+		if candidate.streak >= 2 {
+			state.registry.Register(ip, "", receipt)
+		}
 	}
 }
 
 func publishTCPDirection(direction string, samples []peerSample, prev map[string]bool) {
 	current := make(map[string]bool, tcpTrafficTopN+1)
-
-	var topSum, otherSum float64
-	for i, s := range samples {
-		if i < tcpTrafficTopN {
-			metrics.HLP2PPeerTraffic.WithLabelValues(s.ip, direction).Set(s.value)
-			current[s.ip] = true
-			topSum += s.value
+	var total, other float64
+	n := 0
+	for _, sample := range samples {
+		total += sample.value
+		if sample.value <= 0 {
+			continue
+		}
+		if n < tcpTrafficTopN {
+			metrics.HLP2PPeerTraffic.WithLabelValues(sample.ip, direction).Set(sample.value)
+			current[sample.ip] = true
+			n++
 		} else {
-			otherSum += s.value
+			other += sample.value
 		}
 	}
-	if otherSum > 0 {
-		metrics.HLP2PPeerTraffic.WithLabelValues("other", direction).Set(otherSum)
+	if other > 0 {
+		metrics.HLP2PPeerTraffic.WithLabelValues("other", direction).Set(other)
 		current["other"] = true
 	}
-
-	// Drop series for IPs that are no longer in the top-N.
 	for ip := range prev {
 		if !current[ip] {
 			metrics.HLP2PPeerTraffic.DeleteLabelValues(ip, direction)
@@ -191,93 +309,194 @@ func publishTCPDirection(direction string, samples []peerSample, prev map[string
 	for ip := range current {
 		prev[ip] = true
 	}
-
-	metrics.HLP2PTotalTraffic.WithLabelValues(direction).Set(topSum + otherSum)
+	metrics.HLP2PTotalTraffic.WithLabelValues(direction).Set(total)
 	metrics.HLP2PPeerCount.WithLabelValues(direction).Set(float64(len(samples)))
 }
 
-// parseTCPTrafficLine consumes one record of the form
-//
-//	["<iso>", [[["In"|"Out", "<ip>", <port>], <bytes>], ...]]
-//
-// Returns inbound and outbound slices separately. Returns ok=false on any
-// structural mismatch.
-func parseTCPTrafficLine(line []byte) (time.Time, []peerSample, []peerSample, bool) {
-	var outer [2]json.RawMessage
-	if err := json.Unmarshal(line, &outer); err != nil {
-		return time.Time{}, nil, nil, false
-	}
-	var tsStr string
-	if err := json.Unmarshal(outer[0], &tsStr); err != nil {
-		return time.Time{}, nil, nil, false
-	}
-	ts, _ := parseVisorTime(tsStr)
-
-	var flows []json.RawMessage
-	if err := json.Unmarshal(outer[1], &flows); err != nil {
-		return ts, nil, nil, false
-	}
-
-	// Sum values per (direction, ip). The hl-node tcp_traffic file is
-	// keyed by (direction, ip, port), so a single peer that holds both
-	// the 4001 and 4002 connections shows up as two rows. For the
-	// purposes of "which peer is delivering the most data" we want one
-	// row per IP-direction.
-	inAcc := map[string]float64{}
-	outAcc := map[string]float64{}
-	for _, flow := range flows {
-		var pair [2]json.RawMessage
-		if err := json.Unmarshal(flow, &pair); err != nil {
-			continue
-		}
-		var key [3]json.RawMessage
-		if err := json.Unmarshal(pair[0], &key); err != nil {
-			continue
-		}
-		var dirStr, ip string
-		if err := json.Unmarshal(key[0], &dirStr); err != nil {
-			continue
-		}
-		if err := json.Unmarshal(key[1], &ip); err != nil {
-			continue
-		}
-		var value float64
-		if err := json.Unmarshal(pair[1], &value); err != nil {
-			continue
-		}
-		switch dirStr {
-		case "In":
-			inAcc[ip] += value
-		case "Out":
-			outAcc[ip] += value
+func publishTrafficPorts(byPort map[string]map[string]float64, servicePorts []uint16) {
+	labels := servicePortLabels(servicePorts)
+	for _, direction := range []string{"in", "out"} {
+		for _, port := range labels {
+			metrics.HLP2PTCPTrafficByServicePort.WithLabelValues(port, direction).Set(byPort[direction][port])
 		}
 	}
-
-	in := make([]peerSample, 0, len(inAcc))
-	for ip, v := range inAcc {
-		in = append(in, peerSample{dir: "in", ip: ip, value: v})
-	}
-	out := make([]peerSample, 0, len(outAcc))
-	for ip, v := range outAcc {
-		out = append(out, peerSample{dir: "out", ip: ip, value: v})
-	}
-	return ts, in, out, true
 }
 
-// lastFullLine returns the last complete newline-terminated record in
-// data, scanning backwards over any torn trailing write.
+func servicePortLabels(servicePorts []uint16) []string {
+	ports, _ := validateTCPServicePorts(servicePorts)
+	out := make([]string, 0, len(ports)+1)
+	for _, port := range ports {
+		out = append(out, strconv.FormatUint(uint64(port), 10))
+	}
+	return append(out, "other")
+}
+
+func parseTCPTrafficLine(line []byte) (time.Time, []peerSample, []peerSample, bool) {
+	record, err := parseTCPTrafficRecord(line)
+	if err != nil {
+		return time.Time{}, nil, nil, false
+	}
+	return record.timestamp, record.inbound, record.outbound, true
+}
+
+func parseTCPTrafficRecord(line []byte) (tcpTrafficRecord, error) {
+	return parseTCPTrafficRecordWithPorts(line, tcpListenPorts)
+}
+
+func parseTCPTrafficRecordWithPorts(line []byte, servicePorts []uint16) (tcpTrafficRecord, error) {
+	var outer []json.RawMessage
+	if err := json.Unmarshal(line, &outer); err != nil || len(outer) != 2 {
+		return tcpTrafficRecord{}, &tcpTrafficParseError{stage: "record", err: errors.New("outer record must have arity two")}
+	}
+	var tsString string
+	if err := unmarshalRequiredJSON(outer[0], &tsString); err != nil {
+		return tcpTrafficRecord{}, &tcpTrafficParseError{stage: "timestamp", err: err}
+	}
+	timestamp, ok := parseVisorTime(tsString)
+	if !ok {
+		return tcpTrafficRecord{}, &tcpTrafficParseError{stage: "timestamp", err: errors.New("invalid timestamp")}
+	}
+	var flows []json.RawMessage
+	if !rawJSONArray(outer[1]) {
+		return tcpTrafficRecord{}, &tcpTrafficParseError{stage: "record", err: errors.New("flow payload must be an array")}
+	}
+	if err := json.Unmarshal(outer[1], &flows); err != nil {
+		return tcpTrafficRecord{}, &tcpTrafficParseError{stage: "record", err: err}
+	}
+
+	inAcc := make(map[string]float64)
+	outAcc := make(map[string]float64)
+	byPort := map[string]map[string]float64{"in": {}, "out": {}}
+	allowedPorts := make(map[uint16]string, len(servicePorts))
+	for _, port := range servicePorts {
+		allowedPorts[port] = strconv.FormatUint(uint64(port), 10)
+	}
+	for _, raw := range flows {
+		var pair []json.RawMessage
+		if err := json.Unmarshal(raw, &pair); err != nil || len(pair) != 2 {
+			return tcpTrafficRecord{}, &tcpTrafficParseError{stage: "row", err: errors.New("flow must have arity two")}
+		}
+		var key []json.RawMessage
+		if err := json.Unmarshal(pair[0], &key); err != nil || len(key) != 3 {
+			return tcpTrafficRecord{}, &tcpTrafficParseError{stage: "row", err: errors.New("flow key must have arity three")}
+		}
+		var upstreamDirection, ipString string
+		var port uint16
+		var value float64
+		if err := unmarshalRequiredJSON(key[0], &upstreamDirection); err != nil {
+			return tcpTrafficRecord{}, &tcpTrafficParseError{stage: "row", err: err}
+		}
+		if err := unmarshalRequiredJSON(key[1], &ipString); err != nil {
+			return tcpTrafficRecord{}, &tcpTrafficParseError{stage: "row", err: err}
+		}
+		if err := unmarshalRequiredJSON(key[2], &port); err != nil || port == 0 {
+			return tcpTrafficRecord{}, &tcpTrafficParseError{stage: "row", err: errors.New("invalid port")}
+		}
+		if err := unmarshalRequiredJSON(pair[1], &value); err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+			return tcpTrafficRecord{}, &tcpTrafficParseError{stage: "row", err: errors.New("value must be finite and nonnegative")}
+		}
+		ip, err := netip.ParseAddr(ipString)
+		if err != nil || ip.Zone() != "" {
+			return tcpTrafficRecord{}, &tcpTrafficParseError{stage: "row", err: errors.New("invalid IP")}
+		}
+		ipString = ip.Unmap().String()
+		direction := ""
+		switch upstreamDirection {
+		case "In":
+			direction = "in"
+		case "Out":
+			direction = "out"
+		default:
+			return tcpTrafficRecord{}, &tcpTrafficParseError{stage: "row", err: errors.New("unknown direction")}
+		}
+		endpointAcc := inAcc
+		if direction == "out" {
+			endpointAcc = outAcc
+		}
+		if !addFiniteTrafficValue(endpointAcc, ipString, value) {
+			return tcpTrafficRecord{}, &tcpTrafficParseError{stage: "row", err: errors.New("endpoint aggregate overflow")}
+		}
+		portLabel := allowedPorts[port]
+		if portLabel == "" {
+			portLabel = "other"
+		}
+		if !addFiniteTrafficValue(byPort[direction], portLabel, value) {
+			return tcpTrafficRecord{}, &tcpTrafficParseError{stage: "row", err: errors.New("service-port aggregate overflow")}
+		}
+	}
+	for _, values := range []map[string]float64{inAcc, outAcc} {
+		total := 0.0
+		for _, value := range values {
+			total += value
+			if math.IsInf(total, 0) || math.IsNaN(total) {
+				return tcpTrafficRecord{}, &tcpTrafficParseError{stage: "row", err: errors.New("direction aggregate overflow")}
+			}
+		}
+	}
+
+	in := samplesFromAccumulator("in", inAcc)
+	out := samplesFromAccumulator("out", outAcc)
+	return tcpTrafficRecord{timestamp: timestamp, inbound: in, outbound: out, byPort: byPort}, nil
+}
+
+func addFiniteTrafficValue(values map[string]float64, key string, value float64) bool {
+	next := values[key] + value
+	if math.IsNaN(next) || math.IsInf(next, 0) {
+		return false
+	}
+	values[key] = next
+	return true
+}
+
+func rawJSONArray(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) > 0 && trimmed[0] == '['
+}
+
+func samplesFromAccumulator(direction string, values map[string]float64) []peerSample {
+	out := make([]peerSample, 0, len(values))
+	for ip, value := range values {
+		out = append(out, peerSample{dir: direction, ip: ip, value: value})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].value != out[j].value {
+			return out[i].value > out[j].value
+		}
+		return out[i].ip < out[j].ip
+	})
+	return out
+}
+
+// lastFullLine returns the newest non-empty newline-committed record. Any
+// unterminated suffix is ignored and never treated as a snapshot boundary.
 func lastFullLine(data []byte) ([]byte, bool) {
-	end := len(data)
-	for end > 0 && data[end-1] == '\n' {
-		end--
-	}
-	if end == 0 {
+	boundary := bytes.LastIndexByte(data, '\n')
+	if boundary < 0 {
 		return nil, false
 	}
-	start := bytes.LastIndexByte(data[:end], '\n') + 1
-	line := bytes.TrimSpace(data[start:end])
-	if len(line) == 0 {
-		return nil, false
+	committed := data[:boundary]
+	for len(committed) > 0 {
+		end := len(committed)
+		start := bytes.LastIndexByte(committed, '\n') + 1
+		line := bytes.TrimSpace(committed[start:end])
+		if len(line) > 0 {
+			return line, true
+		}
+		if start == 0 {
+			break
+		}
+		committed = committed[:start-1]
 	}
-	return line, true
+	return nil, false
+}
+
+func nonnegativeDuration(d time.Duration) time.Duration {
+	if d < 0 {
+		return 0
+	}
+	return d
+}
+
+func unixTimestampSeconds(t time.Time) float64 {
+	return float64(t.Unix()) + float64(t.Nanosecond())/1e9
 }

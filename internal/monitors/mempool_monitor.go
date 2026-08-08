@@ -2,11 +2,11 @@ package monitors
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
-	"math"
 	"os"
 	"path/filepath"
 	"time"
@@ -60,7 +60,7 @@ type mempoolObservation struct {
 	droppedKind string
 	dropped     int
 
-	sizeSnapshot map[string]float64
+	sizeSnapshot map[string]int64
 	oldestAge    *float64
 
 	parseReason string
@@ -82,13 +82,19 @@ func StartMempoolMonitor(ctx context.Context, cfg config.Config, errCh chan<- er
 		resolve: func() (string, error) {
 			metrics.MarkMonitorAttempt("mempool")
 			metrics.MarkSourceAttempt(metrics.SourceMempool)
+			metrics.MarkSourceAttempt(metrics.SourceMempoolSizeStats)
 			path, err := latestHourlyFile(root)
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
-					metrics.MarkSourceAbsent(metrics.SourceMempool)
-					metrics.MarkSourceAbsent(metrics.SourceMempoolSizeStats)
+					metrics.WithPrometheusSnapshotUpdate(func() {
+						metrics.MarkSourceAbsent(metrics.SourceMempool)
+						metrics.MarkSourceAbsent(metrics.SourceMempoolSizeStats)
+					})
 				} else {
-					metrics.MarkSourceError(metrics.SourceMempool, metrics.SourceFailureDiscovery)
+					metrics.WithPrometheusSnapshotUpdate(func() {
+						metrics.MarkSourceError(metrics.SourceMempool, metrics.SourceFailureDiscovery)
+						metrics.MarkSourceError(metrics.SourceMempoolSizeStats, metrics.SourceFailureDiscovery)
+					})
 				}
 			}
 			return path, err
@@ -96,34 +102,60 @@ func StartMempoolMonitor(ctx context.Context, cfg config.Config, errCh chan<- er
 		onLine: func(line string) {
 			metrics.MarkMonitorAttempt("mempool")
 			metrics.MarkSourceAttempt(metrics.SourceMempool)
+			metrics.MarkSourceAttempt(metrics.SourceMempoolSizeStats)
 			obs := parseMempoolObservation([]byte(line))
-			publishMempoolObservation(obs)
 			if obs.parseReason != "" {
 				metrics.HLMempoolParserEventsTotal.WithLabelValues(obs.parseReason).Inc()
 			}
 			if !obs.complete {
-				metrics.MarkSourceError(metrics.SourceMempool, metrics.SourceFailureSchema)
 				if obs.eventType == "size_stats" {
-					metrics.MarkSourceError(metrics.SourceMempoolSizeStats, metrics.SourceFailureSchema)
+					metrics.WithPrometheusSnapshotUpdate(func() {
+						metrics.MarkSourceError(metrics.SourceMempool, metrics.SourceFailureSchema)
+						metrics.MarkSourceError(metrics.SourceMempoolSizeStats, metrics.SourceFailureSchema)
+					})
+				} else {
+					metrics.MarkSourceError(metrics.SourceMempool, metrics.SourceFailureSchema)
 				}
 				return
 			}
-			metrics.MarkSourceValidObservation(metrics.SourceMempool, obs.sourceTime)
-			metrics.MarkSourcePublication(metrics.SourceMempool)
-			metrics.MarkMonitorValidObservation("mempool")
-			metrics.MarkMonitorPublication("mempool")
 			if obs.sizeSnapshot != nil {
-				metrics.MarkSourceValidObservation(metrics.SourceMempoolSizeStats, obs.sourceTime)
-				metrics.MarkSourcePublication(metrics.SourceMempoolSizeStats)
+				metrics.WithPrometheusSnapshotUpdate(func() {
+					publishMempoolObservationUnlocked(obs)
+					markMempoolObservationLifecycle(obs)
+				})
+			} else {
+				publishMempoolObservation(obs)
+				markMempoolObservationLifecycle(obs)
 			}
 		},
 		onSwitch: func(string) {
-			metrics.MarkSourceReadOutcome(metrics.SourceMempool, true)
+			metrics.WithPrometheusSnapshotUpdate(func() {
+				metrics.MarkSourceReadOutcome(metrics.SourceMempool, true)
+				metrics.MarkSourceReadOutcome(metrics.SourceMempoolSizeStats, true)
+			})
 		},
 		onFailure: func(failure tailStreamFailure) {
-			markTailSourceFailure(metrics.SourceMempool, failure)
+			markMempoolTailFailure(failure)
 		},
 	})
+}
+
+func markMempoolTailFailure(failure tailStreamFailure) {
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		markTailSourceFailure(metrics.SourceMempool, failure)
+		markTailSourceFailure(metrics.SourceMempoolSizeStats, failure)
+	})
+}
+
+func markMempoolObservationLifecycle(obs mempoolObservation) {
+	metrics.MarkSourceValidObservation(metrics.SourceMempool, obs.sourceTime)
+	metrics.MarkSourcePublication(metrics.SourceMempool)
+	metrics.MarkMonitorValidObservation("mempool")
+	metrics.MarkMonitorPublication("mempool")
+	if obs.sizeSnapshot != nil {
+		metrics.MarkSourceValidObservation(metrics.SourceMempoolSizeStats, obs.sourceTime)
+		metrics.MarkSourcePublication(metrics.SourceMempoolSizeStats)
+	}
 }
 
 func markTailSourceFailure(source metrics.SourceID, failure tailStreamFailure) {
@@ -154,7 +186,7 @@ func parseMempoolObservation(line []byte) mempoolObservation {
 		return obs
 	}
 	var timestamp string
-	if err := json.Unmarshal(outer[0], &timestamp); err != nil {
+	if err := unmarshalRequiredJSON(outer[0], &timestamp); err != nil {
 		obs.parseReason = "invalid_timestamp"
 		return obs
 	}
@@ -171,7 +203,7 @@ func parseMempoolObservation(line []byte) mempoolObservation {
 		return obs
 	}
 	var tag string
-	if err := json.Unmarshal(inner[0], &tag); err != nil || tag == "" {
+	if err := unmarshalRequiredJSON(inner[0], &tag); err != nil || tag == "" {
 		obs.parseReason = "invalid_tag"
 		return obs
 	}
@@ -203,6 +235,11 @@ func parseMempoolObservation(line []byte) mempoolObservation {
 		if reason != "" {
 			obs.parseReason = reason
 		}
+		if !validateMempoolStatusEvent(inner, tag, status) {
+			obs.parseReason = "invalid_" + tag + "_payload"
+			obs.complete = false
+			return obs
+		}
 		if status == "err" {
 			kind, valid := parseMempoolErrorKind(inner, errorIndex)
 			if !valid {
@@ -222,7 +259,7 @@ func parseMempoolObservation(line []byte) mempoolObservation {
 		}
 		obs.pruneItems = &items
 	case "dropping blocks":
-		count, valid := parseMempoolArrayCount(inner, 1, false)
+		count, valid := parseMempoolHashArrayCount(inner, 1)
 		if !valid {
 			obs.parseReason = "invalid_drop_payload"
 			obs.complete = false
@@ -230,7 +267,7 @@ func parseMempoolObservation(line []byte) mempoolObservation {
 		}
 		obs.droppedKind, obs.dropped = "blocks", count
 	case "dropping txs":
-		count, valid := parseMempoolArrayCount(inner, 1, true)
+		count, valid := parseMempoolDroppedTxCount(inner, 1, parsedTime)
 		if !valid {
 			obs.parseReason = "invalid_drop_payload"
 			obs.complete = false
@@ -246,20 +283,75 @@ func parseMempoolObservation(line []byte) mempoolObservation {
 		}
 		obs.sizeSnapshot = snapshot
 		obs.oldestAge = &oldest
+	case "committed":
+		if !validateMempoolCommitted(inner) {
+			obs.parseReason = "invalid_committed_payload"
+			obs.complete = false
+			return obs
+		}
+	case "register_block unknown tx hashes":
+		if len(inner) != 2 {
+			obs.parseReason = "invalid_register_block_payload"
+			obs.complete = false
+			return obs
+		}
+		if _, valid := parseMempoolHashArray(inner[1]); !valid {
+			obs.parseReason = "invalid_register_block_payload"
+			obs.complete = false
+			return obs
+		}
+	case "handle_blocks_and_txs":
+		if !validateMempoolBlocksAndTxs(inner) {
+			obs.parseReason = "invalid_handle_blocks_payload"
+			obs.complete = false
+			return obs
+		}
 	}
 
 	return obs
+}
+
+func validateMempoolStatusEvent(inner []json.RawMessage, tag, status string) bool {
+	statusIndex := 3
+	errorIndex := 4
+	if tag == "verify_block" {
+		statusIndex = 2
+		errorIndex = 3
+	}
+	if len(inner) <= statusIndex {
+		return false
+	}
+	var hash string
+	if err := unmarshalRequiredJSON(inner[1], &hash); err != nil || hash == "" {
+		return false
+	}
+	if tag == "add_tx" {
+		var replace bool
+		if err := unmarshalRequiredJSON(inner[2], &replace); err != nil {
+			return false
+		}
+	}
+	switch status {
+	case "ok":
+		return len(inner) == statusIndex+1
+	case "err":
+		return len(inner) == errorIndex+1
+	default:
+		// Future statuses remain bounded under status="other". Their trailing
+		// payload is opaque, but the current event's required prefix must exist.
+		return len(inner) >= statusIndex+1
+	}
 }
 
 func parseMempoolStatus(inner []json.RawMessage, index int) (status, reason string, valid bool) {
 	if len(inner) <= index {
 		return "", "missing_status", false
 	}
-	if string(inner[index]) == "null" {
+	if bytes.Equal(bytes.TrimSpace(inner[index]), []byte("null")) {
 		return "", "null_status", false
 	}
 	var raw string
-	if err := json.Unmarshal(inner[index], &raw); err != nil {
+	if err := unmarshalRequiredJSON(inner[index], &raw); err != nil {
 		return "", "invalid_status_type", false
 	}
 	switch raw {
@@ -271,7 +363,7 @@ func parseMempoolStatus(inner []json.RawMessage, index int) (status, reason stri
 }
 
 func parseMempoolErrorKind(inner []json.RawMessage, index int) (string, bool) {
-	if len(inner) <= index || string(inner[index]) == "null" {
+	if len(inner) <= index || bytes.Equal(bytes.TrimSpace(inner[index]), []byte("null")) {
 		return "", false
 	}
 	var wrapper map[string]json.RawMessage
@@ -292,61 +384,133 @@ func parseMempoolPrune(inner []json.RawMessage) (int64, bool) {
 		return 0, false
 	}
 	var rpcCount, pruned int64
-	if err := json.Unmarshal(inner[1], &rpcCount); err != nil || rpcCount < 0 || rpcCount > maxMempoolBatchItems {
+	if err := unmarshalRequiredJSON(inner[1], &rpcCount); err != nil || rpcCount < 0 || rpcCount > maxMempoolBatchItems {
 		return 0, false
 	}
-	if err := json.Unmarshal(inner[2], &pruned); err != nil || pruned < 0 || pruned > maxMempoolBatchItems {
+	if err := unmarshalRequiredJSON(inner[2], &pruned); err != nil || pruned < 0 || pruned > maxMempoolBatchItems {
 		return 0, false
 	}
 	var trailing []json.RawMessage
-	if err := json.Unmarshal(inner[3], &trailing); err != nil || len(trailing) != 0 {
+	if !rawJSONArray(inner[3]) || json.Unmarshal(inner[3], &trailing) != nil || len(trailing) != 0 {
 		return 0, false
 	}
 	return pruned, true
 }
 
-func parseMempoolArrayCount(inner []json.RawMessage, index int, requirePairs bool) (int, bool) {
+func parseMempoolHashArray(raw json.RawMessage) ([]json.RawMessage, bool) {
+	if !rawJSONArray(raw) {
+		return nil, false
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil || len(items) > maxMempoolBatchItems {
+		return nil, false
+	}
+	for _, item := range items {
+		var hash string
+		if err := unmarshalRequiredJSON(item, &hash); err != nil || hash == "" {
+			return nil, false
+		}
+	}
+	return items, true
+}
+
+func parseMempoolHashArrayCount(inner []json.RawMessage, index int) (int, bool) {
 	if len(inner) <= index {
+		return 0, false
+	}
+	items, valid := parseMempoolHashArray(inner[index])
+	if !valid {
+		return 0, false
+	}
+	return len(items), true
+}
+
+func parseMempoolDroppedTxCount(inner []json.RawMessage, index int, eventTime time.Time) (int, bool) {
+	if len(inner) <= index || !rawJSONArray(inner[index]) {
 		return 0, false
 	}
 	var items []json.RawMessage
 	if err := json.Unmarshal(inner[index], &items); err != nil || len(items) > maxMempoolBatchItems {
 		return 0, false
 	}
-	if requirePairs {
-		for _, item := range items {
-			var pair []json.RawMessage
-			if err := json.Unmarshal(item, &pair); err != nil || len(pair) != 2 {
-				return 0, false
-			}
+	for _, item := range items {
+		var pair []json.RawMessage
+		if err := json.Unmarshal(item, &pair); err != nil || len(pair) != 2 {
+			return 0, false
+		}
+		var arrivalRaw, hash string
+		if unmarshalRequiredJSON(pair[0], &arrivalRaw) != nil || unmarshalRequiredJSON(pair[1], &hash) != nil || hash == "" {
+			return 0, false
+		}
+		arrival, ok := parseVisorTime(arrivalRaw)
+		if !ok || arrival.After(eventTime) {
+			return 0, false
 		}
 	}
 	return len(items), true
 }
 
-func parseMempoolSizeSnapshot(inner []json.RawMessage, sourceTime time.Time) (map[string]float64, float64, bool) {
+func validateMempoolCommitted(inner []json.RawMessage) bool {
+	if len(inner) != 5 {
+		return false
+	}
+	var blockLabel, txLabel string
+	if unmarshalRequiredJSON(inner[1], &blockLabel) != nil || blockLabel != "block hashes" ||
+		unmarshalRequiredJSON(inner[3], &txLabel) != nil || txLabel != "tx hashes" {
+		return false
+	}
+	_, blocksOK := parseMempoolHashArray(inner[2])
+	_, txsOK := parseMempoolHashArray(inner[4])
+	return blocksOK && txsOK
+}
+
+func validateMempoolBlocksAndTxs(inner []json.RawMessage) bool {
+	if len(inner) != 2 || !rawJSONArray(inner[1]) {
+		return false
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(inner[1], &items); err != nil || len(items) > maxMempoolBatchItems {
+		return false
+	}
+	for _, item := range items {
+		var pair []json.RawMessage
+		if err := json.Unmarshal(item, &pair); err != nil || len(pair) != 2 {
+			return false
+		}
+		var blockHash string
+		if unmarshalRequiredJSON(pair[0], &blockHash) != nil || blockHash == "" {
+			return false
+		}
+		if _, valid := parseMempoolHashArray(pair[1]); !valid {
+			return false
+		}
+	}
+	return true
+}
+
+func parseMempoolSizeSnapshot(inner []json.RawMessage, sourceTime time.Time) (map[string]int64, float64, bool) {
 	if len(inner) != 3 {
 		return nil, 0, false
 	}
 	var rawPairs []json.RawMessage
-	if err := json.Unmarshal(inner[1], &rawPairs); err != nil {
+	if !rawJSONArray(inner[1]) || json.Unmarshal(inner[1], &rawPairs) != nil || len(rawPairs) > maxMempoolBatchItems {
 		return nil, 0, false
 	}
-	snapshot := make(map[string]float64, len(mempoolSizeComponents))
+	snapshot := make(map[string]int64, len(mempoolSizeComponents))
 	for _, rawPair := range rawPairs {
 		var pair []json.RawMessage
 		if err := json.Unmarshal(rawPair, &pair); err != nil || len(pair) != 2 {
 			return nil, 0, false
 		}
 		var key string
-		var value float64
-		if err := json.Unmarshal(pair[0], &key); err != nil || json.Unmarshal(pair[1], &value) != nil {
+		var value int64
+		if err := unmarshalRequiredJSON(pair[0], &key); err != nil || unmarshalRequiredJSON(pair[1], &value) != nil || key == "" {
 			return nil, 0, false
 		}
 		if _, wanted := mempoolSizeComponents[key]; !wanted {
 			continue
 		}
-		if _, duplicate := snapshot[key]; duplicate || value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+		if _, duplicate := snapshot[key]; duplicate || value < 0 {
 			return nil, 0, false
 		}
 		snapshot[key] = value
@@ -356,11 +520,11 @@ func parseMempoolSizeSnapshot(inner []json.RawMessage, sourceTime time.Time) (ma
 	}
 
 	var current []json.RawMessage
-	if err := json.Unmarshal(inner[2], &current); err != nil || len(current) > maxMempoolBatchItems {
+	if !rawJSONArray(inner[2]) || json.Unmarshal(inner[2], &current) != nil || len(current) > maxMempoolBatchItems {
 		return nil, 0, false
 	}
 	uncommitted := snapshot["uncommitted_txs"]
-	if uncommitted != math.Trunc(uncommitted) || int(uncommitted) != len(current) {
+	if uncommitted != int64(len(current)) {
 		return nil, 0, false
 	}
 	oldest := 0.0
@@ -371,11 +535,11 @@ func parseMempoolSizeSnapshot(inner []json.RawMessage, sourceTime time.Time) (ma
 		}
 		// Validate the hash field's type, but never retain or export it.
 		var ignored string
-		if err := json.Unmarshal(pair[0], &ignored); err != nil {
+		if err := unmarshalRequiredJSON(pair[0], &ignored); err != nil || ignored == "" {
 			return nil, 0, false
 		}
 		var arrivalRaw string
-		if err := json.Unmarshal(pair[1], &arrivalRaw); err != nil {
+		if err := unmarshalRequiredJSON(pair[1], &arrivalRaw); err != nil {
 			return nil, 0, false
 		}
 		arrival, ok := parseVisorTime(arrivalRaw)
@@ -391,9 +555,19 @@ func parseMempoolSizeSnapshot(inner []json.RawMessage, sourceTime time.Time) (ma
 }
 
 func publishMempoolObservation(obs mempoolObservation) {
-	if obs.eventType == "" || obs.status == "" {
+	if !obs.complete || obs.eventType == "" || obs.status == "" {
 		return
 	}
+	if obs.sizeSnapshot != nil {
+		metrics.WithPrometheusSnapshotUpdate(func() {
+			publishMempoolObservationUnlocked(obs)
+		})
+		return
+	}
+	publishMempoolObservationUnlocked(obs)
+}
+
+func publishMempoolObservationUnlocked(obs mempoolObservation) {
 	metrics.HLMempoolEventsTotal.WithLabelValues(obs.eventType, obs.status).Inc()
 	if obs.errorOperation != "" {
 		metrics.HLMempoolStructuredErrorsTotal.WithLabelValues(obs.errorOperation, obs.errorKind).Inc()
@@ -407,7 +581,7 @@ func publishMempoolObservation(obs mempoolObservation) {
 	}
 	if obs.sizeSnapshot != nil {
 		for component, value := range obs.sizeSnapshot {
-			metrics.HLMempoolSize.WithLabelValues(component).Set(value)
+			metrics.HLMempoolSize.WithLabelValues(component).Set(float64(value))
 		}
 		metrics.HLMempoolOldestUncommittedAgeSeconds.WithLabelValues().Set(*obs.oldestAge)
 	}
@@ -437,8 +611,8 @@ func readMempoolEvents(path string, offset int64) (int64, int, error) {
 		}
 		offset += int64(len(line))
 		obs := parseMempoolObservation(line)
-		publishMempoolObservation(obs)
 		if obs.complete {
+			publishMempoolObservation(obs)
 			processed++
 		}
 	}

@@ -5,7 +5,39 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
+
+type blockingMempoolGatherer struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *blockingMempoolGatherer) Gather() ([]*dto.MetricFamily, error) {
+	close(g.entered)
+	<-g.release
+	return nil, nil
+}
+
+func mempoolMetricValue(t *testing.T, metric prometheus.Metric) float64 {
+	t.Helper()
+	var out dto.Metric
+	if err := metric.Write(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Counter != nil {
+		return out.Counter.GetValue()
+	}
+	if out.Gauge != nil {
+		return out.Gauge.GetValue()
+	}
+	t.Fatalf("unsupported metric type %T", metric)
+	return 0
+}
 
 func mempoolLine(payload string) []byte {
 	return []byte(`["2026-08-08T03:16:21.000000000",` + payload + `]`)
@@ -71,6 +103,9 @@ func TestParseMempoolPruneDropAndSizePayloads(t *testing.T) {
 		`["Pruned rpc request throttle",2,1.5,[]]`,
 		`["Pruned rpc request throttle",2,1,["unknown"]]`,
 		`["Pruned rpc request throttle",2,1]`,
+		`["Pruned rpc request throttle",null,1,[]]`,
+		`["Pruned rpc request throttle",2,null,[]]`,
+		`["Pruned rpc request throttle",2,1,null]`,
 	} {
 		got := parseMempoolObservation(mempoolLine(payload))
 		if got.complete || got.pruneItems != nil || got.parseReason != "invalid_prune_payload" {
@@ -98,6 +133,157 @@ func TestParseMempoolPruneDropAndSizePayloads(t *testing.T) {
 	badSize := parseMempoolObservation(mempoolLine(`["Size stats",[["committed_tx_hashes",100000],["uncommitted_txs",1],["blocks",3],["rpc_requests",4]],[]]`))
 	if badSize.complete || badSize.sizeSnapshot != nil || badSize.parseReason != "invalid_size_snapshot" {
 		t.Fatalf("incomplete size snapshot accepted: %+v", badSize)
+	}
+	for _, payload := range []string{
+		`["dropping blocks",null]`,
+		`["dropping txs",null]`,
+		`["Size stats",[["committed_tx_hashes",100000],["uncommitted_txs",0],["blocks",3],["rpc_requests",4]],null]`,
+		`["Size stats",[["committed_tx_hashes",null],["uncommitted_txs",0],["blocks",3],["rpc_requests",4]],[]]`,
+	} {
+		if got := parseMempoolObservation(mempoolLine(payload)); got.complete {
+			t.Errorf("accepted required null payload %s: %+v", payload, got)
+		}
+	}
+}
+
+func TestParseMempoolSizeCountsAreExactIntegers(t *testing.T) {
+	for name, payload := range map[string]string{
+		"committed_fractional": `["Size stats",[["committed_tx_hashes",1.5],["uncommitted_txs",0],["blocks",3],["rpc_requests",4]],[]]`,
+		"blocks_fractional":    `["Size stats",[["committed_tx_hashes",100000],["uncommitted_txs",0],["blocks",1.5],["rpc_requests",4]],[]]`,
+		"rpc_fractional":       `["Size stats",[["committed_tx_hashes",100000],["uncommitted_txs",0],["blocks",3],["rpc_requests",1.5]],[]]`,
+		"int64_overflow":       `["Size stats",[["committed_tx_hashes",9223372036854775808],["uncommitted_txs",0],["blocks",3],["rpc_requests",4]],[]]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := parseMempoolObservation(mempoolLine(payload))
+			if got.complete || got.sizeSnapshot != nil || got.parseReason != "invalid_size_snapshot" {
+				t.Fatalf("non-integer/overflow count accepted: %+v", got)
+			}
+		})
+	}
+}
+
+func TestParseMempoolValidatesEveryRecognizedShape(t *testing.T) {
+	valid := []string{
+		`["add_tx","h",false,"ok"]`,
+		`["verify_block","h","ok"]`,
+		`["committed","block hashes",["b"],"tx hashes",[]]`,
+		`["register_block unknown tx hashes",["h"]]`,
+		`["handle_blocks_and_txs",[["b",["t"]]]]`,
+		`["dropping blocks",["b"]]`,
+		`["dropping txs",[["2026-08-08T03:16:01.000000000","t"]]]`,
+	}
+	for _, payload := range valid {
+		if got := parseMempoolObservation(mempoolLine(payload)); !got.complete {
+			t.Fatalf("valid recognized payload rejected: %s: %+v", payload, got)
+		}
+	}
+
+	invalid := []string{
+		`["add_tx",null,false,"ok"]`,
+		`["add_tx","h",null,"ok"]`,
+		`["add_tx","h",false,"ok",{}]`,
+		`["verify_block","h","ok",{}]`,
+		`["committed"]`,
+		`["committed","block hashes",null,"tx hashes",[]]`,
+		`["register_block unknown tx hashes",null]`,
+		`["handle_blocks_and_txs",null]`,
+		`["handle_blocks_and_txs",[["b",null]]]`,
+		`["dropping blocks",[null]]`,
+		`["dropping txs",[["t","2026-08-08T03:16:01.000000000"]]]`,
+		`["dropping txs",[["2026-08-08T03:17:01.000000000","t"]]]`,
+	}
+	for _, payload := range invalid {
+		if got := parseMempoolObservation(mempoolLine(payload)); got.complete {
+			t.Fatalf("malformed recognized payload accepted: %s: %+v", payload, got)
+		}
+	}
+}
+
+func TestPublishMempoolObservationRejectsIncompleteRows(t *testing.T) {
+	rows := []mempoolObservation{
+		parseMempoolObservation(mempoolLine(`["Pruned rpc request throttle",2,-1,[]]`)),
+		parseMempoolObservation(mempoolLine(`["dropping blocks",null]`)),
+		parseMempoolObservation(mempoolLine(`["Size stats",[["committed_tx_hashes",100000],["uncommitted_txs",1],["blocks",3],["rpc_requests",4]],[]]`)),
+		parseMempoolObservation(mempoolLine(`["add_tx","h",false,"err",{"A":1,"B":2}]`)),
+	}
+	for _, row := range rows {
+		if row.complete || row.eventType == "" || row.status == "" {
+			t.Fatalf("fixture does not exercise staged publication: %+v", row)
+		}
+		counter := metrics.HLMempoolEventsTotal.WithLabelValues(row.eventType, row.status)
+		before := mempoolMetricValue(t, counter)
+		publishMempoolObservation(row)
+		if after := mempoolMetricValue(t, counter); after != before {
+			t.Fatalf("incomplete row published event counter: before=%v after=%v row=%+v", before, after, row)
+		}
+	}
+}
+
+func TestPublishMempoolSizeSnapshotUsesScrapeBarrier(t *testing.T) {
+	g := &blockingMempoolGatherer{entered: make(chan struct{}), release: make(chan struct{})}
+	released := false
+	defer func() {
+		if !released {
+			close(g.release)
+		}
+	}()
+	gatherDone := make(chan struct{})
+	go func() {
+		_, _ = metrics.ProtectPrometheusSnapshots(g).Gather()
+		close(gatherDone)
+	}()
+	select {
+	case <-g.entered:
+	case <-time.After(time.Second):
+		t.Fatal("protected gatherer did not enter")
+	}
+
+	age := 5.0
+	publishDone := make(chan struct{})
+	go func() {
+		publishMempoolObservation(mempoolObservation{
+			eventType: "size_stats",
+			status:    "not_applicable",
+			complete:  true,
+			sizeSnapshot: map[string]int64{
+				"committed_tx_hashes": 1,
+				"uncommitted_txs":     2,
+				"blocks":              3,
+				"rpc_requests":        4,
+			},
+			oldestAge: &age,
+		})
+		close(publishDone)
+	}()
+	select {
+	case <-publishDone:
+		t.Fatal("size snapshot bypassed the scrape barrier")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(g.release)
+	released = true
+	select {
+	case <-gatherDone:
+	case <-time.After(time.Second):
+		t.Fatal("gatherer did not release")
+	}
+	select {
+	case <-publishDone:
+	case <-time.After(time.Second):
+		t.Fatal("size snapshot did not publish after scrape released")
+	}
+}
+
+func TestMempoolTailFailureMarksGeneralAndSizeSources(t *testing.T) {
+	general := metrics.HLExporterSourceErrorsTotal.WithLabelValues(string(metrics.SourceMempool), string(metrics.SourceFailureRead))
+	size := metrics.HLExporterSourceErrorsTotal.WithLabelValues(string(metrics.SourceMempoolSizeStats), string(metrics.SourceFailureRead))
+	generalBefore, sizeBefore := mempoolMetricValue(t, general), mempoolMetricValue(t, size)
+	markMempoolTailFailure(tailStreamFailureRead)
+	if got := mempoolMetricValue(t, general); got != generalBefore+1 {
+		t.Fatalf("general source read errors=%v, want %v", got, generalBefore+1)
+	}
+	if got := mempoolMetricValue(t, size); got != sizeBefore+1 {
+		t.Fatalf("size source read errors=%v, want %v", got, sizeBefore+1)
 	}
 }
 

@@ -2,6 +2,7 @@ package monitors
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
@@ -9,128 +10,198 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
-// parentPeerPollInterval matches the tcp_traffic cadence; there's nothing
-// new to look at until the source monitor publishes a fresh snapshot.
-const parentPeerPollInterval = 30 * time.Second
-
-// Per-peer traffic values oscillate wildly between 30s windows (a peer can
-// drop from ~1.0 to ~1e-6 just by not delivering a block that window), so
-// parent selection runs on an EWMA of the samples rather than the latest
-// one, and the incumbent only loses to a challenger that is clearly ahead
-// on the smoothed value. This kills both the flapping switches and the
-// once-per-30s "ambiguous parent" log spam of the single-sample design.
 const (
-	// parentPeerEWMAAlpha weights the newest sample; ~0.3 makes the EWMA
-	// settle over roughly the last 5 samples (2.5 minutes).
-	parentPeerEWMAAlpha = 0.3
-	// parentPeerSwitchRatio is how far ahead (on EWMA) a challenger must be
-	// before it takes the parent role from the incumbent.
-	parentPeerSwitchRatio = 1.2
-	// parentPeerPruneBelow drops decayed-out peers from the EWMA map.
-	parentPeerPruneBelow = 1e-9
+	dominantInboundPollInterval = 30 * time.Second
+	dominantInboundEWMAAlpha    = 0.3
+	dominantInboundSwitchRatio  = 1.2
+	dominantInboundPruneBelow   = 1e-9
+	dominantInboundMaxAge       = 90 * time.Second
 )
 
-// StartParentPeerMonitor identifies which inbound peer is delivering the
-// most bytes — for a non-validator, that's the node's effective upstream
-// data source ("parent peer"). The metric set lets operators alert on
-// rapid parent switches (potential connectivity issues) and on parent
-// peer loss.
-//
-// Inspired by dwellir-public/hyperliquid-exporter's parent_peer_monitor.
-// Our implementation reuses the shared sample from tcp_traffic_monitor
-// rather than reading tcp_traffic itself a second time.
-func StartParentPeerMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
-	logger.InfoComponent("parent_peer", "starting parent peer monitor (depends on tcp_traffic sample)")
+type dominantInboundState struct {
+	current       string
+	selectedAt    time.Time
+	ewma          map[string]float64
+	lastProcessed time.Time
+}
 
-	var currentParent string
-	var parentSince time.Time
-	ewma := map[string]float64{}
-	var lastSample time.Time
+func newDominantInboundState() *dominantInboundState {
+	return &dominantInboundState{ewma: make(map[string]float64)}
+}
 
-	ticker := time.NewTicker(parentPeerPollInterval)
+// StartDominantInboundMonitor derives one bounded traffic heuristic. It makes
+// no parent, relay, reachability, quality, or sync attribution.
+func StartDominantInboundMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
+	logger.InfoComponent("dominant_inbound", "starting dominant inbound traffic endpoint monitor")
+	state := newDominantInboundState()
+	ticker := time.NewTicker(dominantInboundPollInterval)
 	defer ticker.Stop()
 
-	tick := func() {
-		// mark liveness before the emptiness gate: an empty snapshot is a
-		// healthy outcome on an idle node, not a dead monitor
-		metrics.MarkMonitorTick("parent_peer")
-
-		ts, in, _ := LatestTCPTrafficSnapshot()
-		if ts.IsZero() || len(in) == 0 || !ts.After(lastSample) {
-			return
-		}
-		lastSample = ts
-
-		// fold the fresh snapshot into the EWMA; peers absent from the
-		// snapshot decay toward zero and eventually drop out
-		seen := make(map[string]bool, len(in))
-		latest := make(map[string]float64, len(in))
-		for _, p := range in {
-			seen[p.ip] = true
-			latest[p.ip] = p.value
-			ewma[p.ip] = parentPeerEWMAAlpha*p.value + (1-parentPeerEWMAAlpha)*ewma[p.ip]
-		}
-		for ip, v := range ewma {
-			if !seen[ip] {
-				v *= 1 - parentPeerEWMAAlpha
-				if v < parentPeerPruneBelow {
-					delete(ewma, ip)
-					continue
-				}
-				ewma[ip] = v
-			}
-		}
-
-		var best string
-		var bestVal float64
-		for ip, v := range ewma {
-			if v > bestVal {
-				best, bestVal = ip, v
-			}
-		}
-		if best == "" {
-			return
-		}
-
-		now := time.Now()
-		switch {
-		case currentParent == "":
-			currentParent = best
-			parentSince = now
-			logger.InfoComponent("parent_peer", "initial parent peer: %s", best)
-		case best != currentParent:
-			// hysteresis: the incumbent keeps the role until the challenger
-			// is clearly ahead on the smoothed value
-			if bestVal > ewma[currentParent]*parentPeerSwitchRatio {
-				metrics.HLNodeParentPeerInfo.DeleteLabelValues(currentParent)
-				metrics.HLNodeParentPeerSwitches.Inc()
-				logger.InfoComponent("parent_peer", "parent peer changed: %s -> %s", currentParent, best)
-				currentParent = best
-				parentSince = now
-			}
-		}
-
-		metrics.HLNodeParentPeerInfo.WithLabelValues(currentParent).Set(1)
-		metrics.HLNodeParentPeerTraffic.Set(latest[currentParent])
-		metrics.HLNodeParentPeerTenureSeconds.Set(now.Sub(parentSince).Seconds())
-	}
-
-	// Wait briefly for the tcp_traffic monitor to publish its first sample
-	// before we tick — otherwise the first iteration is wasted on an empty
-	// snapshot.
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(2 * time.Second):
-	}
-
-	tick()
+	tickDominantInbound(time.Now(), state)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			tick()
+			tickDominantInbound(time.Now(), state)
 		}
 	}
+}
+
+func tickDominantInbound(now time.Time, state *dominantInboundState) {
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		tickDominantInboundGeneration(now, state)
+	})
+}
+
+func tickDominantInboundGeneration(now time.Time, state *dominantInboundState) {
+	metrics.MarkMonitorAttempt("dominant_inbound")
+	_, receivedAt, inbound, _ := LatestTCPTrafficObservation()
+	if receivedAt.IsZero() || now.Sub(receivedAt) > dominantInboundMaxAge {
+		clearDominantInbound(state)
+		return
+	}
+	metrics.HLP2PDominantInboundFresh.Set(1)
+	if receivedAt.Equal(state.lastProcessed) {
+		publishDominantInbound(now, nil, state)
+		return
+	}
+	state.lastProcessed = receivedAt
+
+	hasPositive := false
+	for _, sample := range inbound {
+		if sample.value > 0 {
+			hasPositive = true
+			break
+		}
+	}
+	if !hasPositive {
+		clearDominantInbound(state)
+		// A complete empty/all-zero observation is fresh source truth even
+		// though it intentionally has no dominant candidate.
+		metrics.HLP2PDominantInboundFresh.Set(1)
+		state.lastProcessed = receivedAt
+		metrics.MarkMonitorValidObservation("dominant_inbound")
+		metrics.MarkMonitorPublication("dominant_inbound")
+		return
+	}
+
+	latest := make(map[string]float64, len(inbound))
+	seen := make(map[string]struct{}, len(inbound))
+	for _, sample := range inbound {
+		seen[sample.ip] = struct{}{}
+		latest[sample.ip] = sample.value
+		state.ewma[sample.ip] = dominantInboundEWMAAlpha*sample.value + (1-dominantInboundEWMAAlpha)*state.ewma[sample.ip]
+	}
+	for ip, value := range state.ewma {
+		if _, ok := seen[ip]; ok {
+			continue
+		}
+		value *= 1 - dominantInboundEWMAAlpha
+		if value < dominantInboundPruneBelow {
+			delete(state.ewma, ip)
+		} else {
+			state.ewma[ip] = value
+		}
+	}
+
+	ranked := rankInboundEWMA(state.ewma)
+	if len(ranked) == 0 || ranked[0].value <= 0 {
+		clearDominantInbound(state)
+		metrics.HLP2PDominantInboundFresh.Set(1)
+		state.lastProcessed = receivedAt
+		return
+	}
+	best := ranked[0]
+	if state.current == "" {
+		state.current = best.ip
+		state.selectedAt = now
+	} else if best.ip != state.current && best.value > state.ewma[state.current]*dominantInboundSwitchRatio {
+		metrics.HLP2PDominantInboundEndpointInfo.DeleteLabelValues(state.current)
+		state.current = best.ip
+		state.selectedAt = now
+		metrics.HLP2PDominantInboundSwitchesTotal.Inc()
+	}
+
+	publishDominantInbound(now, latest, state)
+	metrics.MarkMonitorValidObservation("dominant_inbound")
+	metrics.MarkMonitorPublication("dominant_inbound")
+}
+
+type rankedEndpoint struct {
+	ip    string
+	value float64
+}
+
+func rankInboundEWMA(values map[string]float64) []rankedEndpoint {
+	out := make([]rankedEndpoint, 0, len(values))
+	for ip, value := range values {
+		if value > 0 {
+			out = append(out, rankedEndpoint{ip: ip, value: value})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].value != out[j].value {
+			return out[i].value > out[j].value
+		}
+		return out[i].ip < out[j].ip
+	})
+	return out
+}
+
+func publishDominantInbound(now time.Time, latest map[string]float64, state *dominantInboundState) {
+	if state.current == "" {
+		return
+	}
+	metrics.HLP2PDominantInboundEndpointInfo.WithLabelValues(state.current).Set(1)
+	if latest != nil {
+		metrics.HLP2PDominantInboundLatestValue.Set(latest[state.current])
+	}
+	selected := state.ewma[state.current]
+	metrics.HLP2PDominantInboundEWMAValue.Set(selected)
+	metrics.HLP2PDominantInboundTenureSeconds.Set(nonnegativeDuration(now.Sub(state.selectedAt)).Seconds())
+
+	ranked := rankInboundEWMA(state.ewma)
+	var total, challenger float64
+	ties := 0
+	best := 0.0
+	if len(ranked) > 0 {
+		best = ranked[0].value
+	}
+	for _, endpoint := range ranked {
+		total += endpoint.value
+		if endpoint.ip != state.current && endpoint.value > challenger {
+			challenger = endpoint.value
+		}
+		if endpoint.value == best {
+			ties++
+		}
+	}
+	share := 0.0
+	if total > 0 {
+		share = selected / total
+	}
+	challengerRatio := 0.0
+	if selected > 0 && challenger > 0 {
+		challengerRatio = challenger / selected
+	}
+	metrics.HLP2PDominantInboundShareRatio.Set(share)
+	metrics.HLP2PDominantInboundChallengerRatio.Set(challengerRatio)
+	metrics.HLP2PDominantInboundTieCount.Set(float64(ties))
+}
+
+func clearDominantInbound(state *dominantInboundState) {
+	if state.current != "" {
+		metrics.HLP2PDominantInboundEndpointInfo.DeleteLabelValues(state.current)
+	}
+	state.current = ""
+	state.selectedAt = time.Time{}
+	clear(state.ewma)
+	metrics.HLP2PDominantInboundLatestValue.Set(0)
+	metrics.HLP2PDominantInboundEWMAValue.Set(0)
+	metrics.HLP2PDominantInboundTenureSeconds.Set(0)
+	metrics.HLP2PDominantInboundShareRatio.Set(0)
+	metrics.HLP2PDominantInboundChallengerRatio.Set(0)
+	metrics.HLP2PDominantInboundTieCount.Set(0)
+	metrics.HLP2PDominantInboundFresh.Set(0)
 }

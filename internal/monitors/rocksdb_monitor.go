@@ -2,6 +2,8 @@ package monitors
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -16,14 +18,6 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
-// rocksDBs is the allowlist of RocksDB directories under hyperliquid_data
-// that we report on. These are the same databases the disk monitor
-// reports sizes for; here we go further and parse the LOG file for
-// LSM-tree health.
-//
-// `name` is the metric label; `relPath` is the path under cfg.NodeHome.
-// We deliberately skip db_hub/Evm and db_hub/Exchange because they're
-// memtable-only on this node (no SSTs, LOG never updates).
 var rocksDBs = []struct {
 	name    string
 	relPath string
@@ -33,229 +27,365 @@ var rocksDBs = []struct {
 	{"evm_db_slow", "hyperliquid_data/evm_db_hub_slow/EvmState"},
 }
 
+var rocksDBStallReasons = []string{
+	"cf-l0-file-count-limit-delays-with-ongoing-compaction",
+	"cf-l0-file-count-limit-stops-with-ongoing-compaction",
+	"l0-file-count-limit-delays",
+	"l0-file-count-limit-stops",
+	"memtable-limit-delays",
+	"memtable-limit-stops",
+	"pending-compaction-bytes-delays",
+	"pending-compaction-bytes-stops",
+	"total-delays",
+	"total-stops",
+	"write-buffer-manager-limit-stops",
+}
+
 const (
 	rocksDBPollInterval = 60 * time.Second
-	// rocksDBLogTailBytes is the tail window we read from each LOG file.
-	// RocksDB writes a DUMPING STATS block roughly every 10 minutes, and
-	// the block itself is ~5 KB. 256 KiB comfortably contains the latest
-	// one even after many compaction events between stat dumps.
 	rocksDBLogTailBytes = 256 * 1024
 )
 
-// StartRocksDBMonitor publishes per-database LSM-tree health metrics:
-//
-//   - hl_rocksdb_sst_files{db}              — total .sst file count on disk
-//   - hl_rocksdb_write_stalls_total{db, reason} — write-stall counters
-//     parsed from the LOG (modeled as gauges; resets on hl-node restart)
-//   - hl_rocksdb_block_cache_usage_bytes{db} — current block-cache usage
-//
-// Write stalls are the textbook LSM-tree "falling behind" signal. A
-// non-zero growth rate on `pending-compaction-bytes-stops` for the
-// `db_hub_rpc` DB means RPC writes are blocked while waiting for
-// compaction to catch up — the node will appear sluggish to clients
-// while its disk is fine on the surface.
+type rocksDBStats struct {
+	writeStalls     map[string]int64
+	cacheUsageBytes int64
+	sampleTime      time.Time
+}
+
+type rocksDBInstanceState struct {
+	published      bool
+	lastValid      time.Time
+	lastSampleTime time.Time
+}
+
+type rocksDBMonitorState struct {
+	dbs map[string]*rocksDBInstanceState
+}
+
+func newRocksDBMonitorState() *rocksDBMonitorState {
+	state := &rocksDBMonitorState{dbs: make(map[string]*rocksDBInstanceState, len(rocksDBs))}
+	for _, db := range rocksDBs {
+		state.dbs[db.name] = &rocksDBInstanceState{}
+	}
+	return state
+}
+
 func StartRocksDBMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	logger.InfoComponent("rocksdb", "watching %d RocksDB instances", len(rocksDBs))
+	metrics.RegisterSource(metrics.SourceRocksDB, true)
+	state := newRocksDBMonitorState()
 
 	ticker := time.NewTicker(rocksDBPollInterval)
 	defer ticker.Stop()
-
-	tickRocksDB(cfg.NodeHome)
-	metrics.MarkMonitorTick("rocksdb")
-
+	tickRocksDB(cfg.NodeHome, state, time.Now())
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			tickRocksDB(cfg.NodeHome)
-			metrics.MarkMonitorTick("rocksdb")
+			tickRocksDB(cfg.NodeHome, state, time.Now())
 		}
 	}
 }
 
-func tickRocksDB(nodeHome string) {
-	for _, db := range rocksDBs {
-		dir := filepath.Join(nodeHome, db.relPath)
-		if _, err := os.Stat(dir); err != nil {
-			continue
-		}
-
-		metrics.HLRocksDBSSTFiles.WithLabelValues(db.name).Set(float64(countSSTFiles(dir)))
-
-		logPath := filepath.Join(dir, "LOG")
-		stats, ok := readRocksDBStats(logPath)
-		if !ok {
-			continue
-		}
-		for reason, count := range stats.writeStalls {
-			metrics.HLRocksDBWriteStallsTotal.WithLabelValues(db.name, reason).Set(float64(count))
-		}
-		if stats.cacheUsageBytes >= 0 {
-			metrics.HLRocksDBBlockCacheUsageBytes.WithLabelValues(db.name).Set(float64(stats.cacheUsageBytes))
+func tickRocksDB(nodeHome string, state *rocksDBMonitorState, now time.Time) {
+	metrics.MarkMonitorAttempt("rocksdb")
+	metrics.MarkSourceAttempt(metrics.SourceRocksDB)
+	validNew := false
+	anyPresent := false
+	uncertainPresence := false
+	var failureStage metrics.SourceFailureStage
+	recordFailure := func(stage metrics.SourceFailureStage) {
+		// Preserve the strongest I/O diagnosis for the aggregate bounded
+		// source while per-DB parse state retains the exact local outcome.
+		if failureStage == "" || rocksDBFailurePriority(stage) > rocksDBFailurePriority(failureStage) {
+			failureStage = stage
 		}
 	}
+	var newest time.Time
+	for _, db := range rocksDBs {
+		instance := state.dbs[db.name]
+		dir := filepath.Join(nodeHome, db.relPath)
+		if _, err := os.Stat(dir); err != nil {
+			if os.IsNotExist(err) {
+				withdrawRocksDBSnapshot(db.name, instance)
+				metrics.HLRocksDBSourcePresent.WithLabelValues(db.name).Set(0)
+				metrics.HLRocksDBStatsParseOK.WithLabelValues(db.name).Set(-1)
+			} else {
+				uncertainPresence = true
+				recordFailure(metrics.SourceFailureStat)
+				metrics.HLRocksDBStatsParseOK.WithLabelValues(db.name).Set(-1)
+			}
+			metrics.SetRocksDBLastValidAge(db.name, instance.lastValid, now)
+			continue
+		}
+		logPath := filepath.Join(dir, "LOG")
+		if _, err := os.Stat(logPath); err != nil {
+			if os.IsNotExist(err) {
+				withdrawRocksDBSnapshot(db.name, instance)
+				metrics.HLRocksDBSourcePresent.WithLabelValues(db.name).Set(0)
+				metrics.HLRocksDBStatsParseOK.WithLabelValues(db.name).Set(-1)
+			} else {
+				uncertainPresence = true
+				recordFailure(metrics.SourceFailureStat)
+				metrics.HLRocksDBStatsParseOK.WithLabelValues(db.name).Set(-1)
+			}
+			metrics.SetRocksDBLastValidAge(db.name, instance.lastValid, now)
+			continue
+		}
+		anyPresent = true
+		metrics.HLRocksDBSourcePresent.WithLabelValues(db.name).Set(1)
+
+		sstFiles, err := countSSTFilesComplete(dir)
+		if err != nil {
+			recordFailure(metrics.SourceFailureWalk)
+			metrics.HLRocksDBStatsParseOK.WithLabelValues(db.name).Set(-1)
+			metrics.SetRocksDBLastValidAge(db.name, instance.lastValid, now)
+			continue
+		}
+		stats, err := readRocksDBStatsComplete(logPath)
+		if err != nil {
+			stage := rocksDBStatsFailureStage(err)
+			recordFailure(stage)
+			parseState := 0.0
+			if stage != metrics.SourceFailureSchema {
+				parseState = -1
+			}
+			metrics.HLRocksDBStatsParseOK.WithLabelValues(db.name).Set(parseState)
+			metrics.SetRocksDBLastValidAge(db.name, instance.lastValid, now)
+			continue
+		}
+
+		publishRocksDBSnapshot(db.name, sstFiles, stats)
+		metrics.HLRocksDBStatsParseOK.WithLabelValues(db.name).Set(1)
+		instance.lastValid = now
+		metrics.HLRocksDBStatsLastValidTimestamp.WithLabelValues(db.name).Set(float64(now.Unix()))
+		if !stats.sampleTime.Equal(instance.lastSampleTime) {
+			instance.lastSampleTime = stats.sampleTime
+			validNew = true
+			if stats.sampleTime.After(newest) {
+				newest = stats.sampleTime
+			}
+		}
+		instance.published = true
+		metrics.SetRocksDBLastValidAge(db.name, instance.lastValid, now)
+	}
+
+	if validNew {
+		metrics.MarkSourceValidObservation(metrics.SourceRocksDB, newest)
+		metrics.MarkMonitorValidObservation("rocksdb")
+	}
+	if anyPresent {
+		metrics.MarkSourcePublication(metrics.SourceRocksDB)
+		metrics.MarkMonitorPublication("rocksdb")
+	} else if !uncertainPresence {
+		metrics.MarkSourceAbsent(metrics.SourceRocksDB)
+	}
+	if failureStage != "" {
+		metrics.MarkSourceError(metrics.SourceRocksDB, failureStage)
+	}
+}
+
+func rocksDBFailurePriority(stage metrics.SourceFailureStage) int {
+	switch stage {
+	case metrics.SourceFailureStat, metrics.SourceFailureOpen, metrics.SourceFailureRead, metrics.SourceFailureWalk:
+		return 2
+	case metrics.SourceFailureDecode, metrics.SourceFailureSchema:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func rocksDBStatsFailureStage(err error) metrics.SourceFailureStage {
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return metrics.SourceFailureRead
+	}
+	return metrics.SourceFailureSchema
+}
+
+func publishRocksDBSnapshot(db string, sstFiles int, stats rocksDBStats) {
+	metrics.HLRocksDBSSTFiles.WithLabelValues(db).Set(float64(sstFiles))
+	for _, reason := range rocksDBStallReasons {
+		metrics.HLRocksDBWriteStallsTotal.WithLabelValues(db, reason).Set(float64(stats.writeStalls[reason]))
+	}
+	metrics.HLRocksDBBlockCacheUsageBytes.WithLabelValues(db).Set(float64(stats.cacheUsageBytes))
+}
+
+func withdrawRocksDBSnapshot(db string, state *rocksDBInstanceState) {
+	if !state.published {
+		return
+	}
+	metrics.HLRocksDBSSTFiles.DeleteLabelValues(db)
+	for _, reason := range rocksDBStallReasons {
+		metrics.HLRocksDBWriteStallsTotal.DeleteLabelValues(db, reason)
+	}
+	metrics.HLRocksDBBlockCacheUsageBytes.DeleteLabelValues(db)
+	state.published = false
 }
 
 func countSSTFiles(dir string) int {
+	n, _ := countSSTFilesComplete(dir)
+	return n
+}
+
+func countSSTFilesComplete(dir string) (int, error) {
 	var n int
-	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
+	err := filepath.WalkDir(dir, func(_ string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-		if strings.HasSuffix(d.Name(), ".sst") {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sst") {
 			n++
 		}
 		return nil
 	})
-	return n
+	return n, err
 }
 
-type rocksDBStats struct {
-	writeStalls     map[string]int64
-	cacheUsageBytes int64 // -1 if unparsed
-}
-
-// readRocksDBStats tail-reads a RocksDB LOG file, locates the LAST
-// "DUMPING STATS" block, and extracts the write-stall counters and
-// block cache usage. Returns ok=false if no stats block is found in
-// the tail window or if the file can't be read.
 func readRocksDBStats(path string) (rocksDBStats, bool) {
-	stats := rocksDBStats{
-		writeStalls:     map[string]int64{},
-		cacheUsageBytes: -1,
-	}
+	stats, err := readRocksDBStatsComplete(path)
+	return stats, err == nil
+}
 
+func readRocksDBStatsComplete(path string) (rocksDBStats, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return stats, false
+		return rocksDBStats{}, err
 	}
 	defer f.Close()
-
 	info, err := f.Stat()
 	if err != nil {
-		return stats, false
+		return rocksDBStats{}, err
 	}
 	start := info.Size() - rocksDBLogTailBytes
 	if start < 0 {
 		start = 0
 	}
-	if _, err := f.Seek(start, 0); err != nil {
-		return stats, false
+	if _, err := f.Seek(start, io.SeekStart); err != nil {
+		return rocksDBStats{}, err
 	}
 	buf := make([]byte, info.Size()-start)
 	if _, err := io.ReadFull(f, buf); err != nil {
-		return stats, false
+		return rocksDBStats{}, err
 	}
-
-	// Locate the last DUMPING STATS marker.
 	const marker = "------- DUMPING STATS -------"
 	idx := strings.LastIndex(string(buf), marker)
 	if idx < 0 {
-		return stats, false
+		return rocksDBStats{}, fmt.Errorf("no complete stats marker in tail")
+	}
+	lineStart := strings.LastIndex(string(buf[:idx]), "\n") + 1
+	markerLineEnd := strings.IndexByte(string(buf[idx:]), '\n')
+	if markerLineEnd < 0 {
+		return rocksDBStats{}, fmt.Errorf("unterminated stats marker")
+	}
+	markerLine := string(buf[lineStart : idx+markerLineEnd])
+	sampleTime, err := parseRocksDBLogTime(markerLine)
+	if err != nil {
+		return rocksDBStats{}, err
 	}
 	tail := string(buf[idx:])
-
-	// The two signals we care about often appear on the SAME LINE in
-	// real LOGs — RocksDB writes the long "Write Stall (count): ..."
-	// line and tacks "Block cache LRUCache@... usage: X" onto the end.
-	// Don't switch; check both predicates per line.
+	stats := rocksDBStats{writeStalls: make(map[string]int64), cacheUsageBytes: -1, sampleTime: sampleTime}
 	for _, line := range strings.Split(tail, "\n") {
 		if strings.Contains(line, "Write Stall (count):") {
-			parseWriteStallLine(line, stats.writeStalls)
+			if err := parseWriteStallLineStrict(line, stats.writeStalls); err != nil {
+				return rocksDBStats{}, err
+			}
 		}
 		if strings.Contains(line, "Block cache LRUCache") {
-			if v := parseBlockCacheUsage(line); v >= 0 {
-				stats.cacheUsageBytes = v
+			if value := parseBlockCacheUsage(line); value >= 0 {
+				stats.cacheUsageBytes = value
 			}
 		}
 	}
-	if len(stats.writeStalls) == 0 && stats.cacheUsageBytes < 0 {
-		return stats, false
+	for _, reason := range rocksDBStallReasons {
+		if _, ok := stats.writeStalls[reason]; !ok {
+			return rocksDBStats{}, fmt.Errorf("incomplete stats block: missing stall reason %s", reason)
+		}
 	}
-	return stats, true
+	if stats.cacheUsageBytes < 0 {
+		return rocksDBStats{}, fmt.Errorf("incomplete stats block: missing cache usage")
+	}
+	return stats, nil
 }
 
-// parseWriteStallLine parses tokens of the form `k: v` from a Write
-// Stall line. Both the long combined line and the short
-// write-buffer-manager line follow this shape, so we merge their keys
-// into the same map.
-//
-//	Write Stall (count): cf-l0-file-count-limit-delays-with-ongoing-compaction: 0, ...
 func parseWriteStallLine(line string, out map[string]int64) {
-	// Strip the prefix up to and including the colon after "(count)".
+	_ = parseWriteStallLineStrict(line, out)
+}
+
+func parseWriteStallLineStrict(line string, out map[string]int64) error {
 	prefix := "Write Stall (count):"
-	body := strings.TrimSpace(line[strings.Index(line, prefix)+len(prefix):])
+	idx := strings.Index(line, prefix)
+	if idx < 0 {
+		return fmt.Errorf("missing write-stall prefix")
+	}
+	body := strings.TrimSpace(line[idx+len(prefix):])
 	for _, part := range strings.Split(body, ",") {
 		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		// Stop at the first token that isn't `key: value` — the long line
-		// trails into "Block cache LRUCache@..." past the stall counters.
 		colon := strings.Index(part, ":")
 		if colon < 0 {
-			break
+			continue
 		}
 		key := strings.TrimSpace(part[:colon])
-		val := strings.TrimSpace(part[colon+1:])
-		// `val` may be just an integer, or it may be the start of a
-		// non-stall token (Block cache...). Try to parse it as int; if
-		// that fails, stop processing.
-		n, err := strconv.ParseInt(val, 10, 64)
-		if err != nil {
-			break
+		if !isStallReason(key) {
+			continue
 		}
-		if isStallReason(key) {
-			out[key] = n
+		value := strings.TrimSpace(part[colon+1:])
+		n, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || n < 0 {
+			return fmt.Errorf("invalid write-stall value for %s", key)
 		}
+		out[key] = n
 	}
+	return nil
 }
 
-// isStallReason filters the keys to the actual stall counters. Keeps
-// the metric cardinality clean even if RocksDB sneaks new keys into
-// the line in a future version.
-func isStallReason(k string) bool {
-	switch k {
-	case "cf-l0-file-count-limit-delays-with-ongoing-compaction",
-		"cf-l0-file-count-limit-stops-with-ongoing-compaction",
-		"l0-file-count-limit-delays",
-		"l0-file-count-limit-stops",
-		"memtable-limit-delays",
-		"memtable-limit-stops",
-		"pending-compaction-bytes-delays",
-		"pending-compaction-bytes-stops",
-		"total-delays",
-		"total-stops",
-		"write-buffer-manager-limit-stops":
-		return true
+func isStallReason(key string) bool {
+	for _, reason := range rocksDBStallReasons {
+		if key == reason {
+			return true
+		}
 	}
 	return false
 }
 
-// parseBlockCacheUsage extracts the `usage:` value from a Block cache
-// line, e.g. "Block cache LRUCache@0x... capacity: 16.00 GB usage: 172.18 MB".
-// Returns -1 on parse failure.
-var cacheUsageRe = regexp.MustCompile(`usage:\s*([0-9.]+)\s*(KB|MB|GB|B)`)
+var (
+	cacheUsageRe     = regexp.MustCompile(`usage:\s*([0-9.]+)\s*(KB|MB|GB|TB|B)`)
+	rocksDBLogTimeRe = regexp.MustCompile(`^(\d{4}/\d{2}/\d{2}-\d{2}:\d{2}:\d{2}\.\d+)`)
+)
 
 func parseBlockCacheUsage(line string) int64 {
-	m := cacheUsageRe.FindStringSubmatch(line)
-	if len(m) < 3 {
+	match := cacheUsageRe.FindStringSubmatch(line)
+	if len(match) < 3 {
 		return -1
 	}
-	v, err := strconv.ParseFloat(m[1], 64)
-	if err != nil {
+	value, err := strconv.ParseFloat(match[1], 64)
+	if err != nil || value < 0 {
 		return -1
 	}
-	switch m[2] {
-	case "B":
-		return int64(v)
+	multiplier := float64(1)
+	switch match[2] {
 	case "KB":
-		return int64(v * 1024)
+		multiplier = 1024
 	case "MB":
-		return int64(v * 1024 * 1024)
+		multiplier = 1024 * 1024
 	case "GB":
-		return int64(v * 1024 * 1024 * 1024)
+		multiplier = 1024 * 1024 * 1024
+	case "TB":
+		multiplier = 1024 * 1024 * 1024 * 1024
 	}
-	return -1
+	return int64(value * multiplier)
+}
+
+func parseRocksDBLogTime(line string) (time.Time, error) {
+	match := rocksDBLogTimeRe.FindStringSubmatch(line)
+	if len(match) != 2 {
+		return time.Time{}, fmt.Errorf("missing stats-block timestamp")
+	}
+	t, err := time.Parse("2006/01/02-15:04:05.999999", match[1])
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse stats-block timestamp: %w", err)
+	}
+	return t, nil
 }

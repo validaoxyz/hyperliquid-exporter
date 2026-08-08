@@ -281,7 +281,7 @@ func parseReplicaResponses(raw json.RawMessage, requestActions int) ResponseMetr
 		return out
 	}
 	full, ok := wrapper["Full"]
-	if !ok {
+	if !ok || bytes.Equal(bytes.TrimSpace(full), []byte("null")) {
 		out.Coverage = "malformed"
 		out.MalformedContainers = 1
 		out.CountRelation = countRelation(requestActions, 0)
@@ -303,7 +303,7 @@ func parseReplicaResponses(raw json.RawMessage, requestActions int) ResponseMetr
 			continue
 		}
 		var records []json.RawMessage
-		if err := json.Unmarshal(pair[1], &records); err != nil {
+		if bytes.Equal(bytes.TrimSpace(pair[1]), []byte("null")) || json.Unmarshal(pair[1], &records) != nil {
 			out.MalformedContainers++
 			out.Coverage = "malformed"
 			continue
@@ -335,17 +335,17 @@ func parseReplicaResponseRecord(raw json.RawMessage, out *ResponseMetrics) bool 
 		return false
 	}
 	var status string
-	if err := json.Unmarshal(result.Status, &status); err != nil {
+	if bytes.Equal(bytes.TrimSpace(result.Status), []byte("null")) || json.Unmarshal(result.Status, &status) != nil || status == "" {
 		return false
 	}
+	statusLabel := "other"
 	switch status {
 	case "ok", "err":
-		out.ActionStatuses[status]++
-	default:
-		out.ActionStatuses["other"]++
+		statusLabel = status
 	}
 
 	if len(result.Response) == 0 || bytes.Equal(bytes.TrimSpace(result.Response), []byte("null")) {
+		out.ActionStatuses[statusLabel]++
 		return true
 	}
 	var responseObject struct {
@@ -357,44 +357,64 @@ func parseReplicaResponseRecord(raw json.RawMessage, out *ResponseMetrics) bool 
 		// String responses are valid error/default responses with no nested
 		// execution-status array.
 		var responseText string
-		return json.Unmarshal(result.Response, &responseText) == nil
+		if json.Unmarshal(result.Response, &responseText) != nil {
+			return false
+		}
+		out.ActionStatuses[statusLabel]++
+		return true
 	}
 	if len(responseObject.Data.Statuses) == 0 {
+		out.ActionStatuses[statusLabel]++
 		return true
 	}
 	var statuses []json.RawMessage
-	if err := json.Unmarshal(responseObject.Data.Statuses, &statuses); err != nil {
+	if bytes.Equal(bytes.TrimSpace(responseObject.Data.Statuses), []byte("null")) || json.Unmarshal(responseObject.Data.Statuses, &statuses) != nil {
 		return false
 	}
+	outcomes := make([]string, 0, len(statuses))
 	for _, rawStatus := range statuses {
-		out.Outcomes[normalizeReplicaOutcome(rawStatus)]++
+		outcome, ok := normalizeReplicaOutcome(rawStatus)
+		if !ok {
+			return false
+		}
+		outcomes = append(outcomes, outcome)
+	}
+	out.ActionStatuses[statusLabel]++
+	for _, outcome := range outcomes {
+		out.Outcomes[outcome]++
 	}
 	return true
 }
 
-func normalizeReplicaOutcome(raw json.RawMessage) string {
+func normalizeReplicaOutcome(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return "", false
+	}
 	var scalar string
 	if err := json.Unmarshal(raw, &scalar); err == nil {
-		if scalar == "success" {
-			return "success"
+		if scalar == "" {
+			return "", false
 		}
-		return "other"
+		if scalar == "success" {
+			return "success", true
+		}
+		return "other", true
 	}
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &object); err != nil || len(object) != 1 {
-		return "other"
+		return "", false
 	}
 	for key := range object {
 		switch key {
 		case "resting", "error":
-			return key
+			return key, true
 		case "waitingForTrigger":
-			return "waiting_for_trigger"
+			return "waiting_for_trigger", true
 		default:
-			return "other"
+			return "other", true
 		}
 	}
-	return "other"
+	return "", false
 }
 
 func countRelation(requests, responses int) string {

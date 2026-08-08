@@ -2,6 +2,7 @@ package monitors
 
 import (
 	"encoding/json"
+	"time"
 )
 
 // ConsensusLogEntry represents a parsed consensus log line
@@ -29,8 +30,9 @@ type BlockMessage struct {
 
 // quorum certificate data
 type QCData struct {
-	Round   float64  `json:"round"`
-	Signers []string `json:"signers"`
+	Round     float64  `json:"round"`
+	Signers   []string `json:"signers"`
+	BlockHash string   `json:"block_hash"`
 }
 
 // timeout certificate data
@@ -42,13 +44,16 @@ type TCData struct {
 
 // heartbeat message
 type HeartbeatMessage struct {
-	Validator string  `json:"validator"`
-	RandomID  float64 `json:"random_id"`
+	Validator string `json:"validator"`
+	RandomID  uint64 `json:"random_id"`
+	Round     uint64 `json:"round"`
 }
 
 // heartbeat acknowledgment
 type HeartbeatAckMessage struct {
-	RandomID float64 `json:"random_id"`
+	Validator string `json:"validator"`
+	RandomID  uint64 `json:"random_id"`
+	Round     uint64 `json:"round"`
 }
 
 // parsed status log line
@@ -56,4 +61,33 @@ type StatusLogEntry struct {
 	Timestamp              string          `json:"-"`
 	DisconnectedValidators json.RawMessage `json:"disconnected_validators"`
 	HeartbeatStatuses      json.RawMessage `json:"heartbeat_statuses"`
+}
+
+type optionalStatusFloat struct {
+	Present bool
+	Null    bool
+	Value   float64
+}
+
+type statusHeartbeat struct {
+	Signer           string
+	SinceLastSuccess optionalStatusFloat
+	LastAckDuration  optionalStatusFloat
+}
+
+type statusDisconnectedPair struct {
+	SubjectSigner  string
+	ReporterSigner string
+	SinceRound     int64
+}
+
+type statusSnapshot struct {
+	SourceTime              time.Time
+	Round                   int64
+	HeartbeatFieldPresent   bool
+	Heartbeats              []statusHeartbeat
+	DisconnectedPresent     bool
+	Disconnected            []statusDisconnectedPair
+	MissingHeartbeatPresent bool
+	MissingHeartbeatSigners []string
 }

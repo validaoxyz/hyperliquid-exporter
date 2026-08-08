@@ -1,7 +1,12 @@
 package config
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -50,11 +55,16 @@ type Config struct {
 	// Useful for deep operator dashboards; off by default to keep the
 	// scrape lean for the median user.
 	EnableExtendedMetrics bool
-	// EnablePerPeerMetrics adds hl_p2p_peer_last_seen_seconds{ip} and
-	// hl_p2p_peer_first_seen_seconds{ip} per known peer. Cardinality
-	// bounded by the peer set's LRU cap (2048) + TTL (24h). Off by
-	// default for operators with tight per-target series limits.
+	// EnablePerPeerMetrics publishes current explicit child identities from
+	// child_peers status. The surface is capped at 16 identities and carries
+	// no historical first/last-seen registry. Off by default.
 	EnablePerPeerMetrics bool
+	// TCPServicePorts is the bounded service-port vocabulary used by
+	// connection and traffic monitors.
+	TCPServicePorts []uint16
+	// EnableTCP6 controls whether /proc/net/tcp6 participates in the atomic
+	// TCP connection snapshot.
+	EnableTCP6 bool
 	// EnablePprof exposes Go profiling endpoints under /debug/pprof/ on
 	// the metrics listener. Off by default.
 	EnablePprof bool
@@ -83,21 +93,81 @@ type Flags struct {
 	InfoEndpointURL       string
 	EnableExtendedMetrics bool
 	EnablePerPeerMetrics  bool
+	TCPServicePorts       string
+	DisableTCP6           bool
 	EnablePprof           bool
 }
 
-// load env vars and returns a Config struct
-func LoadConfig(flags *Flags) Config {
+const DefaultTCPServicePorts = "3001,3999,4001,4002,4003,4004"
+
+// NormalizeChain returns the canonical chain name accepted by every external
+// Hyperliquid endpoint. Unknown and empty values fail closed so they can never
+// silently select testnet.
+func NormalizeChain(raw string) (string, error) {
+	chain := strings.ToLower(strings.TrimSpace(raw))
+	switch chain {
+	case "mainnet", "testnet":
+		return chain, nil
+	default:
+		return "", fmt.Errorf("chain must be exactly mainnet or testnet, got %q", raw)
+	}
+}
+
+// ParseTCPServicePorts parses the bounded operator-configured service-port
+// vocabulary. Sorting produces one deterministic snapshot independent of CLI
+// ordering.
+func ParseTCPServicePorts(raw string) ([]uint16, error) {
+	tokens := strings.Split(raw, ",")
+	if len(tokens) == 0 || len(tokens) > 16 {
+		return nil, fmt.Errorf("tcp service ports must contain 1..16 entries")
+	}
+
+	seen := make(map[uint16]struct{}, len(tokens))
+	ports := make([]uint16, 0, len(tokens))
+	for i, token := range tokens {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			return nil, fmt.Errorf("tcp service port %d is empty", i+1)
+		}
+		for _, digit := range token {
+			if digit < '0' || digit > '9' {
+				return nil, fmt.Errorf("tcp service port %q is not decimal", token)
+			}
+		}
+		value, err := strconv.ParseUint(token, 10, 16)
+		if err != nil || value == 0 {
+			return nil, fmt.Errorf("tcp service port %q must be in 1..65535", token)
+		}
+		port := uint16(value)
+		if _, duplicate := seen[port]; duplicate {
+			return nil, fmt.Errorf("tcp service port %d is duplicated", port)
+		}
+		seen[port] = struct{}{}
+		ports = append(ports, port)
+	}
+	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
+	return ports, nil
+}
+
+// LoadConfig loads environment variables and flags, validates configuration,
+// and derives dependent paths only after all precedence rules are settled.
+func LoadConfig(flags *Flags) (Config, error) {
 	// load .env first
 	if err := godotenv.Load(); err != nil {
 		logger.Debug("No .env file found, using environment variables and flags")
 	}
 
 	homeDir := os.Getenv("HOME")
+	if flags == nil {
+		flags = &Flags{}
+	}
 
 	nodeHome := os.Getenv("NODE_HOME")
 	if nodeHome == "" {
-		nodeHome = homeDir + "/hl" //default fallback
+		nodeHome = filepath.Join(homeDir, "hl") // default fallback
+	}
+	if flags.NodeHome != "" {
+		nodeHome = flags.NodeHome
 	}
 
 	binaryHome := os.Getenv("BINARY_HOME")
@@ -107,20 +177,37 @@ func LoadConfig(flags *Flags) Config {
 
 	nodeBinary := os.Getenv("NODE_BINARY")
 	if nodeBinary == "" {
-		nodeBinary = binaryHome + "/hl-node"
+		nodeBinary = filepath.Join(binaryHome, "hl-node")
+	}
+	if flags.NodeBinary != "" {
+		nodeBinary = flags.NodeBinary
+	}
+
+	chain, err := NormalizeChain(flags.Chain)
+	if err != nil {
+		return Config{}, err
+	}
+	servicePorts := flags.TCPServicePorts
+	if servicePorts == "" {
+		servicePorts = DefaultTCPServicePorts
+	}
+	tcpServicePorts, err := ParseTCPServicePorts(servicePorts)
+	if err != nil {
+		return Config{}, err
 	}
 
 	// always use default replica data dir
-	replicaDataDir := nodeHome + "/data/replica_cmds"
+	replicaDataDir := filepath.Join(nodeHome, "data", "replica_cmds")
 
 	// always default buffer size
 	replicaBufferSize := 8 // 8MB default
 
 	config := Config{
+		HomeDir:                homeDir,
 		NodeHome:               nodeHome,
 		BinaryHome:             binaryHome,
 		NodeBinary:             nodeBinary,
-		Chain:                  flags.Chain,
+		Chain:                  chain,
 		EnableEVM:              flags.EnableEVM,
 		EnableContractMetrics:  flags.EnableContractMetrics,
 		ContractMetricsLimit:   flags.ContractMetricsLimit,
@@ -141,40 +228,14 @@ func LoadConfig(flags *Flags) Config {
 		InfoEndpointURL:        flags.InfoEndpointURL,
 		EnableExtendedMetrics:  flags.EnableExtendedMetrics,
 		EnablePerPeerMetrics:   flags.EnablePerPeerMetrics,
+		TCPServicePorts:        tcpServicePorts,
+		EnableTCP6:             !flags.DisableTCP6,
 		EnablePprof:            flags.EnablePprof,
 	}
 
-	// override with flags if they're provided
-	if flags != nil {
-		if flags.NodeHome != "" {
-			config.NodeHome = flags.NodeHome
-		}
-		if flags.NodeBinary != "" {
-			config.NodeBinary = flags.NodeBinary
-		}
-		if flags.Chain != "" {
-			config.Chain = flags.Chain
-		}
-		if flags.EnableContractMetrics != config.EnableContractMetrics {
-			config.EnableContractMetrics = flags.EnableContractMetrics
-		}
-		if flags.ContractMetricsLimit != config.ContractMetricsLimit {
-			config.ContractMetricsLimit = flags.ContractMetricsLimit
-		}
-		config.EVMBlockTypeMetrics = config.EnableEVM
-		if flags.EnableCoreTxMetrics != config.EnableCoreTxMetrics {
-			config.EnableCoreTxMetrics = flags.EnableCoreTxMetrics
-		}
-		if flags.UseLiveState != config.UseLiveState {
-			config.UseLiveState = flags.UseLiveState
-		}
-		if flags.EnableReplicaMetrics != config.EnableReplicaMetrics {
-			config.EnableReplicaMetrics = flags.EnableReplicaMetrics
-		}
-		if flags.EnableValidatorRTT != nil {
-			config.EnableValidatorRTT = *flags.EnableValidatorRTT
-		}
+	if flags.EnableValidatorRTT != nil {
+		config.EnableValidatorRTT = *flags.EnableValidatorRTT
 	}
 
-	return config
+	return config, nil
 }

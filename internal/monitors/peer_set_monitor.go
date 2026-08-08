@@ -2,7 +2,6 @@ package monitors
 
 import (
 	"context"
-	"sync"
 	"time"
 
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
@@ -11,41 +10,18 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/peerset"
 )
 
-// peerSetPollInterval is how often we evict TTL-expired peers and
-// refresh the windowed gauges. The set is small (≤2048) so this is
-// cheap; running every 30s keeps the windowed counts current without
-// thrashing.
 const peerSetPollInterval = 30 * time.Second
 
-// perPeerLabels remembers which IPs we've published per-peer gauges
-// for, so we can Delete() series when an IP is evicted from the set.
-// Only consulted when cfg.EnablePerPeerMetrics is true.
 var (
-	perPeerLabelsMu sync.Mutex
-	perPeerLabels   = map[string]struct{}{}
+	lastTrafficEndpointsAdded   uint64
+	lastTrafficEndpointsEvicted = map[string]uint64{"ttl": 0, "capacity": 0}
 )
 
-// Last-observed peerset add/evict totals, so we can drive the
-// hl_p2p_peers_added_total / hl_p2p_peers_evicted_total Counters by
-// .Add(delta) each tick. The peerset exposes monotonic running totals;
-// Counters cannot be .Set(), so we advance them by the per-tick delta.
-// Only touched from the single peer_set goroutine, so no lock needed.
-var (
-	lastPeersAdded   uint64
-	lastPeersEvicted uint64
-)
-
-// StartPeerSetMonitor publishes the windowed unique-peer counts always,
-// and (when --per-peer-metrics is set) the per-IP last-seen + first-seen
-// gauges. The set itself is fed from other monitors (tcp_traffic for
-// now); this monitor is the publisher, not the producer.
+// StartPeerSetMonitor publishes only bounded aggregate observation-set state.
+// The former 2x2048 raw-IP first/last-seen surface is intentionally no longer
+// populated, including when the compatibility --per-peer-metrics flag is set.
 func StartPeerSetMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
-	logger.InfoComponent("peer_set", "publishing peer-set metrics; per-peer-metrics=%v", cfg.EnablePerPeerMetrics)
-
-	// Delay the first tick so tcp_traffic's first registration has time
-	// to land. Without this, peer_set's t=0 tick races tcp_traffic's t=0
-	// tick and frequently wins, displaying 0 peers for the first 30s
-	// after startup even though the producer has work queued.
+	logger.InfoComponent("peer_set", "publishing process-local qualified traffic-endpoint aggregates")
 	select {
 	case <-ctx.Done():
 		return
@@ -54,77 +30,55 @@ func StartPeerSetMonitor(ctx context.Context, cfg config.Config, errCh chan<- er
 
 	ticker := time.NewTicker(peerSetPollInterval)
 	defer ticker.Stop()
-
 	tickPeerSet(cfg.EnablePerPeerMetrics)
-	metrics.MarkMonitorTick("peer_set")
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			tickPeerSet(cfg.EnablePerPeerMetrics)
-			metrics.MarkMonitorTick("peer_set")
 		}
 	}
 }
 
-func tickPeerSet(emitPerPeer bool) {
-	set := peerset.Default()
-	now := time.Now()
+func tickPeerSet(_ bool) {
+	metrics.MarkMonitorAttempt("peer_set")
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		set := peerset.Default()
+		now := time.Now()
+		set.EvictExpired(now)
 
-	// Evict TTL-expired peers, then reconcile the published per-IP series
-	// against the live set. Reconciling (rather than only deleting what
-	// EvictExpired returned) also drops series for peers the LRU evicted
-	// inside Register at capacity, which previously leaked forever on
-	// nodes seeing more than the cap's worth of distinct peers.
-	set.EvictExpired(now)
-	if emitPerPeer {
-		alive := map[string]bool{}
-		for _, p := range set.Snapshot() {
-			alive[p.IP] = true
+		for _, window := range []struct {
+			label string
+			age   time.Duration
+		}{{"5m", 5 * time.Minute}, {"1h", time.Hour}, {"24h", 24 * time.Hour}} {
+			value := float64(set.UniqueSeenIn(window.age, now))
+			metrics.HLP2PTrafficEndpointsSeen.WithLabelValues(window.label).Set(value)
+			metrics.HLP2PUniquePeersSeen.WithLabelValues(window.label).Set(value) // one-release alias
 		}
-		perPeerLabelsMu.Lock()
-		for ip := range perPeerLabels {
-			if !alive[ip] {
-				metrics.HLP2PPeerLastSeenSeconds.DeleteLabelValues(ip)
-				metrics.HLP2PPeerFirstSeenSeconds.DeleteLabelValues(ip)
-				delete(perPeerLabels, ip)
+
+		added := set.AddedTotal()
+		if added >= lastTrafficEndpointsAdded {
+			delta := float64(added - lastTrafficEndpointsAdded)
+			metrics.HLP2PTrafficEndpointsAddedTotal.Add(delta)
+			metrics.HLP2PPeersAddedTotal.Add(delta) // one-release alias
+		}
+		lastTrafficEndpointsAdded = added
+
+		var totalEvictionDelta uint64
+		for _, reason := range []string{"ttl", "capacity"} {
+			current := set.EvictedByReason(reason)
+			previous := lastTrafficEndpointsEvicted[reason]
+			if current >= previous {
+				delta := current - previous
+				metrics.HLP2PTrafficEndpointsEvictedTotal.WithLabelValues(reason).Add(float64(delta))
+				totalEvictionDelta += delta
 			}
+			lastTrafficEndpointsEvicted[reason] = current
 		}
-		perPeerLabelsMu.Unlock()
-	}
+		metrics.HLP2PPeersEvictedTotal.Add(float64(totalEvictionDelta)) // one-release alias
 
-	// Windowed counts.
-	metrics.HLP2PUniquePeersSeen.WithLabelValues("5m").Set(float64(set.UniqueSeenIn(5*time.Minute, now)))
-	metrics.HLP2PUniquePeersSeen.WithLabelValues("1h").Set(float64(set.UniqueSeenIn(time.Hour, now)))
-	metrics.HLP2PUniquePeersSeen.WithLabelValues("24h").Set(float64(set.UniqueSeenIn(24*time.Hour, now)))
-
-	// Aggregate counters. hl_p2p_peers is set by tcp_traffic_monitor
-	// (latest-sample count), not from set.Len(). The added/evicted totals
-	// are real Counters: advance them by the delta since the last tick
-	// (clamp negatives to 0 in case the peerset's internal totals reset).
-	added := set.AddedTotal()
-	if added >= lastPeersAdded {
-		metrics.HLP2PPeersAddedTotal.Add(float64(added - lastPeersAdded))
-	}
-	lastPeersAdded = added
-
-	evictedTotal := set.EvictedTotal()
-	if evictedTotal >= lastPeersEvicted {
-		metrics.HLP2PPeersEvictedTotal.Add(float64(evictedTotal - lastPeersEvicted))
-	}
-	lastPeersEvicted = evictedTotal
-
-	if !emitPerPeer {
-		return
-	}
-
-	perPeerLabelsMu.Lock()
-	defer perPeerLabelsMu.Unlock()
-	for _, p := range set.Snapshot() {
-		metrics.HLP2PPeerLastSeenSeconds.WithLabelValues(p.IP).Set(float64(p.LastSeen.Unix()))
-		metrics.HLP2PPeerFirstSeenSeconds.WithLabelValues(p.IP).Set(float64(p.FirstSeen.Unix()))
-		perPeerLabels[p.IP] = struct{}{}
-	}
+		metrics.MarkMonitorValidObservation("peer_set")
+		metrics.MarkMonitorPublication("peer_set")
+	})
 }

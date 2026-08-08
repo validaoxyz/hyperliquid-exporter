@@ -56,13 +56,74 @@ func TestRegister_EvictsLeastRecentlySeenAtCap(t *testing.T) {
 	}
 }
 
+func TestRegister_EqualTimestampEvictionIsDeterministic(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 25; i++ {
+		s := New(3, time.Hour)
+		// Deliberately use insertion order that differs from lexical order.
+		s.Register("192.0.2.3", "", t0)
+		s.Register("192.0.2.1", "", t0)
+		s.Register("192.0.2.2", "", t0)
+		evicted, ok := s.Register("192.0.2.4", "", t0.Add(time.Second))
+		if !ok || evicted != "192.0.2.1" {
+			t.Fatalf("iteration %d: evicted=%q ok=%v", i, evicted, ok)
+		}
+		if s.EvictedByReason("capacity") != 1 || s.EvictedByReason("ttl") != 0 {
+			t.Fatalf("wrong reason totals: capacity=%d ttl=%d", s.EvictedByReason("capacity"), s.EvictedByReason("ttl"))
+		}
+	}
+}
+
+func TestRegister_ExpiresBeforeCapacityEviction(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s := New(2, time.Hour)
+	s.Register("192.0.2.1", "", t0)
+	s.Register("192.0.2.2", "", t0.Add(30*time.Minute))
+
+	if evicted, capacity := s.Register("192.0.2.3", "", t0.Add(61*time.Minute)); capacity || evicted != "" {
+		t.Fatalf("expired occupant was reported as capacity eviction: evicted=%q capacity=%v", evicted, capacity)
+	}
+	if s.EvictedByReason("ttl") != 1 || s.EvictedByReason("capacity") != 0 {
+		t.Fatalf("wrong eviction accounting: ttl=%d capacity=%d", s.EvictedByReason("ttl"), s.EvictedByReason("capacity"))
+	}
+	peers := s.Snapshot()
+	if len(peers) != 2 {
+		t.Fatalf("post-registration size=%d, want 2", len(peers))
+	}
+	for _, peer := range peers {
+		if peer.IP == "192.0.2.1" {
+			t.Fatal("expired endpoint survived pre-registration TTL enforcement")
+		}
+	}
+}
+
+func TestRegister_ExpiredSameIPStartsNewObservationEpoch(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	later := t0.Add(time.Hour + time.Second)
+	s := New(2, time.Hour)
+	s.Register("192.0.2.1", "", t0)
+
+	if evicted, capacity := s.Register("192.0.2.1", "", later); capacity || evicted != "" {
+		t.Fatalf("expired same-IP replacement was reported as capacity eviction: evicted=%q capacity=%v", evicted, capacity)
+	}
+	if s.AddedTotal() != 2 || s.EvictedByReason("ttl") != 1 || s.EvictedByReason("capacity") != 0 {
+		t.Fatalf("wrong epoch accounting: added=%d ttl=%d capacity=%d", s.AddedTotal(), s.EvictedByReason("ttl"), s.EvictedByReason("capacity"))
+	}
+	peers := s.Snapshot()
+	if len(peers) != 1 || !peers[0].FirstSeen.Equal(later) || !peers[0].LastSeen.Equal(later) {
+		t.Fatalf("expired endpoint was refreshed in place instead of recreated: %+v", peers)
+	}
+}
+
 func TestEvictExpired_RemovesEntriesOlderThanTTL(t *testing.T) {
 	s := New(10, time.Hour)
 	now := time.Now()
 
-	s.Register("old", "in", now.Add(-2*time.Hour))
+	// Insert the expired fixture last with its historical observation time so a
+	// later registration does not exercise the eager path this test is not about.
 	s.Register("recent", "in", now.Add(-30*time.Minute))
 	s.Register("fresh", "in", now)
+	s.Register("old", "in", now.Add(-2*time.Hour))
 
 	evicted := s.EvictExpired(now)
 	if len(evicted) != 1 || evicted[0] != "old" {
@@ -73,6 +134,9 @@ func TestEvictExpired_RemovesEntriesOlderThanTTL(t *testing.T) {
 	}
 	if s.EvictedTotal() != 1 {
 		t.Errorf("EvictedTotal=%d want 1", s.EvictedTotal())
+	}
+	if s.EvictedByReason("ttl") != 1 || s.EvictedByReason("capacity") != 0 {
+		t.Errorf("wrong eviction reasons: ttl=%d capacity=%d", s.EvictedByReason("ttl"), s.EvictedByReason("capacity"))
 	}
 }
 
