@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"sync/atomic"
@@ -17,6 +18,7 @@ import (
 const (
 	infoProbeInterval    = 15 * time.Second
 	infoProbeHTTPTimeout = 5 * time.Second
+	infoProbeMaxBodySize = 1 << 20
 	defaultInfoEndpoint  = "http://127.0.0.1:3001/info"
 	infoProbeRequestBody = `{"type":"meta"}`
 )
@@ -117,13 +119,15 @@ func probeMeta(ctx context.Context, client *http.Client, url string, now func() 
 
 	if resp.StatusCode == http.StatusOK && n > 0 {
 		successAt := now()
-		metrics.HLInfoEndpointUp.Set(1)
-		metrics.HLInfoEndpointLastSuccessSeconds.Set(float64(successAt.Unix()))
-		metrics.HLInfoMetaLastSuccessAgeSeconds.Set(0)
-		metrics.HLInfoMetaOutcomesTotal.WithLabelValues(metrics.InfoProbeOutcomeSuccess).Inc()
-		infoMetaLastSuccessNanos.Store(successAt.UnixNano())
-		metrics.MarkSourceValidObservation(metrics.SourceInfoMeta, time.Time{})
-		metrics.MarkSourcePublication(metrics.SourceInfoMeta)
+		metrics.WithPrometheusSnapshotUpdate(func() {
+			metrics.HLInfoEndpointUp.Set(1)
+			metrics.HLInfoEndpointLastSuccessSeconds.Set(float64(successAt.Unix()))
+			metrics.HLInfoMetaLastSuccessAgeSeconds.Set(0)
+			metrics.HLInfoMetaOutcomesTotal.WithLabelValues(metrics.InfoProbeOutcomeSuccess).Inc()
+			infoMetaLastSuccessNanos.Store(successAt.UnixNano())
+			metrics.MarkSourceValidObservation(metrics.SourceInfoMeta, time.Time{})
+			metrics.MarkSourcePublication(metrics.SourceInfoMeta)
+		})
 		return true
 	}
 
@@ -164,41 +168,63 @@ func probeExchangeStatus(ctx context.Context, client *http.Client, url string, n
 		return false
 	}
 
-	var body struct {
-		Time float64 `json:"time"` // milliseconds since epoch
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil || body.Time <= 0 {
+	exchangeTime, ok := decodeExchangeStatusTime(resp.Body)
+	if !ok {
 		recordExchangeFailure(metrics.InfoProbeOutcomeDecode, metrics.SourceFailureDecode, now())
 		return false
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
 
 	successAt := now()
-	metrics.InitExchangeStatusDeltaInstrument()
-	metrics.HLInfoExchangeStatusDeltaSeconds.Set(float64(successAt.UnixMilli())/1000.0 - body.Time/1000.0)
-	metrics.HLInfoExchangeStatusUp.Set(1)
-	metrics.HLInfoExchangeStatusLastSuccess.Set(float64(successAt.Unix()))
-	metrics.HLInfoExchangeStatusLastSuccessAge.Set(0)
-	metrics.HLInfoExchangeStatusOutcomesTotal.WithLabelValues(metrics.InfoProbeOutcomeSuccess).Inc()
-	infoExchangeLastSuccessNanos.Store(successAt.UnixNano())
-	metrics.MarkSourceValidObservation(metrics.SourceInfoExchange, time.Time{})
-	metrics.MarkSourcePublication(metrics.SourceInfoExchange)
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		metrics.InitExchangeStatusDeltaInstrument()
+		metrics.HLInfoExchangeStatusDeltaSeconds.Set(float64(successAt.UnixMilli())/1000.0 - exchangeTime/1000.0)
+		metrics.HLInfoExchangeStatusUp.Set(1)
+		metrics.HLInfoExchangeStatusLastSuccess.Set(float64(successAt.Unix()))
+		metrics.HLInfoExchangeStatusLastSuccessAge.Set(0)
+		metrics.HLInfoExchangeStatusOutcomesTotal.WithLabelValues(metrics.InfoProbeOutcomeSuccess).Inc()
+		infoExchangeLastSuccessNanos.Store(successAt.UnixNano())
+		metrics.MarkSourceValidObservation(metrics.SourceInfoExchange, time.Time{})
+		metrics.MarkSourcePublication(metrics.SourceInfoExchange)
+	})
 	return true
 }
 
+func decodeExchangeStatusTime(r io.Reader) (float64, bool) {
+	data, err := io.ReadAll(io.LimitReader(r, infoProbeMaxBodySize+1))
+	if err != nil || len(data) > infoProbeMaxBodySize {
+		return 0, false
+	}
+	var body struct {
+		Time float64 `json:"time"` // milliseconds since epoch
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if err := decoder.Decode(&body); err != nil || body.Time <= 0 {
+		return 0, false
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return 0, false
+	}
+	return body.Time, true
+}
+
 func recordMetaFailure(outcome string, stage metrics.SourceFailureStage, now time.Time) {
-	metrics.HLInfoEndpointUp.Set(0)
-	metrics.HLInfoEndpointFailuresTotal.Inc()
-	metrics.HLInfoMetaOutcomesTotal.WithLabelValues(outcome).Inc()
-	updateProbeAge(metrics.HLInfoMetaLastSuccessAgeSeconds, infoMetaLastSuccessNanos.Load(), now)
-	metrics.MarkSourceError(metrics.SourceInfoMeta, stage)
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		metrics.HLInfoEndpointUp.Set(0)
+		metrics.HLInfoEndpointFailuresTotal.Inc()
+		metrics.HLInfoMetaOutcomesTotal.WithLabelValues(outcome).Inc()
+		updateProbeAge(metrics.HLInfoMetaLastSuccessAgeSeconds, infoMetaLastSuccessNanos.Load(), now)
+		metrics.MarkSourceError(metrics.SourceInfoMeta, stage)
+	})
 }
 
 func recordExchangeFailure(outcome string, stage metrics.SourceFailureStage, now time.Time) {
-	metrics.HLInfoExchangeStatusUp.Set(0)
-	metrics.HLInfoExchangeStatusOutcomesTotal.WithLabelValues(outcome).Inc()
-	updateProbeAge(metrics.HLInfoExchangeStatusLastSuccessAge, infoExchangeLastSuccessNanos.Load(), now)
-	metrics.MarkSourceError(metrics.SourceInfoExchange, stage)
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		metrics.HLInfoExchangeStatusUp.Set(0)
+		metrics.HLInfoExchangeStatusOutcomesTotal.WithLabelValues(outcome).Inc()
+		updateProbeAge(metrics.HLInfoExchangeStatusLastSuccessAge, infoExchangeLastSuccessNanos.Load(), now)
+		metrics.MarkSourceError(metrics.SourceInfoExchange, stage)
+	})
 }
 
 func updateProbeAge(gauge interface{ Set(float64) }, lastSuccessNanos int64, now time.Time) {

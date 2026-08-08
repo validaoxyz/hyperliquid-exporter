@@ -2,6 +2,7 @@ package monitors
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -140,6 +141,56 @@ func TestTailStreamReadsFirstFileAfterENOENTStartup(t *testing.T) {
 	})
 
 	time.Sleep(25 * time.Millisecond)
+	if err := os.WriteFile(path, []byte("first\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current.Store(path)
+	if got := waitStreamValue(t, lines); got != "first\n" {
+		t.Fatalf("late first line = %q, want first record", got)
+	}
+}
+
+func TestTailStreamReadsFirstFileAfterTransientStartupFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "late")
+	var current atomic.Value
+	current.Store("")
+	firstAttempt := make(chan struct{})
+	var attempts atomic.Int32
+	lines := make(chan string, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tailStream(ctx, tailStreamOpts{
+			component: "stream_test",
+			name:      "transient startup failure",
+			resolve: func() (string, error) {
+				if attempts.Add(1) == 1 {
+					close(firstAttempt)
+					return "", errors.New("transient discovery failure")
+				}
+				return current.Load().(string), nil
+			},
+			rescanEvery: 10 * time.Millisecond,
+			eofSleep:    5 * time.Millisecond,
+			onLine:      func(line string) { lines <- line },
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(streamTestTimeout):
+			t.Fatal("tailStream did not stop after cancellation")
+		}
+	})
+
+	select {
+	case <-firstAttempt:
+	case <-time.After(streamTestTimeout):
+		t.Fatal("timed out waiting for initial resolver failure")
+	}
 	if err := os.WriteFile(path, []byte("first\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

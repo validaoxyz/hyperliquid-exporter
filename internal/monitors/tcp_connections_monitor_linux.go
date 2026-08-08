@@ -4,9 +4,11 @@ package monitors
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -243,6 +245,7 @@ func readTCPSource(path string, ports []uint16, strict bool) (map[tcpSocketKey]i
 	counts := preseedTCPSocketCounts(ports)
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	scanner.Split(scanCommittedProcLine)
 	if !scanner.Scan() {
 		if err := scanner.Err(); err != nil {
 			return nil, "scan", err
@@ -273,6 +276,23 @@ func readTCPSource(path string, ports []uint16, strict bool) (map[tcpSocketKey]i
 		return nil, "scan", err
 	}
 	return counts, "", nil
+}
+
+func scanCommittedProcLine(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if index := bytes.IndexByte(data, '\n'); index >= 0 {
+		line := data[:index]
+		if len(line) > 0 && line[len(line)-1] == '\r' {
+			line = line[:len(line)-1]
+		}
+		return index + 1, line, nil
+	}
+	if atEOF {
+		if len(data) == 0 {
+			return 0, nil, nil
+		}
+		return 0, nil, io.ErrUnexpectedEOF
+	}
+	return 0, nil, nil
 }
 
 func parseTCPProcRow(line string, tracked map[uint16]struct{}) (tcpSocketKey, bool, error) {

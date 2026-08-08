@@ -7,6 +7,9 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
 func TestScanSnapshotStatusUsesExactlyTwoNewestDateDirectories(t *testing.T) {
@@ -67,6 +70,72 @@ func TestScanSnapshotStatusLateDiscoveryAndEmptyWindow(t *testing.T) {
 	got, err = scanSnapshotStatus(root)
 	if err != nil || got.Known != 1 || got.LatestHeight != 1_000_020_000 {
 		t.Fatalf("late populated root = %+v, %v", got, err)
+	}
+}
+
+func TestSnapshotStatusTickWithdrawsAbsentAndPublishesValidEmpty(t *testing.T) {
+	metrics.RegisterSource(metrics.SourceSnapshotStatus, true)
+	parent := t.TempDir()
+	root := filepath.Join(parent, "periodic_abci_state_statuses")
+	date := filepath.Join(root, "20260526")
+	if err := os.MkdirAll(date, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteHeight(t, date, 1_000_020_000)
+	if !tickSnapshotStatus(root) {
+		t.Fatal("valid nonempty snapshot-status root was rejected")
+	}
+	if len(b03CollectorRows(t, metrics.HLNodeSnapshotKnown)) != 1 {
+		t.Fatal("valid snapshot did not publish current gauges")
+	}
+
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+	if tickSnapshotStatus(root) {
+		t.Fatal("absent snapshot-status root was reported valid")
+	}
+	for name, collector := range map[string]prometheus.Collector{
+		"known":         metrics.HLNodeSnapshotKnown,
+		"height":        metrics.HLNodeSnapshotLastHeight,
+		"age":           metrics.HLNodeSnapshotLastAgeSeconds,
+		"lag_available": metrics.HLNodeSnapshotHeightLagAvailable,
+		"lag":           metrics.HLNodeSnapshotHeightLagBlocks,
+	} {
+		if rows := b03CollectorRows(t, collector); len(rows) != 0 {
+			t.Fatalf("absent root retained %s rows: %d", name, len(rows))
+		}
+	}
+	metrics.PublishMonitorHealthSnapshot()
+	if got := hostMetricValue(t, metrics.HLExporterSourcePresent.WithLabelValues(string(metrics.SourceSnapshotStatus))); got != 0 {
+		t.Fatalf("absent source present=%v, want 0", got)
+	}
+
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !tickSnapshotStatus(root) {
+		t.Fatal("valid empty snapshot-status root was rejected")
+	}
+	for name, gauge := range map[string]*prometheus.GaugeVec{
+		"known":         metrics.HLNodeSnapshotKnown,
+		"height":        metrics.HLNodeSnapshotLastHeight,
+		"age":           metrics.HLNodeSnapshotLastAgeSeconds,
+		"lag_available": metrics.HLNodeSnapshotHeightLagAvailable,
+	} {
+		if rows := b03CollectorRows(t, gauge); len(rows) != 1 {
+			t.Fatalf("empty root %s rows=%d, want 1", name, len(rows))
+		}
+		if got := hostMetricValue(t, gauge.WithLabelValues()); got != 0 {
+			t.Fatalf("empty root %s=%v, want explicit zero", name, got)
+		}
+	}
+	if rows := b03CollectorRows(t, metrics.HLNodeSnapshotHeightLagBlocks); len(rows) != 0 {
+		t.Fatalf("empty root published unavailable lag rows: %d", len(rows))
+	}
+	metrics.PublishMonitorHealthSnapshot()
+	if got := hostMetricValue(t, metrics.HLExporterSourcePresent.WithLabelValues(string(metrics.SourceSnapshotStatus))); got != 1 {
+		t.Fatalf("empty source present=%v, want 1", got)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 
 func Start(ctx context.Context, cfg config.Config) {
 	logger.InfoComponent("system", "Starting Hyperliquid exporter...")
+	metrics.BeginMonitorRegistration()
 
 	// create context with cancellation for monitor goroutines
 	monitorCtx, cancel := context.WithCancel(ctx)
@@ -164,15 +165,15 @@ func Start(ctx context.Context, cfg config.Config) {
 	logger.InfoComponent("gossip_connections", "Initializing gossip-connections monitor...")
 	runMonitor("gossip_connections", func() { monitors.StartGossipConnectionsMonitor(monitorCtx, cfg, gossipConnectionsErrCh) })
 
-	// rate-limiter tripwire (non-empty rate_limited_ips files per stream)
+	// retained and recent rate_limited_ips file evidence per fixed stream
 	logger.InfoComponent("rate_limited", "Initializing rate-limited-ips monitor...")
 	runMonitor("rate_limited", func() { monitors.StartRateLimitedMonitor(monitorCtx, cfg) })
 
-	// hl-node child restart/crash taxonomy from visor_child_stderr
+	// bounded retained visor_child_stderr artifact evidence
 	logger.InfoComponent("child_stderr", "Initializing child-stderr monitor...")
 	runMonitor("child_stderr", func() { monitors.StartChildStderrMonitor(monitorCtx, cfg) })
 
-	// freshness of opt-in data streams (fills, twap, misc events)
+	// availability and last-valid age of four fixed opt-in data streams
 	logger.InfoComponent("optional_streams", "Initializing optional-streams monitor...")
 	runMonitor("optional_streams", func() { monitors.StartOptionalStreamsMonitor(monitorCtx, cfg) })
 
@@ -278,6 +279,7 @@ func Start(ctx context.Context, cfg config.Config) {
 
 	// start memory monitoring
 	runMonitor("memory", func() { metrics.StartMemoryMonitoring(monitorCtx) })
+	metrics.SealMonitorRegistration()
 
 	// publish exporter build_info once and refresh the per-monitor health
 	// snapshot every 10s. Background goroutine so the values stay current

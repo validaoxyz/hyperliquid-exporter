@@ -371,18 +371,18 @@ func setOptionalMonitorTimestamp(metric *prometheus.GaugeVec, monitor string, va
 // the empty file is a "snapshot succeeded" sentinel that outlives the
 // .rmp itself.
 var (
-	HLNodeSnapshotLastHeight = promauto.NewGauge(prometheus.GaugeOpts{
+	HLNodeSnapshotLastHeight = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_node_snapshot_last_height",
 		Help: "Highest block height at which a periodic ABCI snapshot completed successfully.",
-	})
-	HLNodeSnapshotLastAgeSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+	}, []string{})
+	HLNodeSnapshotLastAgeSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_node_snapshot_last_age_seconds",
 		Help: "Seconds since the most recent successful periodic snapshot (now - mtime of newest status sentinel).",
-	})
-	HLNodeSnapshotKnown = promauto.NewGauge(prometheus.GaugeOpts{
+	}, []string{})
+	HLNodeSnapshotKnown = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_node_snapshot_sentinels_retained",
 		Help: "Number of snapshot-completion sentinels in the retained scan window of at most the two newest valid date directories; this is not cadence or capacity headroom.",
-	})
+	}, []string{})
 )
 
 // Node-state single-file gauges (from node_state_monitor.go).
@@ -594,14 +594,14 @@ var (
 
 // Filesystem-observed restart tracking (always on).
 var (
-	HLNodeObservedRunsTotal = promauto.NewGauge(prometheus.GaugeOpts{
+	HLNodeObservedRunsTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_node_observed_runs",
 		Help: "Current number of valid retained run-timestamp directories under data/replica_cmds/; pruning can decrease this gauge and it is not a lifetime counter.",
-	})
-	HLNodeObservedRunStartSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+	}, []string{})
+	HLNodeObservedRunStartSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_node_observed_run_start_seconds",
 		Help: "Unix timestamp of the newest retained hl-node run, parsed from the immutable data/replica_cmds/<run_timestamp>/ directory name.",
-	})
+	}, []string{})
 )
 
 // RocksDB LSM-tree stats (--extended-metrics).
@@ -727,18 +727,18 @@ var HLConsensusValidatorJailedLocal = promauto.NewGaugeVec(prometheus.GaugeOpts{
 // enters replay mode (recovering from a checkpoint). The count is the
 // number of replay events the filesystem still retains.
 var (
-	HLNodeReplayEventsTotal = promauto.NewGauge(prometheus.GaugeOpts{
+	HLNodeReplayEventsTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_node_replay_events",
 		Help: "Current number of valid retained replay marker directories under data/node_logs/replay/; pruning can decrease this gauge and it is not a lifetime counter.",
-	})
-	HLNodeReplayLastSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+	}, []string{})
+	HLNodeReplayLastSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_node_replay_last_seconds",
 		Help: "Immutable start timestamp of the newest retained replay marker, parsed from its <height>_<ISO timestamp> directory name.",
-	})
-	HLNodeReplayLastHeight = promauto.NewGauge(prometheus.GaugeOpts{
+	}, []string{})
+	HLNodeReplayLastHeight = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_node_replay_last_height",
 		Help: "Block height at which the most recent replay event happened (parsed from the subdir name).",
-	})
+	}, []string{})
 )
 
 // Mempool monitor — from data/node_logs/mempool/hourly/<date>/<hour>.
@@ -810,10 +810,10 @@ var (
 // firewall_ips.json) fails to load. Existence = the operator's intent
 // is NOT being applied; sustained > 0 = silent misconfiguration.
 var (
-	HLNodeOperatorConfigFailedLoads = promauto.NewGauge(prometheus.GaugeOpts{
+	HLNodeOperatorConfigFailedLoads = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_node_operator_config_failed_loads",
 		Help: "Count of *_FAILED_LOAD sidecar files in file_mod_time_tracker/. Each one is a config the operator pushed but hl-node rejected — silent misconfiguration.",
-	})
+	}, []string{})
 )
 
 // Per-step latency for the validator-only consensus + l1_task subsystems
@@ -867,8 +867,8 @@ var (
 // heartbeat_jailing_config.json (validator-only file): registering at init
 // would export threshold=0 on every other node, which reads as "jail at 0s".
 var (
-	HLNodeJailingThresholdSeconds prometheus.Gauge
-	HLNodeJailingDryRun           prometheus.Gauge
+	HLNodeJailingThresholdSeconds *prometheus.GaugeVec
+	HLNodeJailingDryRun           *prometheus.GaugeVec
 
 	jailingInstrumentsOnce sync.Once
 )
@@ -876,14 +876,14 @@ var (
 // InitJailingConfigInstruments registers the jailing-config pair; see above.
 func InitJailingConfigInstruments() {
 	jailingInstrumentsOnce.Do(func() {
-		HLNodeJailingThresholdSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+		HLNodeJailingThresholdSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "hl_node_jailing_threshold_seconds",
 			Help: "latency_ema_jail_threshold from heartbeat_jailing_config.json: the heartbeat-ack EMA above which this node votes to jail a peer. Compare against hl_consensus_validator_latency_ema_seconds for per-peer headroom.",
-		})
-		HLNodeJailingDryRun = promauto.NewGauge(prometheus.GaugeOpts{
+		}, []string{})
+		HLNodeJailingDryRun = promauto.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "hl_node_jailing_dry_run",
 			Help: "1 if heartbeat_jailing_config.json has dry_run=true (jail decisions are logged, not enforced), 0 if enforcement is live.",
-		})
+		}, []string{})
 	})
 }
 

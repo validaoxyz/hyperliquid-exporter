@@ -35,6 +35,7 @@ type ValidatorCache struct {
 	signerToValidator map[string]string            // lowercase signer -> lowercase validator
 	validatorInfo     map[string]*ValidatorSummary // lowercase validator -> summary
 	lastUpdate        time.Time
+	hasSnapshot       bool
 }
 
 // validator info from API
@@ -191,12 +192,13 @@ func (r *Resolver) GetValidatorSummaries(ctx context.Context, forceRefresh bool)
 	r.mu.RLock()
 	lastSuccess := r.validatorCache.lastUpdate
 	cachedSummaries := cloneValidatorSummaries(r.validatorCache.summaries)
+	hasCachedSnapshot := r.validatorCache.hasSnapshot
 	validate := r.validateValidatorSummaries
 	r.mu.RUnlock()
 
 	// use cache if fresh (< 1 minute age) and not forcing refresh
 	cacheAge := r.now().Sub(lastSuccess)
-	if !forceRefresh && cacheAge < validatorCacheTTL && len(cachedSummaries) > 0 {
+	if !forceRefresh && hasCachedSnapshot && cacheAge < validatorCacheTTL {
 		logger.DebugComponent("consensus-api", "Using cached validator summaries (age: %v)", cacheAge)
 		return ValidatorSummariesResult{
 			Summaries:   cachedSummaries,
@@ -217,7 +219,7 @@ func (r *Resolver) GetValidatorSummaries(ctx context.Context, forceRefresh bool)
 	}
 	if err != nil {
 		// if we have cached data and the fetch failed, return cached data
-		if len(cachedSummaries) > 0 {
+		if hasCachedSnapshot {
 			logger.WarningComponent("consensus-api", "Failed to fetch validator summaries, using stale cache: %v", err)
 			return ValidatorSummariesResult{
 				Summaries:    cachedSummaries,
@@ -334,6 +336,7 @@ func (r *Resolver) updateValidatorCache(summaries []ValidatorSummary) time.Time 
 
 	r.validatorCache.summaries = cached
 	r.validatorCache.lastUpdate = r.now()
+	r.validatorCache.hasSnapshot = true
 	return r.validatorCache.lastUpdate
 }
 

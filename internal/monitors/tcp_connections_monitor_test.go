@@ -5,6 +5,7 @@ package monitors
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -232,6 +233,59 @@ func TestTCPConnectionsCombinedSnapshotAndAliasRollback(t *testing.T) {
 	}
 	if got := hostMetricValue(t, metrics.HLP2PTCPSocketSourceUp.WithLabelValues("tcp6")); got != 0 {
 		t.Fatalf("failed tcp6 source_up=%v, want 0", got)
+	}
+}
+
+func TestTCPConnectionsTornFinalRowRollsBackUntilCommitted(t *testing.T) {
+	dir := t.TempDir()
+	tcp4 := filepath.Join(dir, "tcp")
+	tcp6 := filepath.Join(dir, "tcp6")
+	header := "sl local_address rem_address st rest\n"
+	row4 := "0: 0100007F:0FA1 0200007F:C350 01 rest\n"
+	row6 := "0: 00000000000000000000000000000000:C350 00000000000000000000000000000001:0FA1 01 rest\n"
+	if err := os.WriteFile(tcp4, []byte(header+row4), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tcp6, []byte(header+row6), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	originalSources := procTCPSources
+	procTCPSources = []struct {
+		label string
+		path  string
+	}{{label: "tcp4", path: tcp4}, {label: "tcp6", path: tcp6}}
+	defer func() { procTCPSources = originalSources }()
+	metrics.HLP2PTCPSocketConnections.Reset()
+	metrics.HLP2PTCPConnections.Reset()
+	tickTCPConnections([]uint16{4001}, true)
+	remote := metrics.HLP2PTCPSocketConnections.WithLabelValues("4001", "remote", "ESTABLISHED")
+	if got := hostMetricValue(t, remote); got != 1 {
+		t.Fatalf("initial remote rows=%v, want 1", got)
+	}
+
+	metrics.HLP2PTCPSocketLastSuccessTimestampSeconds.Set(42)
+	if err := os.WriteFile(tcp6, []byte(header+strings.TrimSuffix(row6, "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tickTCPConnections([]uint16{4001}, true)
+	if got := hostMetricValue(t, remote); got != 1 {
+		t.Fatalf("torn final row replaced prior snapshot: %v", got)
+	}
+	if got := hostMetricValue(t, metrics.HLP2PTCPSocketLastSuccessTimestampSeconds); got != 42 {
+		t.Fatalf("torn final row advanced last success: %v", got)
+	}
+	if got := hostMetricValue(t, metrics.HLP2PTCPSocketSourceUp.WithLabelValues("tcp6")); got != 0 {
+		t.Fatalf("torn TCP6 source_up=%v, want 0", got)
+	}
+
+	appendTestFile(t, tcp6, "\n")
+	tickTCPConnections([]uint16{4001}, true)
+	if got := hostMetricValue(t, metrics.HLP2PTCPSocketSourceUp.WithLabelValues("tcp6")); got != 1 {
+		t.Fatalf("committed TCP6 source_up=%v, want 1", got)
+	}
+	if got := hostMetricValue(t, metrics.HLP2PTCPSocketLastSuccessTimestampSeconds); got == 42 {
+		t.Fatal("committed row did not advance last success")
 	}
 }
 

@@ -125,61 +125,74 @@ func tickDiskWith(nodeHome string, stat diskStatfsFunc, walk diskWalkFunc, now f
 	// walk later fails or is slow, the operator still gets free/total.
 	filesystem, statErr := stat(nodeHome)
 	if statErr == nil && filesystem != nil {
-		metrics.HLNodeDiskFreeBytes.Set(float64(filesystem.Bavail) * float64(filesystem.Bsize))
-		metrics.HLNodeDiskTotalBytes.Set(float64(filesystem.Blocks) * float64(filesystem.Bsize))
-		metrics.HLNodeDiskStatfsUp.Set(1)
+		metrics.WithPrometheusSnapshotUpdate(func() {
+			metrics.HLNodeDiskFreeBytes.Set(float64(filesystem.Bavail) * float64(filesystem.Bsize))
+			metrics.HLNodeDiskTotalBytes.Set(float64(filesystem.Blocks) * float64(filesystem.Bsize))
+			metrics.HLNodeDiskStatfsUp.Set(1)
+		})
 	} else {
 		if statErr == nil {
 			statErr = errors.New("statfs returned no filesystem data")
 		}
-		metrics.HLNodeDiskStatfsUp.Set(0)
-		metrics.HLNodeDiskErrorsTotal.WithLabelValues("statfs").Inc()
+		metrics.WithPrometheusSnapshotUpdate(func() {
+			metrics.HLNodeDiskStatfsUp.Set(0)
+			metrics.HLNodeDiskErrorsTotal.WithLabelValues("statfs").Inc()
+		})
 		logger.DebugComponent("disk", "statfs failed: %v", statErr)
 	}
 
 	snapshot, err := walk(nodeHome, trackedSubdirs)
 	if err != nil {
-		metrics.HLNodeDiskWalkUp.Set(0)
-		metrics.HLNodeDiskErrorsTotal.WithLabelValues("walk").Inc()
-		if errors.Is(err, fs.ErrNotExist) {
-			metrics.MarkSourceAbsent(metrics.SourceDisk)
-		} else {
-			metrics.MarkSourceError(metrics.SourceDisk, metrics.SourceFailureWalk)
-		}
+		var age *float64
 		if last := diskLastCompleteUnix.Load(); last > 0 {
-			age := now().Unix() - last
-			if age < 0 {
-				age = 0
+			value := now().Unix() - last
+			if value < 0 {
+				value = 0
 			}
-			metrics.HLNodeDiskLastCompleteAgeSeconds.Set(float64(age))
+			valueFloat := float64(value)
+			age = &valueFloat
 		}
+		metrics.WithPrometheusSnapshotUpdate(func() {
+			metrics.HLNodeDiskWalkUp.Set(0)
+			metrics.HLNodeDiskErrorsTotal.WithLabelValues("walk").Inc()
+			if errors.Is(err, fs.ErrNotExist) {
+				metrics.MarkSourceAbsent(metrics.SourceDisk)
+			} else {
+				metrics.MarkSourceError(metrics.SourceDisk, metrics.SourceFailureWalk)
+			}
+			if age != nil {
+				metrics.HLNodeDiskLastCompleteAgeSeconds.Set(*age)
+			}
+		})
 		logger.DebugComponent("disk", "NODE_HOME walk incomplete; retaining last complete snapshot: %v", err)
 		return false
 	}
 
-	metrics.HLNodeDiskUsedBytes.Set(float64(snapshot.apparentTotal))
-	metrics.HLNodeDiskAllocatedBytes.Set(float64(snapshot.allocatedTotal))
-
-	for _, sub := range trackedSubdirs {
-		metrics.HLNodeDiskSubdirBytes.WithLabelValues(sub).Set(float64(snapshot.apparentByPath[sub]))
-		metrics.HLNodeDiskSubdirAllocatedBytes.WithLabelValues(sub).Set(float64(snapshot.allocatedByPath[sub]))
-		for _, state := range diskPathStates {
-			value := 0.0
-			if snapshot.pathState[sub] == state {
-				value = 1
-			}
-			metrics.HLNodeDiskPathState.WithLabelValues(sub, state).Set(value)
-		}
-	}
 	completedAt := now().Unix()
-	diskLastCompleteUnix.Store(completedAt)
-	metrics.HLNodeDiskWalkUp.Set(1)
-	metrics.HLNodeDiskLastCompleteTimestampSeconds.Set(float64(completedAt))
-	metrics.HLNodeDiskLastCompleteAgeSeconds.Set(0)
-	metrics.MarkSourceValidObservation(metrics.SourceDisk, time.Time{})
-	metrics.MarkSourcePublication(metrics.SourceDisk)
-	metrics.MarkMonitorValidObservation("disk")
-	metrics.MarkMonitorPublication("disk")
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		metrics.HLNodeDiskUsedBytes.Set(float64(snapshot.apparentTotal))
+		metrics.HLNodeDiskAllocatedBytes.Set(float64(snapshot.allocatedTotal))
+
+		for _, sub := range trackedSubdirs {
+			metrics.HLNodeDiskSubdirBytes.WithLabelValues(sub).Set(float64(snapshot.apparentByPath[sub]))
+			metrics.HLNodeDiskSubdirAllocatedBytes.WithLabelValues(sub).Set(float64(snapshot.allocatedByPath[sub]))
+			for _, state := range diskPathStates {
+				value := 0.0
+				if snapshot.pathState[sub] == state {
+					value = 1
+				}
+				metrics.HLNodeDiskPathState.WithLabelValues(sub, state).Set(value)
+			}
+		}
+		diskLastCompleteUnix.Store(completedAt)
+		metrics.HLNodeDiskWalkUp.Set(1)
+		metrics.HLNodeDiskLastCompleteTimestampSeconds.Set(float64(completedAt))
+		metrics.HLNodeDiskLastCompleteAgeSeconds.Set(0)
+		metrics.MarkSourceValidObservation(metrics.SourceDisk, time.Time{})
+		metrics.MarkSourcePublication(metrics.SourceDisk)
+		metrics.MarkMonitorValidObservation("disk")
+		metrics.MarkMonitorPublication("disk")
+	})
 	return true
 }
 

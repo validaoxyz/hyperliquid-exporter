@@ -11,6 +11,7 @@ func resetHealthStateForTest(t *testing.T) {
 	t.Helper()
 	monitorsMu.Lock()
 	monitors = map[string]*monitorState{}
+	monitorRegistrationSealed = false
 	monitorsMu.Unlock()
 	sourcesMu.Lock()
 	sources = newSourceStateMap()
@@ -28,6 +29,7 @@ func TestMonitorLifecycleSeparatesLaunchWorkAndProgress(t *testing.T) {
 	state := getOrCreate("test")
 	markMonitorStartedAt(state, 10)
 	markMonitorStartedAt(state, 11)
+	SealMonitorRegistration()
 	if !Ready() {
 		t.Fatal("launch readiness should not wait for a data observation")
 	}
@@ -67,6 +69,51 @@ func TestMonitorLifecycleSeparatesLaunchWorkAndProgress(t *testing.T) {
 	MarkMonitorStopped("test")
 	if got := snapshotMonitors()[0].Workers; got != 0 {
 		t.Fatalf("workers underflowed to %d", got)
+	}
+}
+
+func TestRegisterMonitorPromotesPreexistingLifecycleState(t *testing.T) {
+	resetHealthStateForTest(t)
+
+	// A real attempt can race ahead of exporter registration during startup.
+	// RegisterMonitor must promote that existing row rather than leave it
+	// invisible to readiness.
+	MarkMonitorAttempt("test")
+	RegisterMonitor("test")
+	SealMonitorRegistration()
+	if Ready() {
+		t.Fatal("registered but unstarted monitor must not be ready")
+	}
+
+	MarkMonitorStarted("test")
+	if !Ready() {
+		t.Fatal("registered monitor should become ready after its worker starts")
+	}
+	got := snapshotMonitors()[0]
+	if !got.Registered || got.LastAttemptUnix == 0 {
+		t.Fatalf("promoted state = registered:%v attempt:%d", got.Registered, got.LastAttemptUnix)
+	}
+}
+
+func TestReadyWaitsForCompleteConfiguredMonitorCensus(t *testing.T) {
+	resetHealthStateForTest(t)
+	BeginMonitorRegistration()
+
+	RegisterMonitor("a")
+	MarkMonitorStarted("a")
+	if Ready() {
+		t.Fatal("partial monitor census became ready before registration sealed")
+	}
+
+	RegisterMonitor("b")
+	SealMonitorRegistration()
+	if Ready() {
+		t.Fatal("sealed census with unstarted monitor became ready")
+	}
+
+	MarkMonitorStarted("b")
+	if !Ready() {
+		t.Fatal("complete sealed census did not become ready after all monitors started")
 	}
 }
 
@@ -124,6 +171,24 @@ func TestSourceStateKeepsReceiptFreshnessSeparateFromSourceTime(t *testing.T) {
 	}
 	if got.LastValidUnix != observedAt.Unix() {
 		t.Fatal("absence erased the last-good receipt timestamp")
+	}
+}
+
+func TestSourceWithdrawalAdvancesPublicationWithoutValidObservation(t *testing.T) {
+	resetHealthStateForTest(t)
+	RegisterSource(SourceReplay, true)
+
+	markSourceValidObservationAt(SourceReplay, time.Time{}, time.Unix(100, 0))
+	markSourcePublicationAt(SourceReplay, 100)
+	markSourceAbsentAt(SourceReplay, 200)
+	markSourcePublicationAt(SourceReplay, 200)
+
+	got := snapshotSources()[0]
+	if got.LastAttemptUnix != 200 || got.LastValidUnix != 100 || got.LastPublicationUnix != 200 {
+		t.Fatalf("withdrawal clocks = attempt:%d valid:%d publication:%d", got.LastAttemptUnix, got.LastValidUnix, got.LastPublicationUnix)
+	}
+	if got.Present != 0 || got.ReadOK != sourceStateUnknown || got.SchemaOK != sourceStateUnknown {
+		t.Fatalf("withdrawal state = present:%d read:%d schema:%d", got.Present, got.ReadOK, got.SchemaOK)
 	}
 }
 

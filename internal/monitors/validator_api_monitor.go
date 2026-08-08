@@ -64,56 +64,72 @@ func updateValidatorMetrics(ctx context.Context, cfg config.Config) error {
 	// use resolver to get val summaries
 	result, err := hlResolver.GetValidatorSummaries(ctx, false)
 	if err != nil {
-		metrics.HLValidatorAPIUp.Set(0)
-		metrics.HLValidatorAPICacheStale.Set(0)
-		metrics.HLValidatorAPIOutcomesTotal.WithLabelValues(metrics.ValidatorAPIOutcomeError).Inc()
-		metrics.MarkSourceError(metrics.SourceValidatorAPI, validatorAPIFailureStage(err))
+		metrics.WithPrometheusSnapshotUpdate(func() {
+			metrics.HLValidatorAPIUp.Set(0)
+			metrics.HLValidatorAPICacheStale.Set(0)
+			metrics.HLValidatorAPIOutcomesTotal.WithLabelValues(metrics.ValidatorAPIOutcomeError).Inc()
+			metrics.MarkSourceError(metrics.SourceValidatorAPI, validatorAPIFailureStage(err))
+		})
 		return err
 	}
 	if result.Stale {
-		updateValidatorAPICacheAge(result.LastSuccess)
-		metrics.HLValidatorAPIUp.Set(0)
-		metrics.HLValidatorAPICacheStale.Set(1)
-		metrics.HLValidatorAPIOutcomesTotal.WithLabelValues(metrics.ValidatorAPIOutcomeStaleFallback).Inc()
-		metrics.MarkSourceError(metrics.SourceValidatorAPI, validatorAPIFailureStage(result.RefreshError))
+		metrics.WithPrometheusSnapshotUpdate(func() {
+			updateValidatorAPICacheAge(result.LastSuccess)
+			metrics.HLValidatorAPIUp.Set(0)
+			metrics.HLValidatorAPICacheStale.Set(1)
+			metrics.HLValidatorAPIOutcomesTotal.WithLabelValues(metrics.ValidatorAPIOutcomeStaleFallback).Inc()
+			metrics.MarkSourceError(metrics.SourceValidatorAPI, validatorAPIFailureStage(result.RefreshError))
+		})
 		return fmt.Errorf("validator API refresh failed; retained stale cache from %s: %w",
 			result.LastSuccess.Format(time.RFC3339), result.RefreshError)
 	}
-	metrics.HLValidatorAPICacheStale.Set(0)
 
 	snapshot, err := validateValidatorSummaries(result.Summaries)
 	if err != nil {
-		metrics.HLValidatorAPIUp.Set(0)
-		metrics.HLValidatorAPIOutcomesTotal.WithLabelValues(metrics.ValidatorAPIOutcomeError).Inc()
-		metrics.MarkSourceError(metrics.SourceValidatorAPI, metrics.SourceFailureSchema)
+		metrics.WithPrometheusSnapshotUpdate(func() {
+			metrics.HLValidatorAPICacheStale.Set(0)
+			metrics.HLValidatorAPIUp.Set(0)
+			metrics.HLValidatorAPIOutcomesTotal.WithLabelValues(metrics.ValidatorAPIOutcomeError).Inc()
+			metrics.MarkSourceError(metrics.SourceValidatorAPI, metrics.SourceFailureSchema)
+		})
 		return err
 	}
-	updateValidatorAPICacheAge(result.LastSuccess)
 	if result.FromCache {
-		metrics.HLValidatorAPIOutcomesTotal.WithLabelValues(metrics.ValidatorAPIOutcomeFreshCache).Inc()
+		metrics.WithPrometheusSnapshotUpdate(func() {
+			metrics.HLValidatorAPICacheStale.Set(0)
+			updateValidatorAPICacheAge(result.LastSuccess)
+			metrics.HLValidatorAPIOutcomesTotal.WithLabelValues(metrics.ValidatorAPIOutcomeFreshCache).Inc()
+		})
 		return nil
 	}
-	metrics.HLValidatorAPIUp.Set(1)
-	metrics.HLValidatorAPIOutcomesTotal.WithLabelValues(metrics.ValidatorAPIOutcomeRefreshSuccess).Inc()
-	if !result.LastSuccess.IsZero() {
-		metrics.HLValidatorAPILastSuccessSeconds.Set(float64(result.LastSuccess.Unix()))
-	}
-
-	for _, summary := range result.Summaries {
-		metrics.RegisterFullAddress(strings.ToLower(summary.Validator))
-		metrics.RegisterFullAddress(strings.ToLower(summary.Signer))
-	}
-	// The registry, row gauges, and all row-derived aggregates commit as one
-	// generation under the metrics lock. Register full identities first so
-	// truncated vote/QC observations can reconcile in this same generation.
-	metrics.ReplaceValidatorSnapshot(snapshot)
-	reconcileValidatorExtras(result.Summaries)
-	metrics.MarkSourceValidObservation(metrics.SourceValidatorAPI, time.Time{})
-	metrics.MarkSourcePublication(metrics.SourceValidatorAPI)
-
-	metrics.MarkMonitorValidObservation("validator_api")
-	metrics.MarkMonitorPublication("validator_api")
+	commitValidatorAPISnapshot(result.Summaries, snapshot, result.LastSuccess)
 	return nil
+}
+
+func commitValidatorAPISnapshot(summaries []hyperliquidapi.ValidatorSummary, snapshot []metrics.ValidatorSummarySnapshot, lastSuccess time.Time) {
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		metrics.HLValidatorAPICacheStale.Set(0)
+		updateValidatorAPICacheAge(lastSuccess)
+		metrics.HLValidatorAPIUp.Set(1)
+		metrics.HLValidatorAPIOutcomesTotal.WithLabelValues(metrics.ValidatorAPIOutcomeRefreshSuccess).Inc()
+		if !lastSuccess.IsZero() {
+			metrics.HLValidatorAPILastSuccessSeconds.Set(float64(lastSuccess.Unix()))
+		}
+
+		for _, summary := range summaries {
+			metrics.RegisterFullAddress(strings.ToLower(summary.Validator))
+			metrics.RegisterFullAddress(strings.ToLower(summary.Signer))
+		}
+		// The registry, row gauges, and all row-derived aggregates commit as one
+		// generation. Register full identities first so truncated vote/QC
+		// observations can reconcile in this same generation.
+		metrics.ReplaceValidatorSnapshot(snapshot)
+		reconcileValidatorExtras(summaries)
+		metrics.MarkSourceValidObservation(metrics.SourceValidatorAPI, time.Time{})
+		metrics.MarkSourcePublication(metrics.SourceValidatorAPI)
+		metrics.MarkMonitorValidObservation("validator_api")
+		metrics.MarkMonitorPublication("validator_api")
+	})
 }
 
 func updateValidatorAPICacheAge(lastSuccess time.Time) {

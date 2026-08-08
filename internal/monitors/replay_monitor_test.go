@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
 func TestScanReplayUsesEncodedStartAndSeparatesActivity(t *testing.T) {
@@ -59,5 +62,57 @@ func TestScanReplayPruningAndInvalidEntry(t *testing.T) {
 	got, err = scanReplay(root)
 	if err != nil || got != (replaySnapshot{}) {
 		t.Fatalf("empty retained window = %+v, %v", got, err)
+	}
+}
+
+func TestReplayTickWithdrawsAbsentAndPublishesValidEmpty(t *testing.T) {
+	metrics.RegisterSource(metrics.SourceReplay, true)
+	parent := t.TempDir()
+	root := filepath.Join(parent, "replay")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "643440100_2026-08-07T09:11:57Z"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !tickReplay(root) {
+		t.Fatal("valid nonempty replay root was rejected")
+	}
+
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+	if tickReplay(root) {
+		t.Fatal("absent replay root was reported valid")
+	}
+	for name, collector := range map[string]prometheus.Collector{
+		"count":    metrics.HLNodeReplayEventsTotal,
+		"start":    metrics.HLNodeReplayLastSeconds,
+		"height":   metrics.HLNodeReplayLastHeight,
+		"activity": metrics.HLNodeReplayLastActivitySeconds,
+	} {
+		if rows := b03CollectorRows(t, collector); len(rows) != 0 {
+			t.Fatalf("absent root retained %s rows: %d", name, len(rows))
+		}
+	}
+
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !tickReplay(root) {
+		t.Fatal("valid empty replay root was rejected")
+	}
+	for name, gauge := range map[string]*prometheus.GaugeVec{
+		"count":    metrics.HLNodeReplayEventsTotal,
+		"start":    metrics.HLNodeReplayLastSeconds,
+		"height":   metrics.HLNodeReplayLastHeight,
+		"activity": metrics.HLNodeReplayLastActivitySeconds,
+	} {
+		if rows := b03CollectorRows(t, gauge); len(rows) != 1 {
+			t.Fatalf("empty root %s rows=%d, want 1", name, len(rows))
+		}
+		if got := hostMetricValue(t, gauge.WithLabelValues()); got != 0 {
+			t.Fatalf("empty root %s=%v, want explicit zero", name, got)
+		}
 	}
 }

@@ -54,31 +54,47 @@ func tickReplay(root string) bool {
 	snapshot, err := scanReplay(root)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			metrics.MarkSourceAbsent(metrics.SourceReplay)
-			metrics.HLNodeReplayEventsTotal.Set(0)
-			metrics.HLNodeReplayLastSeconds.Set(0)
-			metrics.HLNodeReplayLastHeight.Set(0)
-			metrics.HLNodeReplayLastActivitySeconds.Set(0)
+			withdrawReplaySnapshot()
 			return false
 		}
 		stage := metrics.SourceFailureRead
 		if errors.Is(err, errInvalidReplayEntry) {
 			stage = metrics.SourceFailureSchema
 		}
-		metrics.MarkSourceError(metrics.SourceReplay, stage)
-		metrics.IncMonitorError("replay")
+		metrics.WithPrometheusSnapshotUpdate(func() {
+			metrics.MarkSourceError(metrics.SourceReplay, stage)
+			metrics.IncMonitorError("replay")
+		})
 		return false
 	}
 
-	metrics.HLNodeReplayEventsTotal.Set(float64(snapshot.Retained))
-	metrics.HLNodeReplayLastSeconds.Set(optionalUnix(snapshot.LatestStart))
-	metrics.HLNodeReplayLastHeight.Set(float64(snapshot.LatestHeight))
-	metrics.HLNodeReplayLastActivitySeconds.Set(optionalUnix(snapshot.LatestActivity))
-	metrics.MarkSourceValidObservation(metrics.SourceReplay, snapshot.LatestStart)
-	metrics.MarkSourcePublication(metrics.SourceReplay)
-	metrics.MarkMonitorValidObservation("replay")
-	metrics.MarkMonitorPublication("replay")
+	commitReplaySnapshot(snapshot)
 	return true
+}
+
+func withdrawReplaySnapshot() {
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		metrics.HLNodeReplayEventsTotal.DeleteLabelValues()
+		metrics.HLNodeReplayLastSeconds.DeleteLabelValues()
+		metrics.HLNodeReplayLastHeight.DeleteLabelValues()
+		metrics.HLNodeReplayLastActivitySeconds.DeleteLabelValues()
+		metrics.MarkSourceAbsent(metrics.SourceReplay)
+		metrics.MarkSourcePublication(metrics.SourceReplay)
+		metrics.MarkMonitorPublication("replay")
+	})
+}
+
+func commitReplaySnapshot(snapshot replaySnapshot) {
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		metrics.HLNodeReplayEventsTotal.WithLabelValues().Set(float64(snapshot.Retained))
+		metrics.HLNodeReplayLastSeconds.WithLabelValues().Set(optionalUnix(snapshot.LatestStart))
+		metrics.HLNodeReplayLastHeight.WithLabelValues().Set(float64(snapshot.LatestHeight))
+		metrics.HLNodeReplayLastActivitySeconds.WithLabelValues().Set(optionalUnix(snapshot.LatestActivity))
+		metrics.MarkSourceValidObservation(metrics.SourceReplay, snapshot.LatestStart)
+		metrics.MarkSourcePublication(metrics.SourceReplay)
+		metrics.MarkMonitorValidObservation("replay")
+		metrics.MarkMonitorPublication("replay")
+	})
 }
 
 func scanReplay(root string) (replaySnapshot, error) {

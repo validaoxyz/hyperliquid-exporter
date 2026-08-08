@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
 func TestScanReplicaRunsUsesNameForStartAndMtimeForActivity(t *testing.T) {
@@ -71,6 +74,56 @@ func TestScanReplicaRunsEmptyRootIsValid(t *testing.T) {
 	}
 	if got != (replicaRunsSnapshot{}) {
 		t.Fatalf("snapshot = %+v", got)
+	}
+}
+
+func TestReplicaRunsTickWithdrawsAbsentAndPublishesValidEmpty(t *testing.T) {
+	metrics.RegisterSource(metrics.SourceReplicaRuns, true)
+	parent := t.TempDir()
+	root := filepath.Join(parent, "replica_cmds")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "2026-05-25T11:13:57Z"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !tickReplicaRuns(root) {
+		t.Fatal("valid nonempty replica-runs root was rejected")
+	}
+
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+	if tickReplicaRuns(root) {
+		t.Fatal("absent replica-runs root was reported valid")
+	}
+	for name, collector := range map[string]prometheus.Collector{
+		"count":    metrics.HLNodeObservedRunsTotal,
+		"start":    metrics.HLNodeObservedRunStartSeconds,
+		"activity": metrics.HLNodeObservedRunLastActivitySeconds,
+	} {
+		if rows := b03CollectorRows(t, collector); len(rows) != 0 {
+			t.Fatalf("absent root retained %s rows: %d", name, len(rows))
+		}
+	}
+
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !tickReplicaRuns(root) {
+		t.Fatal("valid empty replica-runs root was rejected")
+	}
+	for name, gauge := range map[string]*prometheus.GaugeVec{
+		"count":    metrics.HLNodeObservedRunsTotal,
+		"start":    metrics.HLNodeObservedRunStartSeconds,
+		"activity": metrics.HLNodeObservedRunLastActivitySeconds,
+	} {
+		if rows := b03CollectorRows(t, gauge); len(rows) != 1 {
+			t.Fatalf("empty root %s rows=%d, want 1", name, len(rows))
+		}
+		if got := hostMetricValue(t, gauge.WithLabelValues()); got != 0 {
+			t.Fatalf("empty root %s=%v, want explicit zero", name, got)
+		}
 	}
 }
 

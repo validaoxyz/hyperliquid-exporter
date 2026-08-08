@@ -55,37 +55,53 @@ func tickSnapshotStatus(root string) bool {
 	snapshot, err := scanSnapshotStatus(root)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			metrics.MarkSourceAbsent(metrics.SourceSnapshotStatus)
-			metrics.HLNodeSnapshotKnown.Set(0)
-			metrics.HLNodeSnapshotLastHeight.Set(0)
-			metrics.HLNodeSnapshotLastAgeSeconds.Set(0)
-			metrics.HLNodeSnapshotHeightLagAvailable.Set(0)
-			metrics.HLNodeSnapshotHeightLagBlocks.DeleteLabelValues()
+			withdrawSnapshotStatus()
 			return false
 		}
 		stage := metrics.SourceFailureRead
 		if errors.Is(err, errInvalidSnapshotStatusEntry) {
 			stage = metrics.SourceFailureSchema
 		}
-		metrics.MarkSourceError(metrics.SourceSnapshotStatus, stage)
-		metrics.IncMonitorError("snapshot_status")
+		metrics.WithPrometheusSnapshotUpdate(func() {
+			metrics.MarkSourceError(metrics.SourceSnapshotStatus, stage)
+			metrics.IncMonitorError("snapshot_status")
+		})
 		return false
 	}
 
-	publishSnapshotStatus(snapshot, time.Now(), latestVisorHeight())
-	metrics.MarkSourceValidObservation(metrics.SourceSnapshotStatus, snapshot.LatestComplete)
-	metrics.MarkSourcePublication(metrics.SourceSnapshotStatus)
-	metrics.MarkMonitorValidObservation("snapshot_status")
-	metrics.MarkMonitorPublication("snapshot_status")
+	commitSnapshotStatus(snapshot, time.Now(), latestVisorHeight())
 	return true
 }
 
-func publishSnapshotStatus(snapshot snapshotStatusSnapshot, now time.Time, currentHeight int64) {
-	metrics.HLNodeSnapshotKnown.Set(float64(snapshot.Known))
-	metrics.HLNodeSnapshotLastHeight.Set(float64(snapshot.LatestHeight))
+func withdrawSnapshotStatus() {
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		metrics.HLNodeSnapshotKnown.DeleteLabelValues()
+		metrics.HLNodeSnapshotLastHeight.DeleteLabelValues()
+		metrics.HLNodeSnapshotLastAgeSeconds.DeleteLabelValues()
+		metrics.HLNodeSnapshotHeightLagAvailable.DeleteLabelValues()
+		metrics.HLNodeSnapshotHeightLagBlocks.DeleteLabelValues()
+		metrics.MarkSourceAbsent(metrics.SourceSnapshotStatus)
+		metrics.MarkSourcePublication(metrics.SourceSnapshotStatus)
+		metrics.MarkMonitorPublication("snapshot_status")
+	})
+}
+
+func commitSnapshotStatus(snapshot snapshotStatusSnapshot, now time.Time, currentHeight int64) {
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		publishSnapshotStatusValues(snapshot, now, currentHeight)
+		metrics.MarkSourceValidObservation(metrics.SourceSnapshotStatus, snapshot.LatestComplete)
+		metrics.MarkSourcePublication(metrics.SourceSnapshotStatus)
+		metrics.MarkMonitorValidObservation("snapshot_status")
+		metrics.MarkMonitorPublication("snapshot_status")
+	})
+}
+
+func publishSnapshotStatusValues(snapshot snapshotStatusSnapshot, now time.Time, currentHeight int64) {
+	metrics.HLNodeSnapshotKnown.WithLabelValues().Set(float64(snapshot.Known))
+	metrics.HLNodeSnapshotLastHeight.WithLabelValues().Set(float64(snapshot.LatestHeight))
 	if snapshot.LatestComplete.IsZero() {
-		metrics.HLNodeSnapshotLastAgeSeconds.Set(0)
-		metrics.HLNodeSnapshotHeightLagAvailable.Set(0)
+		metrics.HLNodeSnapshotLastAgeSeconds.WithLabelValues().Set(0)
+		metrics.HLNodeSnapshotHeightLagAvailable.WithLabelValues().Set(0)
 		metrics.HLNodeSnapshotHeightLagBlocks.DeleteLabelValues()
 		return
 	}
@@ -93,14 +109,14 @@ func publishSnapshotStatus(snapshot snapshotStatusSnapshot, now time.Time, curre
 	if age < 0 {
 		age = 0
 	}
-	metrics.HLNodeSnapshotLastAgeSeconds.Set(age)
+	metrics.HLNodeSnapshotLastAgeSeconds.WithLabelValues().Set(age)
 	if currentHeight >= snapshot.LatestHeight && snapshot.LatestHeight > 0 {
 		metrics.HLNodeSnapshotHeightLagBlocks.WithLabelValues().Set(float64(currentHeight - snapshot.LatestHeight))
-		metrics.HLNodeSnapshotHeightLagAvailable.Set(1)
+		metrics.HLNodeSnapshotHeightLagAvailable.WithLabelValues().Set(1)
 		return
 	}
 	metrics.HLNodeSnapshotHeightLagBlocks.DeleteLabelValues()
-	metrics.HLNodeSnapshotHeightLagAvailable.Set(0)
+	metrics.HLNodeSnapshotHeightLagAvailable.WithLabelValues().Set(0)
 }
 
 func scanSnapshotStatus(root string) (snapshotStatusSnapshot, error) {

@@ -28,18 +28,39 @@ type monitorState struct {
 }
 
 var (
-	monitorsMu sync.RWMutex
-	monitors   = map[string]*monitorState{}
+	monitorsMu                sync.RWMutex
+	monitors                  = map[string]*monitorState{}
+	monitorRegistrationSealed bool
 )
+
+// BeginMonitorRegistration closes readiness while the exporter declares and
+// launches its configured monitor set. Metrics HTTP may already be listening
+// at this point, so readiness must not infer completeness from a partial map.
+func BeginMonitorRegistration() {
+	monitorsMu.Lock()
+	monitorRegistrationSealed = false
+	monitorsMu.Unlock()
+}
 
 // RegisterMonitor declares that a monitor exists. Required so the readyz
 // endpoint knows the full set of monitors it is waiting on.
 func RegisterMonitor(name string) {
 	monitorsMu.Lock()
 	defer monitorsMu.Unlock()
-	if _, ok := monitors[name]; !ok {
-		monitors[name] = &monitorState{registered: true}
+	if state, ok := monitors[name]; ok {
+		state.registered = true
+		return
 	}
+	monitors[name] = &monitorState{registered: true}
+}
+
+// SealMonitorRegistration marks the configured monitor census complete.
+// Ready remains false until every registered monitor has started at least
+// once; monitors that start before the seal retain that started state.
+func SealMonitorRegistration() {
+	monitorsMu.Lock()
+	monitorRegistrationSealed = true
+	monitorsMu.Unlock()
 }
 
 // MarkMonitorStarted records one active worker for a monitor. A logical
@@ -173,7 +194,7 @@ func getOrCreate(name string) *monitorState {
 func Ready() bool {
 	monitorsMu.RLock()
 	defer monitorsMu.RUnlock()
-	if len(monitors) == 0 {
+	if !monitorRegistrationSealed || len(monitors) == 0 {
 		return false
 	}
 	for _, state := range monitors {

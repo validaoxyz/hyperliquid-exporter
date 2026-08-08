@@ -250,13 +250,17 @@ func markSourceAttemptAt(id SourceID, now int64) bool {
 // MarkSourceAbsent records a confirmed absence. It does not erase the last
 // valid receipt/publication timestamps; those remain useful outage context.
 func MarkSourceAbsent(id SourceID) bool {
+	return markSourceAbsentAt(id, time.Now().Unix())
+}
+
+func markSourceAbsentAt(id SourceID, now int64) bool {
 	state := getSource(id)
 	if state == nil {
 		return false
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	atomic.StoreInt64(&state.lastAttemptUnix, time.Now().Unix())
+	atomic.StoreInt64(&state.lastAttemptUnix, now)
 	atomic.StoreInt64(&state.present, 0)
 	atomic.StoreInt64(&state.readOK, sourceStateUnknown)
 	atomic.StoreInt64(&state.schemaOK, sourceStateUnknown)
@@ -343,13 +347,17 @@ func markSourceValidObservationAt(id SourceID, sourceTime, observedAt time.Time)
 }
 
 func MarkSourcePublication(id SourceID) bool {
+	return markSourcePublicationAt(id, time.Now().Unix())
+}
+
+func markSourcePublicationAt(id SourceID, now int64) bool {
 	state := getSource(id)
 	if state == nil {
 		return false
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	atomic.StoreInt64(&state.lastPublicationUnix, time.Now().Unix())
+	atomic.StoreInt64(&state.lastPublicationUnix, now)
 	return true
 }
 

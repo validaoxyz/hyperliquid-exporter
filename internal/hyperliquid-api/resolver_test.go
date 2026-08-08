@@ -227,6 +227,67 @@ func TestValidatorCacheFreshStaleOutageAndRecovery(t *testing.T) {
 	}
 }
 
+func TestValidatorCacheTreatsExplicitEmptySnapshotAsValid(t *testing.T) {
+	resolver, err := NewResolver("testnet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Unix(1_800_000_000, 0)
+	now := base
+	resolver.now = func() time.Time { return now }
+	resolver.wait = func(context.Context, time.Duration) error { return nil }
+
+	var fail atomic.Bool
+	var calls atomic.Int32
+	resolver.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		if fail.Load() {
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Status:     "503 Service Unavailable",
+				Body:       io.NopCloser(strings.NewReader("unavailable")),
+				Header:     make(http.Header),
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Body:       io.NopCloser(strings.NewReader("[]")),
+			Header:     make(http.Header),
+		}, nil
+	})}
+
+	first, err := resolver.GetValidatorSummaries(context.Background(), false)
+	if err != nil {
+		t.Fatalf("initial empty refresh: %v", err)
+	}
+	if first.Summaries == nil || len(first.Summaries) != 0 || first.FromCache || first.Stale ||
+		first.RefreshError != nil || !first.LastSuccess.Equal(base) {
+		t.Fatalf("unexpected initial empty result: %+v", first)
+	}
+
+	now = base.Add(30 * time.Second)
+	fresh, err := resolver.GetValidatorSummaries(context.Background(), false)
+	if err != nil {
+		t.Fatalf("fresh empty cache: %v", err)
+	}
+	if fresh.Summaries == nil || len(fresh.Summaries) != 0 || !fresh.FromCache || fresh.Stale ||
+		fresh.RefreshError != nil || !fresh.LastSuccess.Equal(base) || calls.Load() != 1 {
+		t.Fatalf("unexpected fresh empty-cache result: %+v calls=%d", fresh, calls.Load())
+	}
+
+	fail.Store(true)
+	now = base.Add(2 * time.Minute)
+	stale, err := resolver.GetValidatorSummaries(context.Background(), false)
+	if err != nil {
+		t.Fatalf("stale empty fallback returned outer error: %v", err)
+	}
+	if stale.Summaries == nil || len(stale.Summaries) != 0 || !stale.FromCache || !stale.Stale ||
+		stale.RefreshError == nil || !stale.LastSuccess.Equal(base) || calls.Load() <= 1 {
+		t.Fatalf("unexpected stale empty fallback: %+v calls=%d", stale, calls.Load())
+	}
+}
+
 func TestValidatorSummaryRejectsMissingOrNullRequiredFields(t *testing.T) {
 	valid := map[string]interface{}{
 		"validator":       "",

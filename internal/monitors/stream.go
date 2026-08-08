@@ -3,7 +3,6 @@ package monitors
 import (
 	"bufio"
 	"context"
-	"errors"
 	"io"
 	"os"
 	"time"
@@ -60,9 +59,11 @@ type pendingStreamSwitch struct {
 }
 
 // tailStream follows the newest file of a stream, calling onLine for every
-// newline-committed record. A file found by the first successful startup scan
-// is sought to EOF to avoid replaying process counters. If that scan is
-// successfully empty, the first file created later is read from byte zero.
+// newline-committed record. The first resolver attempt establishes the startup
+// boundary: a file returned by that attempt is sought to EOF to avoid replaying
+// process counters, while a file discovered only later is read from byte zero.
+// This remains true when the first attempt fails transiently, because a later
+// file may have been created after the exporter started.
 //
 // Rotation is overlap-safe: the old inode remains open and must reach two
 // stable EOF observations before the new file is activated. A torn old-file
@@ -163,7 +164,7 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 		if reader == nil || time.Since(lastScan) >= o.rescanEvery {
 			lastScan = time.Now()
 			latest, resolveErr := o.resolve()
-			if !startupScanned && (resolveErr == nil || errors.Is(resolveErr, os.ErrNotExist)) {
+			if !startupScanned {
 				startupScanned = true
 				if resolveErr == nil {
 					startupPath = latest

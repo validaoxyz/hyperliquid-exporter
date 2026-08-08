@@ -53,29 +53,45 @@ func tickReplicaRuns(root string) bool {
 	snapshot, err := scanReplicaRuns(root)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			metrics.MarkSourceAbsent(metrics.SourceReplicaRuns)
-			metrics.HLNodeObservedRunsTotal.Set(0)
-			metrics.HLNodeObservedRunStartSeconds.Set(0)
-			metrics.HLNodeObservedRunLastActivitySeconds.Set(0)
+			withdrawReplicaRunsSnapshot()
 			return false
 		}
 		stage := metrics.SourceFailureRead
 		if errors.Is(err, errInvalidReplicaRunEntry) {
 			stage = metrics.SourceFailureSchema
 		}
-		metrics.MarkSourceError(metrics.SourceReplicaRuns, stage)
-		metrics.IncMonitorError("replica_runs")
+		metrics.WithPrometheusSnapshotUpdate(func() {
+			metrics.MarkSourceError(metrics.SourceReplicaRuns, stage)
+			metrics.IncMonitorError("replica_runs")
+		})
 		return false
 	}
 
-	metrics.HLNodeObservedRunsTotal.Set(float64(snapshot.Retained))
-	metrics.HLNodeObservedRunStartSeconds.Set(optionalUnix(snapshot.LatestStart))
-	metrics.HLNodeObservedRunLastActivitySeconds.Set(optionalUnix(snapshot.LatestActivity))
-	metrics.MarkSourceValidObservation(metrics.SourceReplicaRuns, snapshot.LatestStart)
-	metrics.MarkSourcePublication(metrics.SourceReplicaRuns)
-	metrics.MarkMonitorValidObservation("replica_runs")
-	metrics.MarkMonitorPublication("replica_runs")
+	commitReplicaRunsSnapshot(snapshot)
 	return true
+}
+
+func withdrawReplicaRunsSnapshot() {
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		metrics.HLNodeObservedRunsTotal.DeleteLabelValues()
+		metrics.HLNodeObservedRunStartSeconds.DeleteLabelValues()
+		metrics.HLNodeObservedRunLastActivitySeconds.DeleteLabelValues()
+		metrics.MarkSourceAbsent(metrics.SourceReplicaRuns)
+		metrics.MarkSourcePublication(metrics.SourceReplicaRuns)
+		metrics.MarkMonitorPublication("replica_runs")
+	})
+}
+
+func commitReplicaRunsSnapshot(snapshot replicaRunsSnapshot) {
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		metrics.HLNodeObservedRunsTotal.WithLabelValues().Set(float64(snapshot.Retained))
+		metrics.HLNodeObservedRunStartSeconds.WithLabelValues().Set(optionalUnix(snapshot.LatestStart))
+		metrics.HLNodeObservedRunLastActivitySeconds.WithLabelValues().Set(optionalUnix(snapshot.LatestActivity))
+		metrics.MarkSourceValidObservation(metrics.SourceReplicaRuns, snapshot.LatestStart)
+		metrics.MarkSourcePublication(metrics.SourceReplicaRuns)
+		metrics.MarkMonitorValidObservation("replica_runs")
+		metrics.MarkMonitorPublication("replica_runs")
+	})
 }
 
 func scanReplicaRuns(root string) (replicaRunsSnapshot, error) {

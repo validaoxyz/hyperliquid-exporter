@@ -64,19 +64,30 @@ type operatorConfigSnapshot struct {
 	failedAll  int64
 }
 
+type jailingConfigSnapshot struct {
+	absent                  bool
+	dryRun                  *bool
+	latencyThresholdSeconds *float64
+	err                     error
+}
+
 func tickOperatorConfig(root string) bool {
 	metrics.MarkMonitorAttempt("operator_config")
 	metrics.MarkSourceAttempt(metrics.SourceOperatorConfig)
 	now := time.Now()
 	if info, err := os.Stat(root); err != nil {
 		if os.IsNotExist(err) {
-			metrics.MarkSourceAbsent(metrics.SourceOperatorConfig)
+			withdrawOperatorConfigSnapshot()
 		} else {
-			metrics.MarkSourceError(metrics.SourceOperatorConfig, metrics.SourceFailureStat)
+			metrics.WithPrometheusSnapshotUpdate(func() {
+				metrics.MarkSourceError(metrics.SourceOperatorConfig, metrics.SourceFailureStat)
+			})
 		}
 		return false
 	} else if !info.IsDir() {
-		metrics.MarkSourceError(metrics.SourceOperatorConfig, metrics.SourceFailureSchema)
+		metrics.WithPrometheusSnapshotUpdate(func() {
+			metrics.MarkSourceError(metrics.SourceOperatorConfig, metrics.SourceFailureSchema)
+		})
 		return false
 	}
 
@@ -92,11 +103,15 @@ func tickOperatorConfig(root string) bool {
 				snapshot.present[file] = 0
 				continue
 			}
-			metrics.MarkSourceError(metrics.SourceOperatorConfig, metrics.SourceFailureStat)
+			metrics.WithPrometheusSnapshotUpdate(func() {
+				metrics.MarkSourceError(metrics.SourceOperatorConfig, metrics.SourceFailureStat)
+			})
 			return false
 		}
 		if !info.Mode().IsRegular() {
-			metrics.MarkSourceError(metrics.SourceOperatorConfig, metrics.SourceFailureSchema)
+			metrics.WithPrometheusSnapshotUpdate(func() {
+				metrics.MarkSourceError(metrics.SourceOperatorConfig, metrics.SourceFailureSchema)
+			})
 			return false
 		}
 		snapshot.present[file] = 1
@@ -114,7 +129,9 @@ func tickOperatorConfig(root string) bool {
 	// similar and it never actually loaded.
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		metrics.MarkSourceError(metrics.SourceOperatorConfig, metrics.SourceFailureRead)
+		metrics.WithPrometheusSnapshotUpdate(func() {
+			metrics.MarkSourceError(metrics.SourceOperatorConfig, metrics.SourceFailureRead)
+		})
 		return false
 	}
 	known := make(map[string]struct{}, len(operatorConfigFiles))
@@ -134,6 +151,7 @@ func tickOperatorConfig(root string) bool {
 		}
 		snapshot.failed[file]++
 	}
+	jailing := scanJailingConfig(root)
 
 	metrics.WithPrometheusSnapshotUpdate(func() {
 		for _, file := range operatorConfigFiles {
@@ -146,50 +164,93 @@ func tickOperatorConfig(root string) bool {
 			metrics.HLNodeOperatorConfigFailedLoad.WithLabelValues(file).Set(float64(snapshot.failed[file]))
 		}
 		metrics.HLNodeOperatorConfigFailedLoad.WithLabelValues("unknown").Set(float64(snapshot.failed["unknown"]))
-		metrics.HLNodeOperatorConfigFailedLoads.Set(float64(snapshot.failedAll))
+		metrics.HLNodeOperatorConfigFailedLoads.WithLabelValues().Set(float64(snapshot.failedAll))
+		applyJailingConfigSnapshot(jailing)
 		metrics.MarkSourceValidObservation(metrics.SourceOperatorConfig, time.Time{})
 		metrics.MarkSourcePublication(metrics.SourceOperatorConfig)
 		metrics.MarkMonitorValidObservation("operator_config")
 		metrics.MarkMonitorPublication("operator_config")
 	})
-
-	readJailingConfig(root)
+	if jailing.err != nil {
+		logger.DebugComponent("operator_config", "read heartbeat_jailing_config.json: %v", jailing.err)
+	}
 	return true
 }
 
-// readJailingConfig publishes the contents of heartbeat_jailing_config.json:
+func withdrawOperatorConfigSnapshot() {
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		for _, file := range operatorConfigFiles {
+			metrics.HLNodeOperatorConfigPresent.DeleteLabelValues(file)
+			metrics.HLNodeOperatorConfigAgeSeconds.DeleteLabelValues(file)
+			metrics.HLNodeOperatorConfigFailedLoad.DeleteLabelValues(file)
+		}
+		metrics.HLNodeOperatorConfigFailedLoad.DeleteLabelValues("unknown")
+		metrics.HLNodeOperatorConfigFailedLoads.DeleteLabelValues()
+		withdrawJailingConfigSnapshot()
+		metrics.MarkSourceAbsent(metrics.SourceOperatorConfig)
+		metrics.MarkSourcePublication(metrics.SourceOperatorConfig)
+		metrics.MarkMonitorPublication("operator_config")
+	})
+}
+
+// scanJailingConfig stages the contents of heartbeat_jailing_config.json:
 // the latency-EMA threshold this node uses when voting to jail peers, and
 // whether enforcement is live or dry-run. The mtime age above only says the
 // file changed; the threshold itself is the denominator of every
 // jail-headroom question, e.g.
 //
 //	hl_consensus_validator_latency_ema_seconds / hl_node_jailing_threshold_seconds
-func readJailingConfig(root string) {
+func scanJailingConfig(root string) jailingConfigSnapshot {
 	raw, err := os.ReadFile(filepath.Join(root, "heartbeat_jailing_config.json"))
 	if err != nil {
-		return // non-validator nodes don't have the file
+		if os.IsNotExist(err) {
+			return jailingConfigSnapshot{absent: true}
+		}
+		return jailingConfigSnapshot{err: err}
 	}
 	var jcfg struct {
 		DryRun                  *bool    `json:"dry_run"`
 		LatencyEmaJailThreshold *float64 `json:"latency_ema_jail_threshold"`
 	}
 	if err := json.Unmarshal(raw, &jcfg); err != nil {
-		logger.DebugComponent("operator_config", "parse heartbeat_jailing_config.json: %v", err)
+		return jailingConfigSnapshot{err: err}
+	}
+	return jailingConfigSnapshot{
+		dryRun:                  jcfg.DryRun,
+		latencyThresholdSeconds: jcfg.LatencyEmaJailThreshold,
+	}
+}
+
+func applyJailingConfigSnapshot(snapshot jailingConfigSnapshot) {
+	if snapshot.err != nil {
 		return
 	}
-	if jcfg.LatencyEmaJailThreshold == nil && jcfg.DryRun == nil {
+	if snapshot.absent {
+		withdrawJailingConfigSnapshot()
+		return
+	}
+	if snapshot.latencyThresholdSeconds == nil && snapshot.dryRun == nil {
 		return
 	}
 
 	metrics.InitJailingConfigInstruments()
-	if jcfg.LatencyEmaJailThreshold != nil {
-		metrics.HLNodeJailingThresholdSeconds.Set(*jcfg.LatencyEmaJailThreshold)
+	if snapshot.latencyThresholdSeconds != nil {
+		metrics.HLNodeJailingThresholdSeconds.WithLabelValues().Set(*snapshot.latencyThresholdSeconds)
 	}
-	if jcfg.DryRun != nil {
+	if snapshot.dryRun != nil {
 		v := 0.0
-		if *jcfg.DryRun {
+		if *snapshot.dryRun {
 			v = 1
 		}
-		metrics.HLNodeJailingDryRun.Set(v)
+		metrics.HLNodeJailingDryRun.WithLabelValues().Set(v)
+	}
+}
+
+func withdrawJailingConfigSnapshot() {
+	if metrics.HLNodeJailingThresholdSeconds != nil {
+		metrics.HLNodeJailingThresholdSeconds.DeleteLabelValues()
+	}
+	if metrics.HLNodeJailingDryRun != nil {
+		metrics.HLNodeJailingDryRun.DeleteLabelValues()
 	}
 }

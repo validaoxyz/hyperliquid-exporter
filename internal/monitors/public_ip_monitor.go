@@ -57,49 +57,65 @@ func tickPublicIP(path string, currentIP *string, now time.Time) error {
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if *currentIP != "" {
-				metrics.HLNodePublicIPInfo.DeleteLabelValues(*currentIP)
-				*currentIP = ""
-			}
-			metrics.HLNodePublicIPAgeSeconds.DeleteLabelValues()
-			metrics.MarkSourceAbsent(metrics.SourcePublicIP)
-			metrics.MarkMonitorPublication("public_ip")
+			metrics.WithPrometheusSnapshotUpdate(func() {
+				if *currentIP != "" {
+					metrics.HLNodePublicIPInfo.DeleteLabelValues(*currentIP)
+					*currentIP = ""
+				}
+				metrics.HLNodePublicIPAgeSeconds.DeleteLabelValues()
+				metrics.MarkSourceAbsent(metrics.SourcePublicIP)
+				metrics.MarkSourcePublication(metrics.SourcePublicIP)
+				metrics.MarkMonitorPublication("public_ip")
+			})
 			return nil
 		}
-		metrics.MarkSourceError(metrics.SourcePublicIP, metrics.SourceFailureStat)
+		metrics.WithPrometheusSnapshotUpdate(func() {
+			metrics.MarkSourceError(metrics.SourcePublicIP, metrics.SourceFailureStat)
+		})
 		return fmt.Errorf("stat public-IP file: %w", err)
 	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		metrics.MarkSourceError(metrics.SourcePublicIP, metrics.SourceFailureRead)
+		metrics.WithPrometheusSnapshotUpdate(func() {
+			metrics.MarkSourceError(metrics.SourcePublicIP, metrics.SourceFailureRead)
+		})
 		return fmt.Errorf("read public-IP file: %w", err)
 	}
 	ip, ok := parsePublicIP(data)
 	if !ok || ip == "" {
-		metrics.MarkSourceError(metrics.SourcePublicIP, metrics.SourceFailureSchema)
+		metrics.WithPrometheusSnapshotUpdate(func() {
+			metrics.MarkSourceError(metrics.SourcePublicIP, metrics.SourceFailureSchema)
+		})
 		return fmt.Errorf("invalid public-IP file")
 	}
 	age := now.Sub(info.ModTime())
 	if age < 0 {
 		age = 0
 	}
-	metrics.HLNodePublicIPAgeSeconds.WithLabelValues().Set(age.Seconds())
-	if ip != *currentIP {
-		if *currentIP != "" {
-			metrics.HLNodePublicIPInfo.DeleteLabelValues(*currentIP)
-			metrics.HLNodePublicIPChangesTotal.Inc()
-			logger.InfoComponent("public_ip", "public IP changed: %s -> %s", *currentIP, ip)
-		} else {
-			logger.InfoComponent("public_ip", "initial public IP: %s", ip)
+	oldIP := *currentIP
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		metrics.HLNodePublicIPAgeSeconds.WithLabelValues().Set(age.Seconds())
+		if ip != *currentIP {
+			if *currentIP != "" {
+				metrics.HLNodePublicIPInfo.DeleteLabelValues(*currentIP)
+				metrics.HLNodePublicIPChangesTotal.Inc()
+			}
+			*currentIP = ip
+			metrics.HLNodePublicIPInfo.WithLabelValues(ip).Set(1)
 		}
-		*currentIP = ip
-		metrics.HLNodePublicIPInfo.WithLabelValues(ip).Set(1)
+		metrics.MarkSourceValidObservation(metrics.SourcePublicIP, info.ModTime())
+		metrics.MarkSourcePublication(metrics.SourcePublicIP)
+		metrics.MarkMonitorValidObservation("public_ip")
+		metrics.MarkMonitorPublication("public_ip")
+	})
+	if oldIP != ip {
+		if oldIP == "" {
+			logger.InfoComponent("public_ip", "initial public IP: %s", ip)
+		} else {
+			logger.InfoComponent("public_ip", "public IP changed: %s -> %s", oldIP, ip)
+		}
 	}
-	metrics.MarkSourceValidObservation(metrics.SourcePublicIP, info.ModTime())
-	metrics.MarkSourcePublication(metrics.SourcePublicIP)
-	metrics.MarkMonitorValidObservation("public_ip")
-	metrics.MarkMonitorPublication("public_ip")
 	return nil
 }
 

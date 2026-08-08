@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -28,7 +29,8 @@ func TestProbeOnce_SubprobesRemainIndependentAndAgeFailures(t *testing.T) {
 	nowNanos.Store(base.UnixNano())
 	now := func() time.Time { return time.Unix(0, nowNanos.Load()) }
 
-	// mode 0: both succeed; mode 1: meta fails; mode 2: exchange fails.
+	// mode 0: both succeed; mode 1: meta fails; mode 2: exchange status
+	// fails; mode 3: exchange returns a valid object plus a second value.
 	var mode atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request map[string]string
@@ -46,6 +48,10 @@ func TestProbeOnce_SubprobesRemainIndependentAndAgeFailures(t *testing.T) {
 		case "exchangeStatus":
 			if mode.Load() == 2 {
 				http.Error(w, "exchange unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if mode.Load() == 3 {
+				_, _ = w.Write([]byte(`{"time":1800000000000} {}`))
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]float64{
@@ -108,6 +114,44 @@ func TestProbeOnce_SubprobesRemainIndependentAndAgeFailures(t *testing.T) {
 	}
 	if got := b04MetricValue(t, metrics.HLInfoExchangeStatusLastSuccessAge); got != 0 {
 		t.Fatalf("exchange age after recovery = %v, want 0", got)
+	}
+
+	deltaBeforeMalformed := b04MetricValue(t, metrics.HLInfoExchangeStatusDeltaSeconds)
+	lastSuccessBeforeMalformed := b04MetricValue(t, metrics.HLInfoExchangeStatusLastSuccess)
+	mode.Store(3)
+	nowNanos.Store(base.Add(40 * time.Second).UnixNano())
+	probeOnceAt(context.Background(), client, server.URL, now)
+	if got := b04MetricValue(t, metrics.HLInfoExchangeStatusUp); got != 0 {
+		t.Fatalf("exchange up after trailing JSON value = %v, want 0", got)
+	}
+	if got := b04MetricValue(t, metrics.HLInfoExchangeStatusLastSuccess); got != lastSuccessBeforeMalformed {
+		t.Fatalf("malformed exchange response advanced last success from %v to %v", lastSuccessBeforeMalformed, got)
+	}
+	if got := b04MetricValue(t, metrics.HLInfoExchangeStatusDeltaSeconds); got != deltaBeforeMalformed {
+		t.Fatalf("malformed exchange response changed retained delta from %v to %v", deltaBeforeMalformed, got)
+	}
+}
+
+func TestDecodeExchangeStatusRequiresOneCompleteJSONValue(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		ok   bool
+	}{
+		{name: "valid", body: `{"time":1800000000000}`, ok: true},
+		{name: "valid whitespace", body: "{\"time\":1800000000000}\n\t", ok: true},
+		{name: "second value", body: `{"time":1800000000000} {}`, ok: false},
+		{name: "trailing garbage", body: `{"time":1800000000000} x`, ok: false},
+		{name: "trailing beyond limit", body: `{"time":1800000000000}` + strings.Repeat(" ", infoProbeMaxBodySize), ok: false},
+		{name: "empty", body: ``, ok: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := decodeExchangeStatusTime(strings.NewReader(tc.body))
+			if ok != tc.ok {
+				t.Fatalf("ok = %v, want %v (time=%v)", ok, tc.ok, got)
+			}
+		})
 	}
 }
 
