@@ -319,7 +319,6 @@ func TestValidatorSummaryRejectsMissingOrNullRequiredFields(t *testing.T) {
 		"nRecentBlocks",
 		"stake",
 		"isJailed",
-		"unjailableAfter",
 		"isActive",
 	} {
 		t.Run(field+" null", func(t *testing.T) {
@@ -342,6 +341,67 @@ func TestValidatorSummaryRejectsMissingOrNullRequiredFields(t *testing.T) {
 			}
 			if err := json.Unmarshal(marshal(t, fields), &summary); err == nil {
 				t.Fatalf("missing required field %s was accepted", field)
+			}
+		})
+	}
+}
+
+func TestValidatorSummaryRequiresUnjailableAfterOnlyWhileJailed(t *testing.T) {
+	base := map[string]interface{}{
+		"validator":     "",
+		"signer":        "",
+		"nRecentBlocks": float64(0),
+		"stake":         float64(0),
+		"isJailed":      false,
+		"isActive":      false,
+	}
+	decode := func(t *testing.T, fields map[string]interface{}) (ValidatorSummary, error) {
+		t.Helper()
+		body, err := json.Marshal(fields)
+		if err != nil {
+			t.Fatalf("marshal fixture: %v", err)
+		}
+		var summary ValidatorSummary
+		err = json.Unmarshal(body, &summary)
+		return summary, err
+	}
+	clone := func() map[string]interface{} {
+		fields := make(map[string]interface{}, len(base)+1)
+		for key, value := range base {
+			fields[key] = value
+		}
+		return fields
+	}
+
+	for _, tc := range []struct {
+		name       string
+		jailed     bool
+		include    bool
+		value      interface{}
+		wantErr    bool
+		wantHas    bool
+		wantMillis int64
+	}{
+		{name: "unjailed missing", jailed: false},
+		{name: "unjailed null", jailed: false, include: true, value: nil},
+		{name: "unjailed numeric zero", jailed: false, include: true, value: float64(0), wantHas: true},
+		{name: "jailed missing", jailed: true, wantErr: true},
+		{name: "jailed null", jailed: true, include: true, value: nil, wantErr: true},
+		{name: "jailed numeric", jailed: true, include: true, value: float64(1_800_000_000_000), wantHas: true, wantMillis: 1_800_000_000_000},
+		{name: "wrong type", jailed: false, include: true, value: "tomorrow", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fields := clone()
+			fields["isJailed"] = tc.jailed
+			if tc.include {
+				fields["unjailableAfter"] = tc.value
+			}
+			summary, err := decode(t, fields)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("decode error = %v, wantErr=%v", err, tc.wantErr)
+			}
+			if err == nil && (summary.HasUnjailableAfter != tc.wantHas || summary.UnjailableAfter != tc.wantMillis) {
+				t.Fatalf("availability/value = %v/%d, want %v/%d", summary.HasUnjailableAfter, summary.UnjailableAfter, tc.wantHas, tc.wantMillis)
 			}
 		})
 	}

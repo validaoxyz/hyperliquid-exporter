@@ -171,17 +171,38 @@ func TestReadTCPSource_RejectsDataRowAsHeaderAndGarbageAddress(t *testing.T) {
 	}
 }
 
+func TestValidTCPProcHeaderAcceptsKernelTCP4AndTCP6Spellings(t *testing.T) {
+	for _, header := range []string{
+		"sl local_address rem_address st rest",
+		"sl local_address remote_address st rest",
+	} {
+		if !validTCPProcHeader(header) {
+			t.Fatalf("rejected live kernel header %q", header)
+		}
+	}
+	for _, header := range []string{
+		"sl local_address remote st rest",
+		"sl local_address rem_address state rest",
+		"local_address rem_address st rest",
+	} {
+		if validTCPProcHeader(header) {
+			t.Fatalf("accepted out-of-contract header %q", header)
+		}
+	}
+}
+
 func TestTCPConnectionsCombinedSnapshotAndAliasRollback(t *testing.T) {
 	dir := t.TempDir()
 	tcp4 := filepath.Join(dir, "tcp")
 	tcp6 := filepath.Join(dir, "tcp6")
 	header := "sl local_address rem_address st rest\n"
+	header6 := "sl local_address remote_address st rest\n"
 	row4 := "0: 0100007F:0FA1 0200007F:C350 01 rest\n"
 	row6 := "0: 00000000000000000000000000000000:C350 00000000000000000000000000000001:0FA1 01 rest\n"
 	if err := os.WriteFile(tcp4, []byte(header+row4), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(tcp6, []byte(header+row6), 0o600); err != nil {
+	if err := os.WriteFile(tcp6, []byte(header6+row6), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

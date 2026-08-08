@@ -11,7 +11,7 @@ import (
 )
 
 func TestParseChildSnapshotLine_StrictCanonicalSnapshot(t *testing.T) {
-	line := []byte(`["2026-08-08T03:00:00",["child_peers status",[["::ffff:192.0.2.2",{"verified":true,"connection_count":2}],["192.0.2.1",{"verified":false,"connection_count":1}]]]]`)
+	line := []byte(`["2026-08-08T03:00:00",["child_peers status",[[{"Ip":"::ffff:192.0.2.2"},{"verified":true,"connection_count":2}],["192.0.2.1",{"verified":false,"connection_count":1}]]]]`)
 	snapshot, isChild, err := parseChildSnapshotLine(line)
 	if err != nil || !isChild {
 		t.Fatalf("isChild=%v err=%v", isChild, err)
@@ -34,6 +34,9 @@ func TestParseChildSnapshotLine_RejectsAnyBadOrDuplicateRow(t *testing.T) {
 		`["2026-08-08T03:00:00",["child_peers status",[["192.0.2.1",{"verified":true,"connection_count":null}]]]]`,
 		`["2026-08-08T03:00:00",["child_peers status",[["192.0.2.1",{"verified":true,"connection_count":9223372036854775807}],["192.0.2.2",{"verified":true,"connection_count":1}]]]]`,
 		`["2026-08-08T03:00:00",["child_peers status",[["fe80::1%eth0",{"verified":true,"connection_count":1}]]]]`,
+		`["2026-08-08T03:00:00",["child_peers status",[[{"IP":"192.0.2.1"},{"verified":true,"connection_count":1}]]]]`,
+		`["2026-08-08T03:00:00",["child_peers status",[[{"Ip":null},{"verified":true,"connection_count":1}]]]]`,
+		`["2026-08-08T03:00:00",["child_peers status",[[{"Ip":"192.0.2.1","extra":true},{"verified":true,"connection_count":1}]]]]`,
 	}
 	for _, input := range cases {
 		if _, isChild, err := parseChildSnapshotLine([]byte(input)); !isChild || err == nil {

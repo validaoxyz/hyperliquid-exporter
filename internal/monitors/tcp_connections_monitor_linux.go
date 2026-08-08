@@ -348,7 +348,11 @@ func parseProcPort(address string) (uint16, error) {
 
 func validTCPProcHeader(line string) bool {
 	fields := strings.Fields(line)
-	return len(fields) >= 4 && fields[0] == "sl" && fields[1] == "local_address" && fields[2] == "rem_address" && fields[3] == "st"
+	return len(fields) >= 4 &&
+		fields[0] == "sl" &&
+		fields[1] == "local_address" &&
+		(fields[2] == "rem_address" || fields[2] == "remote_address") &&
+		fields[3] == "st"
 }
 
 // readTCPFile is retained as a test/compatibility helper for the old local-only

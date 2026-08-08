@@ -399,6 +399,47 @@ func TestInvalidStatusScalarRetainsLastAcceptedTimestamp(t *testing.T) {
 	}
 }
 
+func TestEligibleStatusSummariesRequireFreshAPIGeneration(t *testing.T) {
+	metrics.HLConsensusStatusEligibleSummary.Reset()
+	t.Cleanup(metrics.HLConsensusStatusEligibleSummary.Reset)
+
+	const signer = "0x1111111111111111111111111111111111111111"
+	snapshot := statusSnapshot{
+		MissingHeartbeatPresent: true,
+		MissingHeartbeatSigners: []string{signer},
+		DisconnectedPresent:     true,
+		Disconnected: []statusDisconnectedPair{{
+			SubjectSigner:  signer,
+			ReporterSigner: "0x2222222222222222222222222222222222222222",
+		}},
+	}
+	now := time.Unix(1_800_000_000, 0)
+	eligible := []metrics.EligibleValidator{{Signer: signer}}
+
+	publishEligibleStatusSummariesAt(snapshot, eligible, time.Time{}, now)
+	if rows := b03CollectorRows(t, metrics.HLConsensusStatusEligibleSummary); len(rows) != 0 {
+		t.Fatalf("missing API generation published eligible zeroes: %d rows", len(rows))
+	}
+
+	publishEligibleStatusSummariesAt(snapshot, eligible, now, now)
+	for _, state := range []string{"missing_heartbeat", "disconnected"} {
+		value, ok := b03CollectorValue(t, metrics.HLConsensusStatusEligibleSummary, map[string]string{"state": state})
+		if !ok || value != 1 {
+			t.Fatalf("fresh API state %s = %v present=%v, want 1", state, value, ok)
+		}
+	}
+
+	publishEligibleStatusSummariesAt(snapshot, eligible, now, now.Add(validatorAPITargetFreshness+time.Second))
+	if rows := b03CollectorRows(t, metrics.HLConsensusStatusEligibleSummary); len(rows) != 0 {
+		t.Fatalf("stale API generation left eligible summaries: %d rows", len(rows))
+	}
+
+	publishEligibleStatusSummariesAt(snapshot, eligible, now.Add(2*time.Minute), now)
+	if rows := b03CollectorRows(t, metrics.HLConsensusStatusEligibleSummary); len(rows) != 0 {
+		t.Fatalf("future API generation published eligible summaries: %d rows", len(rows))
+	}
+}
+
 func TestHeartbeatJoinsSeparatePeerSelfDuplicateMismatchAndExpiry(t *testing.T) {
 	sentCounter, err := otel.Meter("consensus-heartbeat-test").Int64Counter("test_heartbeat_sent")
 	if err != nil {

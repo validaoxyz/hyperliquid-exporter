@@ -26,12 +26,27 @@ func TestParseGossipConnectionLine_KnownEvents(t *testing.T) {
 			"performing_checks_on_stream",
 		},
 		{
-			"error checking connection",
+			"error checking connection current",
+			`["2026-08-08T03:00:03",["error checking connection","203.0.113.1","connection refused"]]`,
+			"error_checking_connection",
+		},
+		{
+			"rejecting gossip stream because max peers reached current",
+			`["2026-08-08T03:00:03",["rejecting gossip stream because max peers reached","peer limit",[]]]`,
+			"rejecting_gossip_stream_max_peers_reached",
+		},
+		{
+			"got tcp greeting current",
+			`["2026-08-08T03:00:03",["got tcp greeting",{"Ip":"203.0.113.2"},true]]`,
+			"got_tcp_greeting",
+		},
+		{
+			"error checking connection historical",
 			`["2026-05-25T06:59:53.6",["error checking connection",{"err":"x"}]]`,
 			"error_checking_connection",
 		},
 		{
-			"rejecting gossip stream because max peers reached",
+			"rejecting gossip stream because max peers reached historical",
 			`["2026-05-25T06:59:53.6",["rejecting gossip stream because max peers reached",{}]]`,
 			"rejecting_gossip_stream_max_peers_reached",
 		},
@@ -166,6 +181,16 @@ func TestParseGossipConnectionLine_ExactMatchingAndPayloadShape(t *testing.T) {
 	nullFlag := parseGossipConnectionRecord([]byte(`["2026-08-08T03:00:03",["sending abci_state",{"Ip":"192.0.2.1"},null]]`))
 	if nullFlag.reason != "payload" {
 		t.Fatalf("null required flag reason=%q", nullFlag.reason)
+	}
+	for _, line := range []string{
+		`["2026-08-08T03:00:03",["got tcp greeting",{"Ip":"192.0.2.1","extra":true},true]]`,
+		`["2026-08-08T03:00:03",["got tcp greeting",{"Ip":"192.0.2.1"},null]]`,
+		`["2026-08-08T03:00:03",["rejecting gossip stream because max peers reached","limit",{}]]`,
+		`["2026-08-08T03:00:03",["error checking connection","peer",null]]`,
+	} {
+		if result := parseGossipConnectionRecord([]byte(line)); result.reason != "payload" {
+			t.Fatalf("out-of-contract current payload accepted: %s result=%+v", line, result)
+		}
 	}
 }
 

@@ -4,7 +4,32 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	dto "github.com/prometheus/client_model/go"
+	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
+
+func TestRunMonitorReturnsAfterLifecycleIsObservable(t *testing.T) {
+	const name = "startup_observable_test"
+	release := make(chan struct{})
+	runMonitor(name, func() { <-release })
+
+	metrics.PublishMonitorHealthSnapshot()
+	metric, err := metrics.HLExporterMonitorRunning.GetMetricWithLabelValues(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var encoded dto.Metric
+	if err := metric.Write(&encoded); err != nil {
+		t.Fatal(err)
+	}
+	if encoded.GetGauge().GetValue() != 1 {
+		t.Fatalf("running gauge = %v, want 1 when runMonitor returns", encoded.GetGauge().GetValue())
+	}
+
+	close(release)
+	waitForMonitorWorkers()
+}
 
 func TestWaitForMonitorWorkersStopsProducerBeforeReturn(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

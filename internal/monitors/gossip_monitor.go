@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
@@ -432,8 +433,8 @@ func parseChildPeer(raw json.RawMessage) (childPeer, error) {
 	if err := json.Unmarshal(raw, &pair); err != nil || len(pair) != 2 {
 		return childPeer{}, &childParseError{reason: "shape", err: errors.New("child row arity")}
 	}
-	var identity string
-	if err := unmarshalRequiredJSON(pair[0], &identity); err != nil {
+	identity, err := parseChildIdentity(pair[0])
+	if err != nil {
 		return childPeer{}, &childParseError{reason: "identity", err: err}
 	}
 	ip, err := parseCanonicalChildIP(identity)
@@ -455,6 +456,23 @@ func parseChildPeer(raw json.RawMessage) (childPeer, error) {
 		return childPeer{}, &childParseError{reason: "shape", err: errors.New("invalid child status field")}
 	}
 	return childPeer{ip: ip, verified: verified, connections: connections}, nil
+}
+
+func parseChildIdentity(raw json.RawMessage) (string, error) {
+	var identity string
+	if err := unmarshalRequiredJSON(raw, &identity); err == nil {
+		return identity, nil
+	}
+
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil || len(object) != 1 {
+		return "", errors.New("child identity must be a string or exact Ip object")
+	}
+	ip, ok := object["Ip"]
+	if !ok || unmarshalRequiredJSON(ip, &identity) != nil || strings.TrimSpace(identity) == "" {
+		return "", errors.New("invalid child Ip identity")
+	}
+	return identity, nil
 }
 
 func parseCanonicalChildIP(identity string) (string, error) {

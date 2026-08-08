@@ -187,7 +187,10 @@ func validateValidatorSummaries(summaries []hyperliquidapi.ValidatorSummary) ([]
 		if math.IsNaN(summary.Stake) || math.IsInf(summary.Stake, 0) || summary.Stake < 0 {
 			return nil, fmt.Errorf("validator summary row %d has invalid stake", i)
 		}
-		if summary.UnjailableAfter < 0 || summary.NRecentBlocks < 0 {
+		if summary.IsJailed && !summary.HasUnjailableAfter {
+			return nil, fmt.Errorf("validator summary row %d is jailed without unjailableAfter", i)
+		}
+		if (summary.HasUnjailableAfter && summary.UnjailableAfter < 0) || summary.NRecentBlocks < 0 {
 			return nil, fmt.Errorf("validator summary row %d has invalid nonnegative field", i)
 		}
 		if _, err := parseSummaryStatsStrict(summary.Stats); err != nil {
@@ -264,7 +267,7 @@ func reconcileValidatorExtras(summaries []hyperliquidapi.ValidatorSummary) {
 			state.commission = true
 		}
 
-		if summary.IsJailed && summary.UnjailableAfter > 0 {
+		if summary.IsJailed && summary.HasUnjailableAfter && summary.UnjailableAfter > 0 {
 			state.unjailable = true
 			// the API reports milliseconds since epoch
 			metrics.HLConsensusValidatorUnjailableAfter.

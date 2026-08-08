@@ -20,9 +20,11 @@ var monitorWorkers sync.WaitGroup
 func runMonitor(name string, fn func()) {
 	metrics.RegisterMonitor(name)
 	monitorWorkers.Add(1)
+	started := make(chan struct{})
 	go func() {
 		defer monitorWorkers.Done()
 		metrics.MarkMonitorStarted(name)
+		close(started)
 		defer metrics.MarkMonitorStopped(name)
 		defer func() {
 			if r := recover(); r != nil {
@@ -32,6 +34,10 @@ func runMonitor(name string, fn func()) {
 		}()
 		fn()
 	}()
+	// Do not let startup registration advance until the worker lifecycle is
+	// observable. This keeps the first exported health generation consistent
+	// with /readyz after monitor registration is sealed.
+	<-started
 }
 
 func waitForMonitorWorkers() {

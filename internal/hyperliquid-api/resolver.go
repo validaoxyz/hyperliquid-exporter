@@ -40,16 +40,17 @@ type ValidatorCache struct {
 
 // validator info from API
 type ValidatorSummary struct {
-	Validator       string  `json:"validator"`
-	Signer          string  `json:"signer"`
-	Name            string  `json:"name"`
-	Description     string  `json:"description"`
-	NRecentBlocks   int     `json:"nRecentBlocks"`
-	Stake           float64 `json:"stake"`
-	IsJailed        bool    `json:"isJailed"`
-	UnjailableAfter int64   `json:"unjailableAfter"`
-	IsActive        bool    `json:"isActive"`
-	Commission      string  `json:"commission"`
+	Validator          string  `json:"validator"`
+	Signer             string  `json:"signer"`
+	Name               string  `json:"name"`
+	Description        string  `json:"description"`
+	NRecentBlocks      int     `json:"nRecentBlocks"`
+	Stake              float64 `json:"stake"`
+	IsJailed           bool    `json:"isJailed"`
+	UnjailableAfter    int64   `json:"unjailableAfter"`
+	HasUnjailableAfter bool    `json:"-"`
+	IsActive           bool    `json:"isActive"`
+	Commission         string  `json:"commission"`
 	// Stats holds [period, {uptimeFraction, predictedApr, nSamples}] pairs
 	// for day/week/month.
 	Stats [][]json.RawMessage `json:"stats"`
@@ -88,13 +89,23 @@ func (s *ValidatorSummary) UnmarshalJSON(data []byte) error {
 		{"nRecentBlocks", wire.NRecentBlocks, &decoded.NRecentBlocks},
 		{"stake", wire.Stake, &decoded.Stake},
 		{"isJailed", wire.IsJailed, &decoded.IsJailed},
-		{"unjailableAfter", wire.UnjailableAfter, &decoded.UnjailableAfter},
 		{"isActive", wire.IsActive, &decoded.IsActive},
 	}
 	for _, field := range required {
 		if err := unmarshalRequiredField(field.raw, field.dst); err != nil {
 			return fmt.Errorf("invalid required validator summary field %s: %w", field.name, err)
 		}
+	}
+	unjailableAfter := bytes.TrimSpace(wire.UnjailableAfter)
+	if len(unjailableAfter) == 0 || bytes.Equal(unjailableAfter, []byte("null")) {
+		if decoded.IsJailed {
+			return fmt.Errorf("invalid required validator summary field unjailableAfter: jailed validator value is missing or null")
+		}
+	} else {
+		if err := json.Unmarshal(unjailableAfter, &decoded.UnjailableAfter); err != nil {
+			return fmt.Errorf("invalid validator summary field unjailableAfter: %w", err)
+		}
+		decoded.HasUnjailableAfter = true
 	}
 	decoded.Name = wire.Name
 	decoded.Description = wire.Description

@@ -780,9 +780,8 @@ func (m *ConsensusMonitor) processBlockRaw(blockData json.RawMessage, direction 
 	// count block payloads if present
 	// payload counting is handled by replica monitor
 
-	// QC round lag: block.Round - QC.Round. A healthy HotStuff chain
-	// runs at lag=1 (the current block's QC certifies the previous round).
-	// Higher = network was slow / view-changes happened between rounds.
+	// QC round lag is the nonnegative block.Round - block.QC.Round value
+	// observed in the latest accepted Block carrying a complete QC.
 	if block.QC != nil && block.QC.Round > 0 && block.Round > 0 {
 		lag := int64(block.Round) - int64(block.QC.Round)
 		if lag >= 0 {
@@ -1308,7 +1307,16 @@ func isJSONArray(raw json.RawMessage) bool {
 }
 
 func (m *ConsensusMonitor) publishEligibleStatusSummaries(snapshot statusSnapshot) {
-	eligible, _ := metrics.GetAPIActiveAndUnjailedValidators()
+	eligible, apiUpdatedAt := metrics.GetAPIActiveAndUnjailedValidators()
+	publishEligibleStatusSummariesAt(snapshot, eligible, apiUpdatedAt, time.Now())
+}
+
+func publishEligibleStatusSummariesAt(snapshot statusSnapshot, eligible []metrics.EligibleValidator, apiUpdatedAt, now time.Time) {
+	if apiUpdatedAt.IsZero() || now.Sub(apiUpdatedAt) > validatorAPITargetFreshness || apiUpdatedAt.After(now.Add(time.Minute)) {
+		metrics.HLConsensusStatusEligibleSummary.DeleteLabelValues("missing_heartbeat")
+		metrics.HLConsensusStatusEligibleSummary.DeleteLabelValues("disconnected")
+		return
+	}
 	eligibleSigners := make(map[string]struct{}, len(eligible))
 	for _, row := range eligible {
 		eligibleSigners[strings.ToLower(row.Signer)] = struct{}{}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
@@ -212,9 +213,45 @@ func validKnownGossipPayload(tag string, inner []json.RawMessage) bool {
 		return unmarshalRequiredJSON(inner[2], &flag) == nil
 	case "dropping connection":
 		return len(inner) == 5
+	case "got tcp greeting":
+		if len(inner) == 2 {
+			return rawExactIPObject(inner[1])
+		}
+		if len(inner) != 3 || !rawExactIPObject(inner[1]) {
+			return false
+		}
+		var flag bool
+		return unmarshalRequiredJSON(inner[2], &flag) == nil
+	case "rejecting gossip stream because max peers reached":
+		if len(inner) == 2 {
+			return rawJSONObject(inner[1])
+		}
+		if len(inner) != 3 || !rawJSONArray(inner[2]) {
+			return false
+		}
+		var message string
+		return unmarshalRequiredJSON(inner[1], &message) == nil
+	case "error checking connection":
+		if len(inner) == 2 {
+			return rawJSONObject(inner[1])
+		}
+		if len(inner) != 3 {
+			return false
+		}
+		var endpoint, detail string
+		return unmarshalRequiredJSON(inner[1], &endpoint) == nil && unmarshalRequiredJSON(inner[2], &detail) == nil
 	default:
 		return len(inner) == 2 && rawJSONObject(inner[1])
 	}
+}
+
+func rawExactIPObject(raw json.RawMessage) bool {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil || len(object) != 1 {
+		return false
+	}
+	var ip string
+	return unmarshalRequiredJSON(object["Ip"], &ip) == nil && strings.TrimSpace(ip) != ""
 }
 
 func rawJSONObject(raw json.RawMessage) bool {

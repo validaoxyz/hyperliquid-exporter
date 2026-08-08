@@ -39,13 +39,14 @@ func TestValidatorOptionalFieldsReconcileWhenMissingOrInvalid(t *testing.T) {
 	t.Cleanup(func() { reconcileValidatorExtras(nil) })
 
 	reconcileValidatorExtras([]hyperliquidapi.ValidatorSummary{{
-		Validator:       validator,
-		Signer:          signer,
-		Name:            name,
-		NRecentBlocks:   7,
-		Commission:      "0.05",
-		IsJailed:        true,
-		UnjailableAfter: 1_800_000_000_000,
+		Validator:          validator,
+		Signer:             signer,
+		Name:               name,
+		NRecentBlocks:      7,
+		Commission:         "0.05",
+		IsJailed:           true,
+		UnjailableAfter:    1_800_000_000_000,
+		HasUnjailableAfter: true,
 		Stats: [][]json.RawMessage{
 			b04StatPair("day", "0.99", "0.12"),
 			b04StatPair("week", "0.98", "0.11"),
@@ -101,6 +102,17 @@ func TestValidatorOptionalInvalidNumbersDoNotRejectRequiredSnapshot(t *testing.T
 	}})
 	if err != nil {
 		t.Fatalf("invalid optional fields rejected complete required snapshot: %v", err)
+	}
+}
+
+func TestValidateValidatorSummariesRejectsJailedRowWithoutUnjailableAfter(t *testing.T) {
+	_, err := validateValidatorSummaries([]hyperliquidapi.ValidatorSummary{{
+		Validator: "0xb040000000000000000000000000000000000005",
+		Signer:    "0xb040000000000000000000000000000000000006",
+		IsJailed:  true,
+	}})
+	if err == nil {
+		t.Fatal("jailed validator without unjailableAfter was accepted")
 	}
 }
 
