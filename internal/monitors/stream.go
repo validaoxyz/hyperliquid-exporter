@@ -10,10 +10,12 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
 )
 
-// pendingLineCap bounds the torn-line reassembly buffer. Consensus lines
-// reach single-digit MBs; anything past this is a corrupt stream and gets
-// dropped rather than ballooning memory.
+// pendingLineCap bounds torn-line reassembly. Once exceeded, the tailer
+// discards through the next delimiter as one corrupt record; it never commits
+// a cursor in the middle of that record.
 const pendingLineCap = 64 << 20
+
+const rotationDrainGrace = 2 * time.Second
 
 // tailStreamOpts configures tailStream, the shared follow-the-newest-file
 // loop used by the streaming monitors.
@@ -34,36 +36,96 @@ type tailStreamOpts struct {
 	onSwitch    func(path string) // optional: after switching to a new file
 }
 
+type pendingStreamSwitch struct {
+	path          string
+	detectedAt    time.Time
+	confirmations int
+	immediate     bool // same-inode truncation; no old tail can be recovered
+}
+
 // tailStream follows the newest file of a stream, calling onLine for every
-// complete line. On startup it seeks to the end of the current file (the
-// no-replay rule: replaying history would double-count counters). A partial
-// line at EOF is buffered and reassembled once the writer completes it
-// instead of being consumed as a torn line. Resolve and open failures are
-// logged and retried, not fatal: streams legitimately appear late
-// (validator-only dirs) and roll over hourly.
+// newline-committed record. A file found by the first successful startup scan
+// is sought to EOF to avoid replaying process counters. If that scan is
+// successfully empty, the first file created later is read from byte zero.
 //
-// This replaces a per-monitor pattern that re-ran a full recursive
-// directory walk on every 10ms EOF pause, which is where most of the
-// exporter's CPU used to go.
+// Rotation is overlap-safe: the old inode remains open and must reach two
+// stable EOF observations before the new file is activated. A torn old-file
+// suffix gets a bounded grace period to receive its delimiter. The committed
+// cursor advances only through newline-delimited records, so a partial record
+// is either completed once or deliberately discarded as one corrupt record.
 func tailStream(ctx context.Context, o tailStreamOpts) {
 	var (
-		file     *os.File
-		reader   *bufio.Reader
-		current  string
-		pending  []byte
-		lastScan time.Time
+		file            *os.File
+		reader          *bufio.Reader
+		current         string
+		currentInfo     os.FileInfo
+		committedOffset int64
+		pending         []byte
+		discardedBytes  int64
+		lastScan        time.Time
+		startupScanned  bool
+		startupPath     string
+		next            *pendingStreamSwitch
 	)
-	firstRun := true
 
 	defer func() {
 		if file != nil {
-			file.Close()
+			_ = file.Close()
 		}
 	}()
 
 	bufSize := o.bufSize
 	if bufSize == 0 {
 		bufSize = 64 * 1024
+	}
+	if o.rescanEvery <= 0 {
+		o.rescanEvery = 2 * time.Second
+	}
+	if o.eofSleep <= 0 {
+		o.eofSleep = 100 * time.Millisecond
+	}
+
+	activate := func(path string, skipExisting bool) bool {
+		candidate, err := os.Open(path)
+		if err != nil {
+			logger.WarningComponent(o.component, "%s: cannot open %s: %v", o.name, path, err)
+			return false
+		}
+		info, err := candidate.Stat()
+		if err != nil {
+			_ = candidate.Close()
+			logger.WarningComponent(o.component, "%s: cannot stat %s: %v", o.name, path, err)
+			return false
+		}
+		offset := int64(0)
+		if skipExisting {
+			offset, err = candidate.Seek(0, io.SeekEnd)
+			if err != nil {
+				_ = candidate.Close()
+				logger.WarningComponent(o.component, "%s: seek to end of %s: %v", o.name, path, err)
+				return false
+			}
+		}
+		if file != nil {
+			_ = file.Close()
+		}
+		file = candidate
+		reader = bufio.NewReaderSize(candidate, bufSize)
+		current = path
+		currentInfo = info
+		committedOffset = offset
+		pending = nil
+		discardedBytes = 0
+		next = nil
+		if skipExisting {
+			logger.InfoComponent(o.component, "%s: streaming from end of %s", o.name, path)
+		} else {
+			logger.InfoComponent(o.component, "%s: switching to %s", o.name, path)
+		}
+		if o.onSwitch != nil {
+			o.onSwitch(path)
+		}
+		return true
 	}
 
 	for {
@@ -75,66 +137,54 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 
 		if reader == nil || time.Since(lastScan) >= o.rescanEvery {
 			lastScan = time.Now()
-			latest, err := o.resolve()
+			latest, resolveErr := o.resolve()
+			if resolveErr == nil && !startupScanned {
+				startupScanned = true
+				startupPath = latest
+			}
+
 			switch {
-			case err != nil || latest == "":
+			case resolveErr != nil || latest == "":
 				if reader == nil {
-					// stream not there yet (non-validator node, fresh
-					// install): check again in a full rescan period
 					if !sleepCtx(ctx, o.rescanEvery) {
 						return
 					}
 					continue
 				}
-				// keep draining the file we already have
-			case latest != current || reader == nil:
-				// reader == nil covers a failed open of a since-vanished
-				// newer file: without it, latest == current would skip the
-				// reopen forever
-				reopenSame := latest == current
-				if file != nil {
-					file.Close()
-					file, reader = nil, nil
-				}
-				pending = nil
-				f, err := os.Open(latest)
-				if err != nil {
-					logger.WarningComponent(o.component, "%s: cannot open %s: %v", o.name, latest, err)
+			case reader == nil:
+				// Only the exact file found by the first successful startup
+				// scan is historical. A first file discovered after a clean
+				// empty scan starts at byte zero.
+				skipExisting := startupPath != "" && latest == startupPath
+				if !activate(latest, skipExisting) {
 					if !sleepCtx(ctx, time.Second) {
 						return
 					}
 					continue
 				}
-				if reopenSame && !firstRun {
-					// re-opening the file we already consumed: resume at the
-					// end rather than re-emitting it from byte 0
-					if _, err := f.Seek(0, io.SeekEnd); err != nil {
-						f.Close()
-						if !sleepCtx(ctx, time.Second) {
-							return
+			default:
+				needsSwitch := latest != current
+				immediate := false
+				if latest == current {
+					latestInfo, err := os.Stat(latest)
+					if err == nil {
+						if currentInfo != nil && !os.SameFile(currentInfo, latestInfo) {
+							needsSwitch = true
+						} else if latestInfo.Size() < committedOffset+int64(len(pending))+discardedBytes {
+							needsSwitch = true
+							immediate = true
 						}
-						continue
 					}
 				}
-				if firstRun {
-					if _, err := f.Seek(0, io.SeekEnd); err != nil {
-						logger.WarningComponent(o.component, "%s: seek to end of %s: %v", o.name, latest, err)
-						f.Close()
-						if !sleepCtx(ctx, time.Second) {
-							return
-						}
-						continue
+				if needsSwitch && (next == nil || next.path != latest || next.immediate != immediate) {
+					next = &pendingStreamSwitch{
+						path:       latest,
+						detectedAt: time.Now(),
+						immediate:  immediate,
 					}
-					logger.InfoComponent(o.component, "%s: streaming from end of %s", o.name, latest)
-				} else {
-					logger.InfoComponent(o.component, "%s: switching to %s", o.name, latest)
-				}
-				firstRun = false
-				file = f
-				reader = bufio.NewReaderSize(file, bufSize)
-				current = latest
-				if o.onSwitch != nil {
-					o.onSwitch(latest)
+				} else if !needsSwitch && next != nil && next.path != current {
+					// The candidate disappeared before it was activated.
+					next = nil
 				}
 			}
 		}
@@ -146,15 +196,21 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 			continue
 		}
 
+		madeProgress := false
 		for {
 			chunk, err := reader.ReadString('\n')
 			if err != nil {
 				if len(chunk) > 0 {
-					// torn tail: keep it until the writer finishes the line
-					pending = append(pending, chunk...)
-					if len(pending) > pendingLineCap {
-						logger.WarningComponent(o.component, "%s: dropping oversized partial line (%d bytes)", o.name, len(pending))
-						pending = nil
+					madeProgress = true
+					if discardedBytes > 0 {
+						discardedBytes += int64(len(chunk))
+					} else {
+						pending = append(pending, chunk...)
+						if len(pending) > pendingLineCap {
+							logger.WarningComponent(o.component, "%s: discarding oversized partial record (%d bytes)", o.name, len(pending))
+							discardedBytes = int64(len(pending))
+							pending = nil
+						}
 					}
 				}
 				if err != io.EOF {
@@ -162,17 +218,52 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 				}
 				break
 			}
+
+			madeProgress = true
+			if discardedBytes > 0 {
+				// The delimiter commits the deliberately discarded corrupt
+				// record and is the first point at which its cursor may move.
+				committedOffset += discardedBytes + int64(len(chunk))
+				discardedBytes = 0
+				continue
+			}
+
 			line := chunk
 			if len(pending) > 0 {
 				line = string(pending) + chunk
+				committedOffset += int64(len(pending))
 				pending = pending[:0]
 			}
+			committedOffset += int64(len(chunk))
 			o.onLine(line)
 		}
 
 		if o.onIdle != nil {
 			o.onIdle()
 		}
+
+		if next != nil {
+			if next.immediate {
+				// A same-inode truncation invalidates the unread old suffix.
+				// Open the replacement before closing the current descriptor.
+				if activate(next.path, false) {
+					continue
+				}
+			} else if madeProgress {
+				next.confirmations = 0
+			} else if len(pending) == 0 && discardedBytes == 0 {
+				next.confirmations++
+				if next.confirmations >= 2 && activate(next.path, false) {
+					continue
+				}
+			} else if time.Since(next.detectedAt) >= rotationDrainGrace {
+				logger.WarningComponent(o.component, "%s: dropping unterminated tail while switching from %s to %s", o.name, current, next.path)
+				if activate(next.path, false) {
+					continue
+				}
+			}
+		}
+
 		if !sleepCtx(ctx, o.eofSleep) {
 			return
 		}
@@ -181,10 +272,12 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 
 // sleepCtx sleeps for d or until ctx is done; reports false when ctx won.
 func sleepCtx(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		return false
-	case <-time.After(d):
+	case <-timer.C:
 		return true
 	}
 }
