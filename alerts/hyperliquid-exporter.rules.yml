@@ -1,0 +1,70 @@
+groups:
+  - name: hyperliquid-exporter
+    rules:
+      - alert: HyperliquidExporterDown
+        expr: |
+          up{job=~"hyperliquid-exporter(/.*)?"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Hyperliquid exporter scrape target is down"
+          description: "Prometheus has not successfully scraped this exporter target for 2 minutes."
+
+      - alert: HyperliquidExporterNotReady
+        expr: |
+          (hl_exporter_ready == 0)
+            and on(job, instance)
+          (up{job=~"hyperliquid-exporter(/.*)?"} == 1)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Hyperliquid exporter has not reached startup readiness"
+          description: "Registered exporter workers have not all started after 5 minutes; this does not attest node health."
+
+      - alert: HyperliquidExporterMonitorExited
+        expr: |
+          (hl_exporter_monitor_registered == 1)
+            and
+          (hl_exporter_monitor_running == 0)
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A registered Hyperliquid exporter monitor is not running"
+          description: "A registered exporter monitor has remained stopped for 2 minutes."
+
+      - alert: HyperliquidExporterMonitorPanicked
+        expr: |
+          increase(hl_exporter_monitor_panics_total[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "A Hyperliquid exporter monitor panicked"
+          description: "The exporter recorded at least one monitor panic in the last 10 minutes."
+
+      - alert: HyperliquidExporterErrorReportsDropped
+        expr: |
+          increase(hl_exporter_monitor_error_drops_total[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Hyperliquid exporter error reports were dropped"
+          description: "The exporter recorded at least one dropped monitor error report in the last 10 minutes."
+
+      - alert: HyperliquidExporterSourceReadOrSchemaFailed
+        expr: |
+          (hl_exporter_source_enabled == 1)
+            and on(job, instance, source)
+          (
+            (hl_exporter_source_read_ok == 0)
+              or
+            (hl_exporter_source_schema_ok == 0)
+          )
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A Hyperliquid exporter source read or schema check failed"
+          description: "An enabled source has reported a failed last read or schema outcome for 5 minutes."

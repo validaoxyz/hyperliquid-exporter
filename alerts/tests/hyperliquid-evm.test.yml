@@ -1,0 +1,65 @@
+rule_files:
+  - ../hyperliquid-evm.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: HyperliquidEVMTxReceiptCountMismatch firing
+    interval: 1m
+    input_series:
+      - series: 'hl_evm_tx_receipt_count_mismatches_total{job="hyperliquid-exporter",instance="node-a"}'
+        values: '0 0 0 1 1 1'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HyperliquidEVMTxReceiptCountMismatch
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: hyperliquid-exporter
+              instance: node-a
+            exp_annotations:
+              summary: "Hyperliquid EVM transaction and receipt counts differed"
+              description: "At least one accepted EVM block had different transaction-array and receipt-array lengths in the last 10 minutes."
+
+  - name: HyperliquidEVMTxReceiptCountMismatch nonfiring reset and absent
+    interval: 1m
+    input_series:
+      - series: 'hl_evm_tx_receipt_count_mismatches_total{job="hyperliquid-exporter",instance="flat"}'
+        values: '3 3 3 3 3 3'
+      - series: 'hl_evm_tx_receipt_count_mismatches_total{job="hyperliquid-exporter",instance="reset"}'
+        values: '9 9 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HyperliquidEVMTxReceiptCountMismatch
+        exp_alerts: []
+
+  - name: HyperliquidEVMParseErrors firing
+    interval: 1m
+    input_series:
+      - series: 'hl_evm_parse_errors_total{job="hyperliquid-exporter",instance="node-a",stage="outer",reason="malformed"}'
+        values: '0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HyperliquidEVMParseErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: hyperliquid-exporter
+              instance: node-a
+              stage: outer
+              reason: malformed
+            exp_annotations:
+              summary: "Hyperliquid EVM stream records were rejected"
+              description: "The exporter rejected at least one EVM stream record in the last 10 minutes."
+
+  - name: HyperliquidEVMParseErrors nonfiring reset and absent
+    interval: 1m
+    input_series:
+      - series: 'hl_evm_parse_errors_total{job="hyperliquid-exporter",instance="flat",stage="outer",reason="malformed"}'
+        values: '2 2 2 2 2 2'
+      - series: 'hl_evm_parse_errors_total{job="hyperliquid-exporter",instance="reset",stage="outer",reason="malformed"}'
+        values: '8 8 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HyperliquidEVMParseErrors
+        exp_alerts: []

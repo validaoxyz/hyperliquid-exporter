@@ -1,0 +1,14 @@
+groups:
+  - name: hyperliquid-extended
+    rules:
+      - alert: HyperliquidTmpMaterialStale
+        expr: |
+          (hl_node_tmp_scan_up == 1)
+            and
+          (hl_node_tmp_material_stale_bytes > 0)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Retained Hyperliquid tmp material is stale"
+          description: "A complete tmp scan has reported non-receipt material bytes older than 24 hours for 15 minutes."

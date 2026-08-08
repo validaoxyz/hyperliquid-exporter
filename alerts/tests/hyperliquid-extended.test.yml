@@ -1,0 +1,44 @@
+rule_files:
+  - ../hyperliquid-extended.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: HyperliquidTmpMaterialStale firing
+    interval: 1m
+    input_series:
+      - series: 'hl_node_tmp_scan_up{job="hyperliquid-exporter",instance="node-a"}'
+        values: '1x16'
+      - series: 'hl_node_tmp_material_stale_bytes{job="hyperliquid-exporter",instance="node-a"}'
+        values: '4096x16'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: HyperliquidTmpMaterialStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: hyperliquid-exporter
+              instance: node-a
+            exp_annotations:
+              summary: "Retained Hyperliquid tmp material is stale"
+              description: "A complete tmp scan has reported non-receipt material bytes older than 24 hours for 15 minutes."
+
+  - name: HyperliquidTmpMaterialStale nonfiring
+    interval: 1m
+    input_series:
+      - series: 'hl_node_tmp_scan_up{job="hyperliquid-exporter",instance="scan-failed"}'
+        values: '0x16'
+      - series: 'hl_node_tmp_material_stale_bytes{job="hyperliquid-exporter",instance="scan-failed"}'
+        values: '4096x16'
+      - series: 'hl_node_tmp_scan_up{job="hyperliquid-exporter",instance="material-zero"}'
+        values: '1x16'
+      - series: 'hl_node_tmp_material_stale_bytes{job="hyperliquid-exporter",instance="material-zero"}'
+        values: '0x16'
+      - series: 'hl_node_tmp_scan_up{job="hyperliquid-exporter",instance="short"}'
+        values: '1x16'
+      - series: 'hl_node_tmp_material_stale_bytes{job="hyperliquid-exporter",instance="short"}'
+        values: '0 0 0 0 0 0 0 0 0 0 4096 4096 4096 4096 4096 4096 4096'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: HyperliquidTmpMaterialStale
+        exp_alerts: []

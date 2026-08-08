@@ -1,0 +1,109 @@
+rule_files:
+  - ../hyperliquid-linux.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: HyperliquidNodeProcessDown firing
+    interval: 1m
+    input_series:
+      - series: 'hl_node_process_up{job="hyperliquid-exporter",instance="node-a",process="hl-node"}'
+        values: '0'
+      - series: 'hl_exporter_source_enabled{job="hyperliquid-exporter",instance="node-a",source="process"}'
+        values: '1'
+      - series: 'hl_exporter_source_read_ok{job="hyperliquid-exporter",instance="node-a",source="process"}'
+        values: '1'
+      - series: 'hl_exporter_source_schema_ok{job="hyperliquid-exporter",instance="node-a",source="process"}'
+        values: '1'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: HyperliquidNodeProcessDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: hyperliquid-exporter
+              instance: node-a
+              process: hl-node
+            exp_annotations:
+              summary: "The hl-node process is not present"
+              description: "A complete valid procfs scan did not find the hl-node process."
+
+  - name: HyperliquidNodeProcessDown nonfiring
+    interval: 1m
+    input_series:
+      - series: 'hl_node_process_up{job="hyperliquid-exporter",instance="healthy",process="hl-node"}'
+        values: '1'
+      - series: 'hl_exporter_source_enabled{job="hyperliquid-exporter",instance="healthy",source="process"}'
+        values: '1'
+      - series: 'hl_exporter_source_read_ok{job="hyperliquid-exporter",instance="healthy",source="process"}'
+        values: '1'
+      - series: 'hl_exporter_source_schema_ok{job="hyperliquid-exporter",instance="healthy",source="process"}'
+        values: '1'
+      - series: 'hl_node_process_up{job="hyperliquid-exporter",instance="disabled",process="hl-node"}'
+        values: '0'
+      - series: 'hl_exporter_source_enabled{job="hyperliquid-exporter",instance="disabled",source="process"}'
+        values: '0'
+      - series: 'hl_exporter_source_read_ok{job="hyperliquid-exporter",instance="disabled",source="process"}'
+        values: '1'
+      - series: 'hl_exporter_source_schema_ok{job="hyperliquid-exporter",instance="disabled",source="process"}'
+        values: '1'
+      - series: 'hl_node_process_up{job="hyperliquid-exporter",instance="read-failed",process="hl-node"}'
+        values: '0'
+      - series: 'hl_exporter_source_enabled{job="hyperliquid-exporter",instance="read-failed",source="process"}'
+        values: '1'
+      - series: 'hl_exporter_source_read_ok{job="hyperliquid-exporter",instance="read-failed",source="process"}'
+        values: '0'
+      - series: 'hl_exporter_source_schema_ok{job="hyperliquid-exporter",instance="read-failed",source="process"}'
+        values: '1'
+      - series: 'hl_node_process_up{job="hyperliquid-exporter",instance="schema-failed",process="hl-node"}'
+        values: '0'
+      - series: 'hl_exporter_source_enabled{job="hyperliquid-exporter",instance="schema-failed",source="process"}'
+        values: '1'
+      - series: 'hl_exporter_source_read_ok{job="hyperliquid-exporter",instance="schema-failed",source="process"}'
+        values: '1'
+      - series: 'hl_exporter_source_schema_ok{job="hyperliquid-exporter",instance="schema-failed",source="process"}'
+        values: '0'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: HyperliquidNodeProcessDown
+        exp_alerts: []
+
+  - name: HyperliquidVisorProcessDown firing
+    interval: 1m
+    input_series:
+      - series: 'hl_node_process_up{job="hyperliquid-exporter",instance="node-a",process="hl-visor"}'
+        values: '0'
+      - series: 'hl_exporter_source_enabled{job="hyperliquid-exporter",instance="node-a",source="process"}'
+        values: '1'
+      - series: 'hl_exporter_source_read_ok{job="hyperliquid-exporter",instance="node-a",source="process"}'
+        values: '1'
+      - series: 'hl_exporter_source_schema_ok{job="hyperliquid-exporter",instance="node-a",source="process"}'
+        values: '1'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: HyperliquidVisorProcessDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: hyperliquid-exporter
+              instance: node-a
+              process: hl-visor
+            exp_annotations:
+              summary: "The hl-visor process is not present"
+              description: "A complete valid procfs scan did not find the hl-visor process."
+
+  - name: HyperliquidVisorProcessDown nonfiring
+    interval: 1m
+    input_series:
+      - series: 'hl_node_process_up{job="hyperliquid-exporter",instance="healthy",process="hl-visor"}'
+        values: '1'
+      - series: 'hl_exporter_source_enabled{job="hyperliquid-exporter",instance="healthy",source="process"}'
+        values: '1'
+      - series: 'hl_exporter_source_read_ok{job="hyperliquid-exporter",instance="healthy",source="process"}'
+        values: '1'
+      - series: 'hl_exporter_source_schema_ok{job="hyperliquid-exporter",instance="healthy",source="process"}'
+        values: '1'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: HyperliquidVisorProcessDown
+        exp_alerts: []

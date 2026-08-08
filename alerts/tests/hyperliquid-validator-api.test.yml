@@ -1,0 +1,48 @@
+rule_files:
+  - ../hyperliquid-validator-api.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: HyperliquidValidatorAPIStaleFallback firing
+    interval: 1m
+    input_series:
+      - series: 'hl_validator_api_up{job="hyperliquid-exporter",instance="node-a"}'
+        values: '0 0 0 0 0 0 0'
+      - series: 'hl_validator_api_cache_stale{job="hyperliquid-exporter",instance="node-a"}'
+        values: '1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: HyperliquidValidatorAPIStaleFallback
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: hyperliquid-exporter
+              instance: node-a
+            exp_annotations:
+              summary: "Hyperliquid validator API refresh is using stale fallback data"
+              description: "Validator-summary refresh failed; stale cached data in use for 5 minutes."
+
+  - name: HyperliquidValidatorAPIStaleFallback nonfiring
+    interval: 1m
+    input_series:
+      - series: 'hl_validator_api_up{job="hyperliquid-exporter",instance="startup"}'
+        values: '0 0 0 0 0 0 0'
+      - series: 'hl_validator_api_cache_stale{job="hyperliquid-exporter",instance="startup"}'
+        values: '0 0 0 0 0 0 0'
+      - series: 'hl_validator_api_up{job="hyperliquid-exporter",instance="fresh"}'
+        values: '1 1 1 1 1 1 1'
+      - series: 'hl_validator_api_cache_stale{job="hyperliquid-exporter",instance="fresh"}'
+        values: '0 0 0 0 0 0 0'
+      - series: 'hl_validator_api_up{job="hyperliquid-exporter",instance="failed-no-cache"}'
+        values: '0 0 0 0 0 0 0'
+      - series: 'hl_validator_api_cache_stale{job="hyperliquid-exporter",instance="failed-no-cache"}'
+        values: '0 0 0 0 0 0 0'
+      - series: 'hl_validator_api_up{job="hyperliquid-exporter",instance="recovered"}'
+        values: '0 0 0 1 1 1 1'
+      - series: 'hl_validator_api_cache_stale{job="hyperliquid-exporter",instance="recovered"}'
+        values: '1 1 1 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: HyperliquidValidatorAPIStaleFallback
+        exp_alerts: []

@@ -1,0 +1,32 @@
+groups:
+  - name: hyperliquid-linux
+    rules:
+      - alert: HyperliquidNodeProcessDown
+        expr: |
+          (hl_node_process_up{process="hl-node"} == 0)
+            and on(job, instance)
+          (hl_exporter_source_enabled{source="process"} == 1)
+            and on(job, instance)
+          (hl_exporter_source_read_ok{source="process"} == 1)
+            and on(job, instance)
+          (hl_exporter_source_schema_ok{source="process"} == 1)
+        labels:
+          severity: critical
+        annotations:
+          summary: "The hl-node process is not present"
+          description: "A complete valid procfs scan did not find the hl-node process."
+
+      - alert: HyperliquidVisorProcessDown
+        expr: |
+          (hl_node_process_up{process="hl-visor"} == 0)
+            and on(job, instance)
+          (hl_exporter_source_enabled{source="process"} == 1)
+            and on(job, instance)
+          (hl_exporter_source_read_ok{source="process"} == 1)
+            and on(job, instance)
+          (hl_exporter_source_schema_ok{source="process"} == 1)
+        labels:
+          severity: critical
+        annotations:
+          summary: "The hl-visor process is not present"
+          description: "A complete valid procfs scan did not find the hl-visor process."

@@ -1,0 +1,14 @@
+groups:
+  - name: hyperliquid-validator-api
+    rules:
+      - alert: HyperliquidValidatorAPIStaleFallback
+        expr: |
+          (hl_validator_api_up == 0)
+            and
+          (hl_validator_api_cache_stale == 1)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Hyperliquid validator API refresh is using stale fallback data"
+          description: "Validator-summary refresh failed; stale cached data in use for 5 minutes."

@@ -1,0 +1,22 @@
+groups:
+  - name: hyperliquid-evm
+    rules:
+      - alert: HyperliquidEVMTxReceiptCountMismatch
+        expr: |
+          increase(hl_evm_tx_receipt_count_mismatches_total[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Hyperliquid EVM transaction and receipt counts differed"
+          description: "At least one accepted EVM block had different transaction-array and receipt-array lengths in the last 10 minutes."
+
+      - alert: HyperliquidEVMParseErrors
+        expr: |
+          sum by(job, instance, stage, reason) (
+            increase(hl_evm_parse_errors_total[10m])
+          ) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Hyperliquid EVM stream records were rejected"
+          description: "The exporter rejected at least one EVM stream record in the last 10 minutes."

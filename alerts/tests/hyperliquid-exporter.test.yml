@@ -1,0 +1,239 @@
+rule_files:
+  - ../hyperliquid-exporter.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: HyperliquidExporterDown firing
+    interval: 1m
+    input_series:
+      - series: 'up{job="hyperliquid-exporter",instance="node-a"}'
+        values: '0 0 0 0'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: HyperliquidExporterDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: hyperliquid-exporter
+              instance: node-a
+            exp_annotations:
+              summary: "Hyperliquid exporter scrape target is down"
+              description: "Prometheus has not successfully scraped this exporter target for 2 minutes."
+
+  - name: HyperliquidExporterDown nonfiring
+    interval: 1m
+    input_series:
+      - series: 'up{job="hyperliquid-exporter",instance="healthy"}'
+        values: '1 1 1 1'
+      - series: 'up{job="other-exporter",instance="wrong-job"}'
+        values: '0 0 0 0'
+      - series: 'up{job="hyperliquid-exporter/subnet",instance="short"}'
+        values: '1 1 0 0'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: HyperliquidExporterDown
+        exp_alerts: []
+
+  - name: HyperliquidExporterNotReady firing
+    interval: 1m
+    input_series:
+      - series: 'up{job="hyperliquid-exporter",instance="node-a"}'
+        values: '1 1 1 1 1 1 1'
+      - series: 'hl_exporter_ready{job="hyperliquid-exporter",instance="node-a"}'
+        values: '0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: HyperliquidExporterNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: hyperliquid-exporter
+              instance: node-a
+            exp_annotations:
+              summary: "Hyperliquid exporter has not reached startup readiness"
+              description: "Registered exporter workers have not all started after 5 minutes; this does not attest node health."
+
+  - name: HyperliquidExporterNotReady nonfiring
+    interval: 1m
+    input_series:
+      - series: 'up{job="hyperliquid-exporter",instance="down"}'
+        values: '0 0 0 0 0 0'
+      - series: 'hl_exporter_ready{job="hyperliquid-exporter",instance="down"}'
+        values: '0 0 0 0 0 0'
+      - series: 'up{job="hyperliquid-exporter",instance="ready"}'
+        values: '1 1 1 1 1 1'
+      - series: 'hl_exporter_ready{job="hyperliquid-exporter",instance="ready"}'
+        values: '1 1 1 1 1 1'
+      - series: 'up{job="hyperliquid-exporter",instance="short"}'
+        values: '1 1 1 1 1 1'
+      - series: 'hl_exporter_ready{job="hyperliquid-exporter",instance="short"}'
+        values: '1 1 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HyperliquidExporterNotReady
+        exp_alerts: []
+
+  - name: HyperliquidExporterMonitorExited firing
+    interval: 1m
+    input_series:
+      - series: 'hl_exporter_monitor_registered{job="hyperliquid-exporter",instance="node-a",monitor="consensus"}'
+        values: '1 1 1 1'
+      - series: 'hl_exporter_monitor_running{job="hyperliquid-exporter",instance="node-a",monitor="consensus"}'
+        values: '0 0 0 0'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: HyperliquidExporterMonitorExited
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: hyperliquid-exporter
+              instance: node-a
+              monitor: consensus
+            exp_annotations:
+              summary: "A registered Hyperliquid exporter monitor is not running"
+              description: "A registered exporter monitor has remained stopped for 2 minutes."
+
+  - name: HyperliquidExporterMonitorExited nonfiring
+    interval: 1m
+    input_series:
+      - series: 'hl_exporter_monitor_registered{job="hyperliquid-exporter",instance="running",monitor="consensus"}'
+        values: '1 1 1 1'
+      - series: 'hl_exporter_monitor_running{job="hyperliquid-exporter",instance="running",monitor="consensus"}'
+        values: '1 1 1 1'
+      - series: 'hl_exporter_monitor_registered{job="hyperliquid-exporter",instance="unregistered",monitor="optional"}'
+        values: '0 0 0 0'
+      - series: 'hl_exporter_monitor_running{job="hyperliquid-exporter",instance="unregistered",monitor="optional"}'
+        values: '0 0 0 0'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: HyperliquidExporterMonitorExited
+        exp_alerts: []
+
+  - name: HyperliquidExporterMonitorPanicked firing
+    interval: 1m
+    input_series:
+      - series: 'hl_exporter_monitor_panics_total{job="hyperliquid-exporter",instance="node-a",monitor="consensus"}'
+        values: '0 0 0 1 1 1'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HyperliquidExporterMonitorPanicked
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: hyperliquid-exporter
+              instance: node-a
+              monitor: consensus
+            exp_annotations:
+              summary: "A Hyperliquid exporter monitor panicked"
+              description: "The exporter recorded at least one monitor panic in the last 10 minutes."
+
+  - name: HyperliquidExporterMonitorPanicked nonfiring reset and absent
+    interval: 1m
+    input_series:
+      - series: 'hl_exporter_monitor_panics_total{job="hyperliquid-exporter",instance="flat",monitor="consensus"}'
+        values: '3 3 3 3 3 3'
+      - series: 'hl_exporter_monitor_panics_total{job="hyperliquid-exporter",instance="reset",monitor="consensus"}'
+        values: '7 7 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HyperliquidExporterMonitorPanicked
+        exp_alerts: []
+
+  - name: HyperliquidExporterErrorReportsDropped firing
+    interval: 1m
+    input_series:
+      - series: 'hl_exporter_monitor_error_drops_total{job="hyperliquid-exporter",instance="node-a",monitor="disk"}'
+        values: '0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HyperliquidExporterErrorReportsDropped
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: hyperliquid-exporter
+              instance: node-a
+              monitor: disk
+            exp_annotations:
+              summary: "Hyperliquid exporter error reports were dropped"
+              description: "The exporter recorded at least one dropped monitor error report in the last 10 minutes."
+
+  - name: HyperliquidExporterErrorReportsDropped nonfiring reset and absent
+    interval: 1m
+    input_series:
+      - series: 'hl_exporter_monitor_error_drops_total{job="hyperliquid-exporter",instance="flat",monitor="disk"}'
+        values: '2 2 2 2 2 2'
+      - series: 'hl_exporter_monitor_error_drops_total{job="hyperliquid-exporter",instance="reset",monitor="disk"}'
+        values: '4 4 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HyperliquidExporterErrorReportsDropped
+        exp_alerts: []
+
+  - name: HyperliquidExporterSourceReadOrSchemaFailed firing
+    interval: 1m
+    input_series:
+      - series: 'hl_exporter_source_enabled{job="hyperliquid-exporter",instance="read-failed",source="block_fast"}'
+        values: '1 1 1 1 1 1 1'
+      - series: 'hl_exporter_source_read_ok{job="hyperliquid-exporter",instance="read-failed",source="block_fast"}'
+        values: '0 0 0 0 0 0 0'
+      - series: 'hl_exporter_source_schema_ok{job="hyperliquid-exporter",instance="read-failed",source="block_fast"}'
+        values: '1 1 1 1 1 1 1'
+      - series: 'hl_exporter_source_enabled{job="hyperliquid-exporter",instance="schema-failed",source="evm_stream"}'
+        values: '1 1 1 1 1 1 1'
+      - series: 'hl_exporter_source_read_ok{job="hyperliquid-exporter",instance="schema-failed",source="evm_stream"}'
+        values: '1 1 1 1 1 1 1'
+      - series: 'hl_exporter_source_schema_ok{job="hyperliquid-exporter",instance="schema-failed",source="evm_stream"}'
+        values: '0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: HyperliquidExporterSourceReadOrSchemaFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: hyperliquid-exporter
+              instance: read-failed
+              source: block_fast
+            exp_annotations:
+              summary: "A Hyperliquid exporter source read or schema check failed"
+              description: "An enabled source has reported a failed last read or schema outcome for 5 minutes."
+          - exp_labels:
+              severity: warning
+              job: hyperliquid-exporter
+              instance: schema-failed
+              source: evm_stream
+            exp_annotations:
+              summary: "A Hyperliquid exporter source read or schema check failed"
+              description: "An enabled source has reported a failed last read or schema outcome for 5 minutes."
+
+  - name: HyperliquidExporterSourceReadOrSchemaFailed nonfiring
+    interval: 1m
+    input_series:
+      - series: 'hl_exporter_source_enabled{job="hyperliquid-exporter",instance="disabled",source="optional"}'
+        values: '0 0 0 0 0 0 0'
+      - series: 'hl_exporter_source_read_ok{job="hyperliquid-exporter",instance="disabled",source="optional"}'
+        values: '0 0 0 0 0 0 0'
+      - series: 'hl_exporter_source_schema_ok{job="hyperliquid-exporter",instance="disabled",source="optional"}'
+        values: '0 0 0 0 0 0 0'
+      - series: 'hl_exporter_source_enabled{job="hyperliquid-exporter",instance="not-applicable",source="optional"}'
+        values: '1 1 1 1 1 1 1'
+      - series: 'hl_exporter_source_read_ok{job="hyperliquid-exporter",instance="not-applicable",source="optional"}'
+        values: '-1 -1 -1 -1 -1 -1 -1'
+      - series: 'hl_exporter_source_schema_ok{job="hyperliquid-exporter",instance="not-applicable",source="optional"}'
+        values: '-1 -1 -1 -1 -1 -1 -1'
+      - series: 'hl_exporter_source_enabled{job="hyperliquid-exporter",instance="healthy",source="block_fast"}'
+        values: '1 1 1 1 1 1 1'
+      - series: 'hl_exporter_source_read_ok{job="hyperliquid-exporter",instance="healthy",source="block_fast"}'
+        values: '1 1 1 1 1 1 1'
+      - series: 'hl_exporter_source_schema_ok{job="hyperliquid-exporter",instance="healthy",source="block_fast"}'
+        values: '1 1 1 1 1 1 1'
+      - series: 'hl_exporter_source_enabled{job="hyperliquid-exporter",instance="recovered",source="block_fast"}'
+        values: '1 1 1 1 1 1 1'
+      - series: 'hl_exporter_source_read_ok{job="hyperliquid-exporter",instance="recovered",source="block_fast"}'
+        values: '0 0 0 1 1 1 1'
+      - series: 'hl_exporter_source_schema_ok{job="hyperliquid-exporter",instance="recovered",source="block_fast"}'
+        values: '1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: HyperliquidExporterSourceReadOrSchemaFailed
+        exp_alerts: []
