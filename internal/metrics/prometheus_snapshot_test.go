@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 )
 
 func TestSnapshotProtectedGathererCannotObservePartialUpdate(t *testing.T) {
@@ -67,7 +68,7 @@ func TestSnapshotProtectedGathererCannotObservePartialUpdate(t *testing.T) {
 	}
 }
 
-func TestSnapshotProtectedGathererAllowsConcurrentScrapes(t *testing.T) {
+func TestSnapshotProtectedGathererHandlesConcurrentScrapeCalls(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	gauge := prometheus.NewGauge(prometheus.GaugeOpts{Name: "test_snapshot_concurrent"})
 	registry.MustRegister(gauge)
@@ -84,4 +85,51 @@ func TestSnapshotProtectedGathererAllowsConcurrentScrapes(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestSnapshotProtectedGathererRefreshesCommonSourceState(t *testing.T) {
+	resetHealthStateForTest(t)
+	RegisterSource(SourceValidatorAPI, true)
+
+	// Seed the exported projection to the stale startup values observed
+	// remotely, then advance only the in-memory source state.
+	id := string(SourceValidatorAPI)
+	HLExporterSourcePresent.WithLabelValues(id).Set(-1)
+	HLExporterSourceReadOK.WithLabelValues(id).Set(-1)
+	HLExporterSourceSchemaOK.WithLabelValues(id).Set(-1)
+	HLExporterSourceEverObserved.WithLabelValues(id).Set(0)
+	markSourceValidObservationAt(SourceValidatorAPI, time.Time{}, time.Unix(100, 0))
+	markSourcePublicationAt(SourceValidatorAPI, 100)
+
+	families, err := protectPrometheusSnapshots(prometheus.DefaultGatherer).Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"hl_exporter_source_present",
+		"hl_exporter_source_read_ok",
+		"hl_exporter_source_schema_ok",
+		"hl_exporter_source_ever_observed",
+	} {
+		value, ok := sourceMetricValue(families, name, id)
+		if !ok || value != 1 {
+			t.Fatalf("%s{%q} = %v present=%v, want 1", name, id, value, ok)
+		}
+	}
+}
+
+func sourceMetricValue(families []*dto.MetricFamily, name, source string) (float64, bool) {
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, row := range family.Metric {
+			for _, label := range row.Label {
+				if label.GetName() == "source" && label.GetValue() == source {
+					return row.GetGauge().GetValue(), true
+				}
+			}
+		}
+	}
+	return 0, false
 }

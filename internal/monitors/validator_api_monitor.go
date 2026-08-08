@@ -74,7 +74,6 @@ func updateValidatorMetrics(ctx context.Context, cfg config.Config) error {
 	}
 	if result.Stale {
 		metrics.WithPrometheusSnapshotUpdate(func() {
-			updateValidatorAPICacheAge(result.LastSuccess)
 			metrics.HLValidatorAPIUp.Set(0)
 			metrics.HLValidatorAPICacheStale.Set(1)
 			metrics.HLValidatorAPIOutcomesTotal.WithLabelValues(metrics.ValidatorAPIOutcomeStaleFallback).Inc()
@@ -97,7 +96,6 @@ func updateValidatorMetrics(ctx context.Context, cfg config.Config) error {
 	if result.FromCache {
 		metrics.WithPrometheusSnapshotUpdate(func() {
 			metrics.HLValidatorAPICacheStale.Set(0)
-			updateValidatorAPICacheAge(result.LastSuccess)
 			metrics.HLValidatorAPIOutcomesTotal.WithLabelValues(metrics.ValidatorAPIOutcomeFreshCache).Inc()
 		})
 		return nil
@@ -109,12 +107,9 @@ func updateValidatorMetrics(ctx context.Context, cfg config.Config) error {
 func commitValidatorAPISnapshot(summaries []hyperliquidapi.ValidatorSummary, snapshot []metrics.ValidatorSummarySnapshot, lastSuccess time.Time) {
 	metrics.WithPrometheusSnapshotUpdate(func() {
 		metrics.HLValidatorAPICacheStale.Set(0)
-		updateValidatorAPICacheAge(lastSuccess)
 		metrics.HLValidatorAPIUp.Set(1)
 		metrics.HLValidatorAPIOutcomesTotal.WithLabelValues(metrics.ValidatorAPIOutcomeRefreshSuccess).Inc()
-		if !lastSuccess.IsZero() {
-			metrics.HLValidatorAPILastSuccessSeconds.Set(float64(lastSuccess.Unix()))
-		}
+		metrics.SetValidatorAPILastSuccess(lastSuccess)
 
 		for _, summary := range summaries {
 			metrics.RegisterFullAddress(strings.ToLower(summary.Validator))
@@ -130,17 +125,6 @@ func commitValidatorAPISnapshot(summaries []hyperliquidapi.ValidatorSummary, sna
 		metrics.MarkMonitorValidObservation("validator_api")
 		metrics.MarkMonitorPublication("validator_api")
 	})
-}
-
-func updateValidatorAPICacheAge(lastSuccess time.Time) {
-	if lastSuccess.IsZero() {
-		return
-	}
-	age := time.Since(lastSuccess).Seconds()
-	if age < 0 {
-		age = 0
-	}
-	metrics.HLValidatorAPICacheAgeSeconds.Set(age)
 }
 
 func validatorAPIFailureStage(err error) metrics.SourceFailureStage {

@@ -314,6 +314,10 @@ func PublishMonitorHealthSnapshot() {
 }
 
 func publishMonitorHealthSnapshot() {
+	publishMonitorHealthSnapshotAt(time.Now())
+}
+
+func publishMonitorHealthSnapshotAt(now time.Time) {
 	for _, s := range snapshotMonitors() {
 		if s.Registered {
 			HLExporterMonitorRegistered.WithLabelValues(s.Name).Set(1)
@@ -350,7 +354,8 @@ func publishMonitorHealthSnapshot() {
 	} else {
 		HLExporterReady.Set(0)
 	}
-	publishSourceHealthAt(time.Now().Unix())
+	publishSourceHealthAt(now.Unix())
+	publishValidatorAPICacheAgeAt(now)
 }
 
 func setOptionalMonitorTimestamp(metric *prometheus.GaugeVec, monitor string, value int64) {
@@ -913,7 +918,7 @@ var (
 	}, validatorInfoLabels)
 	HLConsensusValidatorUnjailableAfter = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_consensus_validator_unjailable_after_seconds",
-		Help: "Unix timestamp (ms epoch normalized to seconds) after which a jailed validator may unjailSelf. Series exists only while jailed; the countdown is (value - time()).",
+		Help: "Positive unjailableAfter Unix timestamp (ms epoch normalized to seconds) reported for a jailed validator; zero/null sentinels are omitted. The countdown is (value - time()).",
 	}, validatorInfoLabels)
 	HLConsensusValidatorUptimeFraction = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_consensus_validator_uptime_fraction",

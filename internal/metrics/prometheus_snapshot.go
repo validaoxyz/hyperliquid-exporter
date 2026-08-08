@@ -29,8 +29,15 @@ type snapshotProtectedGatherer struct {
 }
 
 func (g snapshotProtectedGatherer) Gather() ([]*dto.MetricFamily, error) {
-	prometheusSnapshotMu.RLock()
-	defer prometheusSnapshotMu.RUnlock()
+	// Refresh in-memory lifecycle/source projections inside the same exclusion
+	// window as collection. A scrape cannot otherwise observe a source-specific
+	// success gauge alongside the previous 10-second common-health snapshot.
+	// The write lock intentionally serializes protected scrapes; collection is
+	// bounded by the HTTP handler, and semantic coherence wins over parallel
+	// reads of mutable derived gauges.
+	prometheusSnapshotMu.Lock()
+	defer prometheusSnapshotMu.Unlock()
+	publishMonitorHealthSnapshot()
 	return g.delegate.Gather()
 }
 
