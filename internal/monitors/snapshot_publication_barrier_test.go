@@ -10,6 +10,8 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
 	hyperliquidapi "github.com/validaoxyz/hyperliquid-exporter/internal/hyperliquid-api"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
+	"github.com/validaoxyz/hyperliquid-exporter/internal/replica"
+	"go.opentelemetry.io/otel"
 )
 
 type lifecycleBlockingGatherer struct {
@@ -139,7 +141,40 @@ func TestCorrectedLogicalSourcesUseSnapshotBarrier(t *testing.T) {
 	})
 
 	t.Run("replica", func(t *testing.T) {
-		assertUsesSnapshotBarrier(t, func() { commitReplicaGeneration(func() {}) })
+		counter, err := otel.Meter("replica-barrier-test").Int64Counter("test_replica_barrier_blocks")
+		if err != nil {
+			t.Fatal(err)
+		}
+		oldCounter := metrics.HLCoreBlocksProcessedCounter
+		metrics.HLCoreBlocksProcessedCounter = counter
+		t.Cleanup(func() { metrics.HLCoreBlocksProcessedCounter = oldCounter })
+		monitor := NewReplicaMonitor("", 1)
+		block := &replica.BlockMetrics{
+			Height:          1,
+			Round:           2,
+			Time:            time.Unix(100, 0),
+			ActionCounts:    map[string]int{},
+			OperationCounts: map[string]int{},
+			MultiSigInner:   map[string]int{},
+			ParserEvents:    map[string]int{},
+			Responses: replica.ResponseMetrics{
+				Coverage:       "unavailable",
+				CountRelation:  "equal",
+				ActionStatuses: map[string]int{},
+				Outcomes:       map[string]int{},
+			},
+		}
+		assertUsesSnapshotBarrier(t, func() { monitor.commitBlock(block) })
+	})
+
+	t.Run("evm_withdrawal", func(t *testing.T) {
+		processor := newEVMProcessor(newRecordingEVMSink(), false, 0)
+		assertUsesSnapshotBarrier(t, func() { processor.commitUnavailable(tailStreamUnavailableEmpty) })
+	})
+
+	t.Run("replica_withdrawal", func(t *testing.T) {
+		monitor := NewReplicaMonitor("", 1)
+		assertUsesSnapshotBarrier(t, func() { monitor.commitUnavailable(tailStreamUnavailableEmpty) })
 	})
 
 	t.Run("info_meta", func(t *testing.T) {

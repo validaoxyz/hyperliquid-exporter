@@ -132,6 +132,38 @@ func TestEVMProcessorParseFailureLeavesIntervalStateUnchanged(t *testing.T) {
 	}
 }
 
+func TestEVMUnavailableResetsOnlyIntervalBaseline(t *testing.T) {
+	sink := newRecordingEVMSink()
+	processor := newEVMProcessor(sink, true, 2)
+	if err := processor.processLine(evmFixtureLine("2026-08-08T03:15:14.100000000", "0x2a", true, `[]`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(processor.recipients.seen) != 1 || fmt.Sprint(sink.mismatchHeights) != "[42]" {
+		t.Fatalf("pre-withdrawal history: recipients=%d mismatches=%v", len(processor.recipients.seen), sink.mismatchHeights)
+	}
+
+	processor.commitUnavailable(tailStreamUnavailableEmpty)
+	if !processor.lastBlockTime.IsZero() {
+		t.Fatalf("unavailable baseline = %v, want reset", processor.lastBlockTime)
+	}
+	if len(processor.recipients.seen) != 1 || fmt.Sprint(sink.mismatchHeights) != "[42]" {
+		t.Fatalf("withdrawal cleared process history: recipients=%d mismatches=%v", len(processor.recipients.seen), sink.mismatchHeights)
+	}
+
+	if err := processor.processLine(evmFixtureLine("2026-08-08T03:16:14.100000000", "0x2b", false, `[]`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.intervals) != 0 {
+		t.Fatalf("first recovered block recorded outage interval: %v", sink.intervals)
+	}
+	if err := processor.processLine(evmFixtureLine("2026-08-08T03:16:14.200000000", "0x2c", false, `[]`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.intervals) != 1 || sink.intervals[0] != 100 {
+		t.Fatalf("post-recovery intervals = %v, want [100]", sink.intervals)
+	}
+}
+
 func TestEVMProcessorStagesConsumedSiblingsBeforePublication(t *testing.T) {
 	sink := newRecordingEVMSink()
 	processor := newEVMProcessor(sink, false, 0)

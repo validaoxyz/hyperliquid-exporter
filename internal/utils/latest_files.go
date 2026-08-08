@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -116,4 +117,69 @@ func LatestReplicaFile(root string) (string, error) {
 		}
 	}
 	return "", os.ErrNotExist
+}
+
+// LatestReplicaFileStrict preserves LatestReplicaFile's ordering and
+// parseable-height policy but distinguishes a missing root from a completely
+// readable empty tree. Any nested traversal failure is returned immediately;
+// it never falls back to an older run or impersonates source absence.
+// rootMissing is true only when the root ReadDir itself reports ENOENT.
+func LatestReplicaFileStrict(root string) (path string, rootMissing bool, err error) {
+	return latestReplicaFileStrictWith(root, os.ReadDir)
+}
+
+func latestReplicaFileStrictWith(root string, readDir func(string) ([]os.DirEntry, error)) (path string, rootMissing bool, err error) {
+	runEntries, err := readDir(root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", true, nil
+		}
+		return "", false, err
+	}
+	runs := directoryNamesDescending(runEntries)
+	for _, run := range runs {
+		runPath := filepath.Join(root, run)
+		dateEntries, err := readDir(runPath)
+		if err != nil {
+			return "", false, err
+		}
+		for _, date := range directoryNamesDescending(dateEntries) {
+			datePath := filepath.Join(runPath, date)
+			leafEntries, err := readDir(datePath)
+			if err != nil {
+				return "", false, err
+			}
+			if name := newestNumericLeaf(leafEntries); name != "" {
+				return filepath.Join(datePath, name), false, nil
+			}
+		}
+	}
+	return "", false, nil
+}
+
+func directoryNamesDescending(entries []os.DirEntry) []string {
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(names)))
+	return names
+}
+
+func newestNumericLeaf(entries []os.DirEntry) string {
+	bestName, bestValue := "", int64(-1)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		stem := strings.TrimSuffix(name, filepath.Ext(name))
+		value, err := strconv.ParseInt(stem, 10, 64)
+		if err == nil && value > bestValue {
+			bestName, bestValue = name, value
+		}
+	}
+	return bestName
 }

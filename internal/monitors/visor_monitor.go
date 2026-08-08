@@ -3,6 +3,7 @@ package monitors
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -324,4 +325,54 @@ func latestHourlyFile(root string) (string, error) {
 		return filepath.Join(datePath, hourNames[len(hourNames)-1]), nil
 	}
 	return "", os.ErrNotExist
+}
+
+// resolveLatestHourlyStream is the strict discovery path for incremental
+// streams whose current gauges must be withdrawn only when the source root is
+// confirmed missing or its complete readable tree is validly empty. Unlike
+// latestHourlyFile, a nested traversal failure never falls back to an older
+// date and never impersonates an empty source.
+func resolveLatestHourlyStream(root string) tailStreamResolution {
+	return resolveLatestHourlyStreamWith(root, os.ReadDir)
+}
+
+func resolveLatestHourlyStreamWith(root string, readDir func(string) ([]os.DirEntry, error)) tailStreamResolution {
+	dateDirs, err := readDir(root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return tailStreamResolution{unavailable: tailStreamUnavailableAbsent}
+		}
+		return tailStreamResolution{err: err}
+	}
+	dateNames := make([]string, 0, len(dateDirs))
+	for _, entry := range dateDirs {
+		if entry.IsDir() {
+			dateNames = append(dateNames, entry.Name())
+		}
+	}
+	sort.Strings(dateNames)
+	for i := len(dateNames) - 1; i >= 0; i-- {
+		datePath := filepath.Join(root, dateNames[i])
+		hourEntries, err := readDir(datePath)
+		if err != nil {
+			return tailStreamResolution{err: err}
+		}
+		if len(hourEntries) == 0 {
+			continue
+		}
+		hourNames := make([]string, 0, len(hourEntries))
+		for _, entry := range hourEntries {
+			hourNames = append(hourNames, entry.Name())
+		}
+		sort.Slice(hourNames, func(a, b int) bool {
+			an, aerr := strconv.Atoi(hourNames[a])
+			bn, berr := strconv.Atoi(hourNames[b])
+			if aerr == nil && berr == nil {
+				return an < bn
+			}
+			return hourNames[a] < hourNames[b]
+		})
+		return tailStreamResolution{path: filepath.Join(datePath, hourNames[len(hourNames)-1])}
+	}
+	return tailStreamResolution{unavailable: tailStreamUnavailableEmpty}
 }

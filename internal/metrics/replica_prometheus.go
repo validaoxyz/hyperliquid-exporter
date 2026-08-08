@@ -25,10 +25,10 @@ var (
 		Name: "hl_replica_orders_total",
 		Help: "Individual order operations inside validated order and twapOrder actions since exporter start; this is not a signed-action count.",
 	})
-	HLReplicaLastProcessedHeight = promauto.NewGauge(prometheus.GaugeOpts{
+	HLReplicaLastProcessedHeight = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_replica_last_processed_height",
 		Help: "Top-level chain height in the latest completely validated and published replica_cmds block record.",
-	})
+	}, []string{})
 	HLReplicaMultiSigInnerActionsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "hl_replica_multisig_inner_actions_total",
 		Help: "Validated outer multiSig actions since exporter start, classified by the inner action's closed operational category; missing or unknown inner actions are other.",
@@ -58,3 +58,22 @@ var (
 		Help: "Nested replica execution outcomes since exporter start using a closed fixture-backed vocabulary plus other.",
 	}, []string{"outcome"})
 )
+
+func SetReplicaLastProcessedHeight(height float64) {
+	HLReplicaLastProcessedHeight.WithLabelValues().Set(height)
+}
+
+// WithdrawReplicaCurrentSnapshot removes only current replica position and
+// parse-duration state. The caller owns the outer Prometheus snapshot barrier;
+// all counters, histograms, and in-process verification history are retained.
+func WithdrawReplicaCurrentSnapshot() {
+	metricsMutex.Lock()
+	delete(currentValues, HLCoreLastProcessedRound)
+	delete(currentValues, HLCoreLastProcessedTime)
+	delete(currentValues, HLMetalParseDurationGauge)
+	delete(labeledValues, HLCoreLastProcessedRound)
+	delete(labeledValues, HLCoreLastProcessedTime)
+	delete(labeledValues, HLMetalParseDurationGauge)
+	metricsMutex.Unlock()
+	HLReplicaLastProcessedHeight.DeleteLabelValues()
+}

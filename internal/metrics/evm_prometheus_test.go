@@ -1,10 +1,14 @@
 package metrics
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+	api "go.opentelemetry.io/otel/metric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
 
 func TestEVMMetricDescriptorsUseOnlyIntendedLabels(t *testing.T) {
@@ -48,6 +52,87 @@ func TestEVMMetricDescriptorsUseOnlyIntendedLabels(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestWithdrawEVMCurrentSnapshotDeletesOnlyCurrentState(t *testing.T) {
+	provider := sdkmetric.NewMeterProvider()
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	testMeter := provider.Meter("evm-withdraw-test")
+	blockHeight, _ := testMeter.Int64ObservableGauge("test_evm_height")
+	latestTime, _ := testMeter.Int64ObservableGauge("test_evm_time")
+	baseFee, _ := testMeter.Float64ObservableGauge("test_evm_base_fee")
+	gasUsed, _ := testMeter.Float64ObservableGauge("test_evm_gas_used")
+	gasLimit, _ := testMeter.Float64ObservableGauge("test_evm_gas_limit")
+	gasUtil, _ := testMeter.Float64ObservableGauge("test_evm_gas_util")
+	priorityFee, _ := testMeter.Float64ObservableGauge("test_evm_priority_fee")
+
+	oldBlockHeight, oldLatestTime := HLEVMBlockHeightGauge, HLEVMLatestBlockTimeGauge
+	oldBaseFee, oldGasUsed, oldGasLimit := HLEVMBaseFeeGauge, HLEVMGasUsedGauge, HLEVMGasLimitGauge
+	oldGasUtil, oldPriorityFee := HLEVMSGasUtilGauge, HLEVMMaxPriorityFeeGauge
+	HLEVMBlockHeightGauge, HLEVMLatestBlockTimeGauge = blockHeight, latestTime
+	HLEVMBaseFeeGauge, HLEVMGasUsedGauge, HLEVMGasLimitGauge = baseFee, gasUsed, gasLimit
+	HLEVMSGasUtilGauge, HLEVMMaxPriorityFeeGauge = gasUtil, priorityFee
+	HLEVMGasUsedRatioAvailable.Reset()
+	t.Cleanup(func() {
+		metricsMutex.Lock()
+		for _, instrument := range []api.Observable{blockHeight, latestTime, baseFee, gasUsed, gasLimit, gasUtil, priorityFee} {
+			delete(currentValues, instrument)
+			delete(labeledValues, instrument)
+		}
+		metricsMutex.Unlock()
+		HLEVMBlockHeightGauge, HLEVMLatestBlockTimeGauge = oldBlockHeight, oldLatestTime
+		HLEVMBaseFeeGauge, HLEVMGasUsedGauge, HLEVMGasLimitGauge = oldBaseFee, oldGasUsed, oldGasLimit
+		HLEVMSGasUtilGauge, HLEVMMaxPriorityFeeGauge = oldGasUtil, oldPriorityFee
+		HLEVMGasUsedRatioAvailable.Reset()
+		HLEVMTxReceiptLastMismatchHeight.Set(0)
+	})
+
+	ratio := 0.5
+	SetEVMBlockHeight(10)
+	SetEVMLatestBlockTime(20)
+	SetEVMBaseFeeSnapshot(3)
+	SetEVMGasSnapshot(4, 8, &ratio)
+	SetEVMPriorityFeeSnapshot(5, false)
+	HLEVMTxReceiptLastMismatchHeight.Set(77)
+	if rows := metricCollectorRows(HLEVMGasUsedRatioAvailable); rows != 1 {
+		t.Fatalf("ratio availability rows before withdrawal = %d, want 1", rows)
+	}
+
+	WithdrawEVMCurrentSnapshot()
+	metricsMutex.RLock()
+	for name, instrument := range map[string]api.Observable{
+		"height": blockHeight, "time": latestTime, "base": baseFee, "used": gasUsed,
+		"limit": gasLimit, "util": gasUtil, "priority": priorityFee,
+	} {
+		if _, exists := currentValues[instrument]; exists {
+			metricsMutex.RUnlock()
+			t.Fatalf("withdrawal retained current %s", name)
+		}
+	}
+	metricsMutex.RUnlock()
+	if rows := metricCollectorRows(HLEVMGasUsedRatioAvailable); rows != 0 {
+		t.Fatalf("ratio availability rows after withdrawal = %d, want 0", rows)
+	}
+	var mismatch dto.Metric
+	if err := HLEVMTxReceiptLastMismatchHeight.Write(&mismatch); err != nil || mismatch.GetGauge().GetValue() != 77 {
+		t.Fatalf("mismatch history changed: value=%v err=%v", mismatch.GetGauge().GetValue(), err)
+	}
+
+	SetEVMGasSnapshot(1, 2, &ratio)
+	if rows := metricCollectorRows(HLEVMGasUsedRatioAvailable); rows != 1 {
+		t.Fatalf("ratio availability rows after recovery = %d, want 1", rows)
+	}
+}
+
+func metricCollectorRows(collector prometheus.Collector) int {
+	ch := make(chan prometheus.Metric, 32)
+	collector.Collect(ch)
+	close(ch)
+	count := 0
+	for range ch {
+		count++
+	}
+	return count
 }
 
 func TestCanonicalEVMAddress(t *testing.T) {

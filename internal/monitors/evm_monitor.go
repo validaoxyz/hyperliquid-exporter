@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -49,19 +48,14 @@ func StartEVMMonitor(ctx context.Context, cfg config.Config, errCh chan<- error)
 		name:        "evm block+receipts",
 		rescanEvery: 2 * time.Second,
 		eofSleep:    250 * time.Millisecond,
-		resolve: func() (string, error) {
+		resolveState: func() tailStreamResolution {
 			metrics.MarkMonitorAttempt("evm")
 			metrics.MarkSourceAttempt(metrics.SourceEVM)
-			path, err := latestHourlyFile(evmDataDir)
-			if err == nil {
-				return path, nil
-			}
-			if errors.Is(err, os.ErrNotExist) {
-				metrics.MarkSourceAbsent(metrics.SourceEVM)
-			} else {
+			result := resolveLatestHourlyStream(evmDataDir)
+			if result.err != nil {
 				metrics.MarkSourceError(metrics.SourceEVM, metrics.SourceFailureDiscovery)
 			}
-			return "", err
+			return result
 		},
 		onSwitch: func(string) {
 			metrics.MarkSourceReadOutcome(metrics.SourceEVM, true)
@@ -80,6 +74,7 @@ func StartEVMMonitor(ctx context.Context, cfg config.Config, errCh chan<- error)
 				return
 			}
 		},
+		onUnavailable: processor.commitUnavailable,
 		onFailure: func(failure tailStreamFailure) {
 			switch failure {
 			case tailStreamFailureOpen:
@@ -275,6 +270,22 @@ func (p *evmProcessor) processLineWithCommit(line string, commit func(time.Time)
 	}
 	metrics.WithPrometheusSnapshotUpdate(publish)
 	return nil
+}
+
+func (p *evmProcessor) commitUnavailable(kind tailStreamUnavailable) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		metrics.WithdrawEVMCurrentSnapshot()
+		p.lastBlockTime = time.Time{}
+		if kind == tailStreamUnavailableAbsent {
+			metrics.MarkSourceAbsent(metrics.SourceEVM)
+		} else {
+			metrics.MarkSourceAvailable(metrics.SourceEVM)
+		}
+		metrics.MarkSourcePublication(metrics.SourceEVM)
+		metrics.MarkMonitorPublication("evm")
+	})
 }
 
 // processEVMBlockAndReceiptsLine is retained as the package-level parsing

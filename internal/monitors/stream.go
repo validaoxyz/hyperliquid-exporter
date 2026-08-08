@@ -26,6 +26,10 @@ type tailStreamOpts struct {
 	// (directory listings, not tree walks): it runs every rescanEvery
 	// while the stream sits at EOF.
 	resolve func() (string, error)
+	// resolveState is the typed alternative used by sources that distinguish
+	// a missing root from a readable-but-empty tree. When set, it takes
+	// precedence over resolve; arbitrary traversal errors remain errors.
+	resolveState func() tailStreamResolution
 	// rescanEvery bounds how often resolve runs; new data in the already
 	// open file is still picked up every eofSleep.
 	rescanEvery time.Duration
@@ -39,7 +43,21 @@ type tailStreamOpts struct {
 	onLine                func(line string)
 	onIdle                func()            // optional: once per EOF pause, for batch flushing
 	onSwitch              func(path string) // optional: after switching to a new file
+	onUnavailable         func(tailStreamUnavailable)
 	onFailure             func(tailStreamFailure)
+}
+
+type tailStreamUnavailable string
+
+const (
+	tailStreamUnavailableAbsent tailStreamUnavailable = "absent"
+	tailStreamUnavailableEmpty  tailStreamUnavailable = "empty"
+)
+
+type tailStreamResolution struct {
+	path        string
+	unavailable tailStreamUnavailable
+	err         error
 }
 
 type tailStreamFailure string
@@ -57,6 +75,12 @@ type pendingStreamSwitch struct {
 	detectedAt    time.Time
 	confirmations int
 	immediate     bool // same-inode truncation; no old tail can be recovered
+}
+
+type pendingStreamUnavailable struct {
+	kind          tailStreamUnavailable
+	detectedAt    time.Time
+	confirmations int
 }
 
 // tailStream follows the newest file of a stream, calling onLine for every
@@ -83,7 +107,10 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 		lastScan        time.Time
 		startupScanned  bool
 		startupPath     string
+		startupSkip     bool
 		next            *pendingStreamSwitch
+		unavailable     *pendingStreamUnavailable
+		lastUnavailable tailStreamUnavailable
 	)
 
 	defer func() {
@@ -105,6 +132,17 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 	recordCap := o.recordCap
 	if recordCap <= 0 {
 		recordCap = pendingLineCap
+	}
+
+	resolve := func() tailStreamResolution {
+		if o.resolveState != nil {
+			return o.resolveState()
+		}
+		if o.resolve == nil {
+			return tailStreamResolution{}
+		}
+		path, err := o.resolve()
+		return tailStreamResolution{path: path, err: err}
 	}
 
 	activate := func(path string, skipExisting bool) bool {
@@ -148,6 +186,11 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 		pending = nil
 		discardedBytes = 0
 		next = nil
+		unavailable = nil
+		lastUnavailable = ""
+		if path == startupPath {
+			startupSkip = false
+		}
 		if skipExisting {
 			logger.InfoComponent(o.component, "%s: streaming from end of %s", o.name, path)
 		} else {
@@ -159,6 +202,27 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 		return true
 	}
 
+	settleUnavailable := func(kind tailStreamUnavailable) {
+		if file != nil {
+			_ = file.Close()
+		}
+		file = nil
+		reader = nil
+		current = ""
+		currentInfo = nil
+		committedOffset = 0
+		pending = nil
+		discardedBytes = 0
+		next = nil
+		unavailable = nil
+		startupPath = ""
+		startupSkip = false
+		if lastUnavailable != kind && o.onUnavailable != nil {
+			o.onUnavailable(kind)
+		}
+		lastUnavailable = kind
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -168,16 +232,47 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 
 		if reader == nil || time.Since(lastScan) >= o.rescanEvery {
 			lastScan = time.Now()
-			latest, resolveErr := o.resolve()
+			resolution := resolve()
 			if !startupScanned {
 				startupScanned = true
-				if resolveErr == nil {
-					startupPath = latest
+				if resolution.err == nil && resolution.path != "" {
+					startupPath = resolution.path
+					startupSkip = !o.consumeStartupRecords
 				}
 			}
 
 			switch {
-			case resolveErr != nil || latest == "":
+			case resolution.err != nil:
+				// A traversal failure is not evidence that the source is empty.
+				// Cancel an uncommitted withdrawal and retain the active descriptor.
+				unavailable = nil
+				lastUnavailable = ""
+				if reader == nil {
+					if !sleepCtx(ctx, o.rescanEvery) {
+						return
+					}
+					continue
+				}
+			case resolution.unavailable != "":
+				// A confirmed source-level unavailability cancels startup-history
+				// treatment. Recreating the same path later is recovery data and
+				// must be consumed from byte zero.
+				startupPath = ""
+				startupSkip = false
+				next = nil
+				if reader == nil {
+					settleUnavailable(resolution.unavailable)
+					if !sleepCtx(ctx, o.rescanEvery) {
+						return
+					}
+					continue
+				}
+				if unavailable == nil || unavailable.kind != resolution.unavailable {
+					unavailable = &pendingStreamUnavailable{kind: resolution.unavailable, detectedAt: time.Now()}
+				}
+			case resolution.path == "":
+				unavailable = nil
+				lastUnavailable = ""
 				if reader == nil {
 					if !sleepCtx(ctx, o.rescanEvery) {
 						return
@@ -188,18 +283,21 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 				// Only the exact file found by the first successful startup
 				// scan is historical. A first file discovered after a clean
 				// empty scan starts at byte zero.
-				skipExisting := !o.consumeStartupRecords && startupPath != "" && latest == startupPath
-				if !activate(latest, skipExisting) {
+				lastUnavailable = ""
+				skipExisting := startupSkip && startupPath != "" && resolution.path == startupPath
+				if !activate(resolution.path, skipExisting) {
 					if !sleepCtx(ctx, time.Second) {
 						return
 					}
 					continue
 				}
 			default:
-				needsSwitch := latest != current
+				unavailable = nil
+				lastUnavailable = ""
+				needsSwitch := resolution.path != current
 				immediate := false
-				if latest == current {
-					latestInfo, err := os.Stat(latest)
+				if resolution.path == current {
+					latestInfo, err := os.Stat(resolution.path)
 					if err == nil {
 						if currentInfo != nil && !os.SameFile(currentInfo, latestInfo) {
 							needsSwitch = true
@@ -209,9 +307,9 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 						}
 					}
 				}
-				if needsSwitch && (next == nil || next.path != latest || next.immediate != immediate) {
+				if needsSwitch && (next == nil || next.path != resolution.path || next.immediate != immediate) {
 					next = &pendingStreamSwitch{
-						path:       latest,
+						path:       resolution.path,
 						detectedAt: time.Now(),
 						immediate:  immediate,
 					}
@@ -307,6 +405,30 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 				if activate(next.path, false) {
 					continue
 				}
+			}
+		}
+
+		if unavailable != nil {
+			kind := unavailable.kind
+			switch {
+			case madeProgress:
+				unavailable.confirmations = 0
+				unavailable.detectedAt = time.Now()
+			case !cleanEOF:
+				// A read failure cannot confirm that the old descriptor drained.
+			case len(pending) == 0 && discardedBytes == 0:
+				unavailable.confirmations++
+				if unavailable.confirmations >= 2 {
+					settleUnavailable(kind)
+					continue
+				}
+			case time.Since(unavailable.detectedAt) >= rotationDrainGrace:
+				if o.onFailure != nil {
+					o.onFailure(tailStreamFailureRecord)
+				}
+				logger.WarningComponent(o.component, "%s: dropping unterminated tail while source became %s", o.name, kind)
+				settleUnavailable(kind)
+				continue
 			}
 		}
 

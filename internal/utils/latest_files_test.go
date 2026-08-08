@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -83,5 +84,51 @@ func TestLatestReplicaFile(t *testing.T) {
 	got, err := LatestReplicaFile(root)
 	if err != nil || got != want {
 		t.Fatalf("LatestReplicaFile = %q, %v; want %q", got, err, want)
+	}
+}
+
+func TestLatestReplicaFileStrictDistinguishesUnavailableAndTraversalErrors(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	if path, rootMissing, err := LatestReplicaFileStrict(missing); path != "" || !rootMissing || err != nil {
+		t.Fatalf("missing = %q, %t, %v; want root missing", path, rootMissing, err)
+	}
+
+	empty := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(empty, "2026-08-08T00:00:00", "20260808"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if path, rootMissing, err := LatestReplicaFileStrict(empty); path != "" || rootMissing || err != nil {
+		t.Fatalf("empty skeleton = %q, %t, %v; want valid empty", path, rootMissing, err)
+	}
+
+	root := t.TempDir()
+	olderRun := filepath.Join(root, "2026-08-07T00:00:00")
+	newerRun := filepath.Join(root, "2026-08-08T00:00:00")
+	olderDate := filepath.Join(olderRun, "20260807")
+	newerDate := filepath.Join(newerRun, "20260808")
+	oldLeaf := mk(t, olderDate, "999")
+	_ = oldLeaf
+	want := mk(t, newerDate, "1000")
+	if path, rootMissing, err := LatestReplicaFileStrict(root); path != want || rootMissing || err != nil {
+		t.Fatalf("found = %q, %t, %v; want %q", path, rootMissing, err, want)
+	}
+
+	wantErr := errors.New("injected traversal failure")
+	for name, blocked := range map[string]string{
+		"newest run":  newerRun,
+		"newest date": newerDate,
+	} {
+		t.Run(name, func(t *testing.T) {
+			readDir := func(path string) ([]os.DirEntry, error) {
+				if path == blocked {
+					return nil, wantErr
+				}
+				return os.ReadDir(path)
+			}
+			path, rootMissing, err := latestReplicaFileStrictWith(root, readDir)
+			if path != "" || rootMissing || !errors.Is(err, wantErr) {
+				t.Fatalf("nested failure = %q, %t, %v; want error without older fallback", path, rootMissing, err)
+			}
+		})
 	}
 }

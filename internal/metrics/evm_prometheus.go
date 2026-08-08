@@ -44,10 +44,10 @@ var (
 		Name: "hl_evm_parse_errors_total",
 		Help: "Rejected EVM stream records by bounded parser stage and reason.",
 	}, []string{"stage", "reason"})
-	HLEVMGasUsedRatioAvailable = promauto.NewGauge(prometheus.GaugeOpts{
+	HLEVMGasUsedRatioAvailable = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_evm_gas_used_ratio_available",
 		Help: "1 when hl_evm_gas_util is available for the latest accepted block, 0 when its gas limit is zero or invalid.",
-	})
+	}, []string{})
 )
 
 func SetEVMGasSnapshot(gasUsed, gasLimit float64, ratio *float64) {
@@ -69,10 +69,34 @@ func SetEVMGasSnapshot(gasUsed, gasLimit float64, ratio *float64) {
 	}
 	metricsMutex.Unlock()
 	if ratio == nil {
-		HLEVMGasUsedRatioAvailable.Set(0)
+		HLEVMGasUsedRatioAvailable.WithLabelValues().Set(0)
 	} else {
-		HLEVMGasUsedRatioAvailable.Set(1)
+		HLEVMGasUsedRatioAvailable.WithLabelValues().Set(1)
 	}
+}
+
+// WithdrawEVMCurrentSnapshot removes only the latest-block state owned by the
+// EVM stream. The caller owns the outer Prometheus snapshot barrier; process
+// counters, distributions, mismatch history, and recipient-cap membership are
+// intentionally retained across source unavailability.
+func WithdrawEVMCurrentSnapshot() {
+	metricsMutex.Lock()
+	delete(currentValues, HLEVMBlockHeightGauge)
+	delete(currentValues, HLEVMLatestBlockTimeGauge)
+	delete(currentValues, HLEVMBaseFeeGauge)
+	delete(currentValues, HLEVMGasUsedGauge)
+	delete(currentValues, HLEVMGasLimitGauge)
+	delete(currentValues, HLEVMSGasUtilGauge)
+	delete(currentValues, HLEVMMaxPriorityFeeGauge)
+	delete(labeledValues, HLEVMBlockHeightGauge)
+	delete(labeledValues, HLEVMLatestBlockTimeGauge)
+	delete(labeledValues, HLEVMBaseFeeGauge)
+	delete(labeledValues, HLEVMGasUsedGauge)
+	delete(labeledValues, HLEVMGasLimitGauge)
+	delete(labeledValues, HLEVMSGasUtilGauge)
+	delete(labeledValues, HLEVMMaxPriorityFeeGauge)
+	metricsMutex.Unlock()
+	HLEVMGasUsedRatioAvailable.DeleteLabelValues()
 }
 
 // SetEVMBaseFeeSnapshot updates the current gauge for valid zero as well as

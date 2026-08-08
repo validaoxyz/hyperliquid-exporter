@@ -2,8 +2,6 @@ package monitors
 
 import (
 	"context"
-	"errors"
-	"os"
 	"sync"
 	"time"
 
@@ -80,18 +78,21 @@ func (m *ReplicaMonitor) streamLoop(ctx context.Context) {
 	tailStream(ctx, tailStreamOpts{
 		component: "replica",
 		name:      "replica cmds",
-		resolve: func() (string, error) {
+		resolveState: func() tailStreamResolution {
 			metrics.MarkMonitorAttempt("replica")
 			metrics.MarkSourceAttempt(metrics.SourceReplica)
-			path, err := utils.LatestReplicaFile(m.dataDir)
+			path, rootMissing, err := utils.LatestReplicaFileStrict(m.dataDir)
 			if err != nil {
-				if errors.Is(err, os.ErrNotExist) {
-					metrics.MarkSourceAbsent(metrics.SourceReplica)
-				} else {
-					metrics.MarkSourceError(metrics.SourceReplica, metrics.SourceFailureDiscovery)
-				}
+				metrics.MarkSourceError(metrics.SourceReplica, metrics.SourceFailureDiscovery)
+				return tailStreamResolution{err: err}
 			}
-			return path, err
+			if rootMissing {
+				return tailStreamResolution{unavailable: tailStreamUnavailableAbsent}
+			}
+			if path == "" {
+				return tailStreamResolution{unavailable: tailStreamUnavailableEmpty}
+			}
+			return tailStreamResolution{path: path}
 		},
 		rescanEvery: 2 * time.Second,
 		eofSleep:    25 * time.Millisecond,
@@ -142,6 +143,10 @@ func (m *ReplicaMonitor) streamLoop(ctx context.Context) {
 		onSwitch: func(string) {
 			metrics.MarkSourceReadOutcome(metrics.SourceReplica, true)
 		},
+		onUnavailable: func(kind tailStreamUnavailable) {
+			totalParseTime, parseCount = 0, 0
+			m.commitUnavailable(kind)
+		},
 		onFailure: func(failure tailStreamFailure) {
 			markTailSourceFailure(metrics.SourceReplica, failure)
 			metrics.IncMonitorError("replica")
@@ -161,6 +166,19 @@ func (m *ReplicaMonitor) commitBlock(block *replica.BlockMetrics) {
 
 func commitReplicaGeneration(publish func()) {
 	metrics.WithPrometheusSnapshotUpdate(publish)
+}
+
+func (m *ReplicaMonitor) commitUnavailable(kind tailStreamUnavailable) {
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		metrics.WithdrawReplicaCurrentSnapshot()
+		if kind == tailStreamUnavailableAbsent {
+			metrics.MarkSourceAbsent(metrics.SourceReplica)
+		} else {
+			metrics.MarkSourceAvailable(metrics.SourceReplica)
+		}
+		metrics.MarkSourcePublication(metrics.SourceReplica)
+		metrics.MarkMonitorPublication("replica")
+	})
 }
 
 func (m *ReplicaMonitor) recordParseFailure(err error) {
@@ -192,7 +210,7 @@ func (m *ReplicaMonitor) processBlock(block *replica.BlockMetrics) {
 	// update counters
 	metrics.IncCoreBlocksProcessed()
 	metrics.HLReplicaActionBundlesTotal.Add(float64(block.TotalBundles))
-	metrics.HLReplicaLastProcessedHeight.Set(float64(block.Height))
+	metrics.SetReplicaLastProcessedHeight(float64(block.Height))
 
 	// Positive round - parent_round from the accepted replica record.
 	if block.ParentRound > 0 && block.Round > block.ParentRound {

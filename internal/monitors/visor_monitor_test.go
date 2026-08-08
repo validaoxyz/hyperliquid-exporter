@@ -1,6 +1,7 @@
 package monitors
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -157,6 +158,50 @@ func TestLatestHourlyFile_MissingRoot(t *testing.T) {
 	_, err := latestHourlyFile(filepath.Join(t.TempDir(), "does-not-exist"))
 	if err == nil {
 		t.Fatal("expected error on missing root")
+	}
+}
+
+func TestResolveLatestHourlyStreamDistinguishesUnavailableAndErrors(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	if got := resolveLatestHourlyStream(missing); got.unavailable != tailStreamUnavailableAbsent || got.err != nil || got.path != "" {
+		t.Fatalf("missing result = %+v, want absent", got)
+	}
+
+	empty := t.TempDir()
+	if got := resolveLatestHourlyStream(empty); got.unavailable != tailStreamUnavailableEmpty || got.err != nil || got.path != "" {
+		t.Fatalf("empty result = %+v, want valid empty", got)
+	}
+
+	root := t.TempDir()
+	older := filepath.Join(root, "20260807")
+	newer := filepath.Join(root, "20260808")
+	for _, dir := range []string{older, newer} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(older, "23"), []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("newest date unreadable")
+	readDir := func(path string) ([]os.DirEntry, error) {
+		if path == newer {
+			return nil, wantErr
+		}
+		return os.ReadDir(path)
+	}
+	if got := resolveLatestHourlyStreamWith(root, readDir); !errors.Is(got.err, wantErr) || got.path != "" || got.unavailable != "" {
+		t.Fatalf("nested failure result = %+v, want error without older fallback", got)
+	}
+
+	if err := os.WriteFile(filepath.Join(newer, "2"), []byte("two"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(newer, "11"), []byte("eleven"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolveLatestHourlyStream(root); got.err != nil || got.unavailable != "" || got.path != filepath.Join(newer, "11") {
+		t.Fatalf("found result = %+v, want newest numeric hour", got)
 	}
 }
 
