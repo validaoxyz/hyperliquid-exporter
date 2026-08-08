@@ -33,10 +33,10 @@ func main() {
 		fmt.Println("  --metrics-port            Prometheus listen port (default 8086)")
 		fmt.Println("  --log-level               debug, info, warning, error (default info)")
 		fmt.Println("  --evm-metrics             Enable EVM monitoring")
-		fmt.Println("  --contract-metrics        Enable per-contract transaction metrics")
-		fmt.Println("  --contract-metrics-limit  Max distinct contract series; the rest roll into \"other\" (default 20)")
+		fmt.Println("  --contract-metrics        Enable canonical recipient-address diagnostics (no contract inference)")
+		fmt.Println("  --contract-metrics-limit  Max recipient addresses; the rest use address=\"other\" (default 20)")
 		fmt.Println("  --replica-metrics         Enable replica-cmds transaction metrics")
-		fmt.Println("  --validator-rtt           Enable validator RTT probing (outbound TCP; off by default)")
+		fmt.Println("  --validator-rtt           Enable outbound TCP-connect diagnostics (not protocol RTT)")
 		fmt.Println("  --probe-info-endpoint     Actively probe the node's --serve-info endpoint")
 		fmt.Println("  --info-endpoint-url       Info probe URL (default http://127.0.0.1:3001/info)")
 		fmt.Println("  --extended-metrics        Enable the extended monitor bundle")
@@ -71,10 +71,10 @@ func main() {
 	chain := startCmd.String("chain", "", "Chain type (required: 'mainnet' or 'testnet')")
 	otlpInsecure := startCmd.Bool("otlp-insecure", false, "Use insecure connection for OTLP")
 	enableEVM := startCmd.Bool("evm-metrics", false, "Enable EVM monitoring")
-	contractMetrics := startCmd.Bool("contract-metrics", false, "Enable per-contract transaction metrics")
-	contractLimit := startCmd.Int("contract-metrics-limit", 20, "Maximum number of individual contract labels to retain")
+	contractMetrics := startCmd.Bool("contract-metrics", false, "Enable canonical recipient-address diagnostics; no contract identity or enrichment is inferred")
+	contractLimit := startCmd.Int("contract-metrics-limit", 20, "Maximum canonical recipient addresses to retain before using address=other")
 	enableReplicaMetrics := startCmd.Bool("replica-metrics", false, "Enable replica commands transaction metrics")
-	enableValidatorRTT := startCmd.Bool("validator-rtt", false, "Enable validator RTT monitoring")
+	enableValidatorRTT := startCmd.Bool("validator-rtt", false, "Enable outbound TCP-connect diagnostics for eligible validators; not protocol RTT")
 	skipVersionCheck := startCmd.Bool("skip-version-check", false, "Skip the local hl-node --version probe (use when running in a container without the binary)")
 	skipUpdateCheck := startCmd.Bool("skip-update-check", false, "Skip the periodic upstream binary download for the up-to-date check")
 	metricsPort := startCmd.Int("metrics-port", 8086, "Port to expose Prometheus metrics on")
@@ -111,7 +111,6 @@ func main() {
 		EnableReplicaMetrics:  *enableReplicaMetrics,
 		ReplicaDataDir:        "",                 // Always use default
 		ReplicaBufferSize:     8,                  // Always use default 8MB
-		EVMBlockTypeMetrics:   *enableEVM,         // Always enable block type metrics when EVM is enabled
 		EnableValidatorRTT:    enableValidatorRTT, // Use the bool pointer directly
 		SkipVersionCheck:      *skipVersionCheck,
 		SkipUpdateCheck:       *skipUpdateCheck,

@@ -138,7 +138,7 @@ func Start(ctx context.Context, cfg config.Config) {
 	logger.InfoComponent("crit_msg", "Initializing critical-message monitor...")
 	runMonitor("crit_msg", func() { monitors.StartCritMsgMonitor(monitorCtx, cfg, critMsgErrCh) })
 
-	// tcp_traffic monitor (per-peer throughput, top-N bounded)
+	// tcp_traffic monitor (bounded endpoint point-field observations)
 	logger.InfoComponent("tcp_traffic", "Initializing tcp_traffic monitor...")
 	runMonitor("tcp_traffic", func() { monitors.StartTCPTrafficMonitor(monitorCtx, cfg, tcpTrafficErrCh) })
 

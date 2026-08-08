@@ -22,7 +22,6 @@ type Config struct {
 	EnableEVM              bool
 	EnableContractMetrics  bool
 	ContractMetricsLimit   int
-	EVMBlockTypeMetrics    bool
 	EnableCoreTxMetrics    bool
 	UseLiveState           bool
 	LiveStateCheckInterval time.Duration // How often to check for updates
@@ -50,7 +49,7 @@ type Config struct {
 	// http://127.0.0.1:3001/info when empty.
 	InfoEndpointURL string
 	// EnableExtendedMetrics opts the exporter into the "extended" set
-	// of monitors: tcp_lz4, log line counters, public-IP heartbeat,
+	// of monitors: tcp_lz4, log line counters, public-IP file state,
 	// Tokio task metrics, operator-config age, tmp-dir audit.
 	// Useful for deep operator dashboards; off by default to keep the
 	// scrape lean for the median user.
@@ -77,7 +76,6 @@ type Flags struct {
 	EnableEVM             bool
 	EnableContractMetrics bool
 	ContractMetricsLimit  int
-	EVMBlockTypeMetrics   bool
 	EnableCoreTxMetrics   bool
 	UseLiveState          bool
 	EnableReplicaMetrics  bool
@@ -211,7 +209,6 @@ func LoadConfig(flags *Flags) (Config, error) {
 		EnableEVM:              flags.EnableEVM,
 		EnableContractMetrics:  flags.EnableContractMetrics,
 		ContractMetricsLimit:   flags.ContractMetricsLimit,
-		EVMBlockTypeMetrics:    flags.EVMBlockTypeMetrics,
 		EnableCoreTxMetrics:    flags.EnableCoreTxMetrics,
 		UseLiveState:           flags.UseLiveState,
 		LiveStateCheckInterval: 5 * time.Second,

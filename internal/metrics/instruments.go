@@ -18,9 +18,7 @@ var (
 	HLCoreBlocksProcessedCounter api.Int64Counter
 
 	// counters EVM
-	HLEVMTxTypeCounter         api.Int64Counter
-	HLEVMContractCreateCounter api.Int64Counter
-	HLEVMContractTxCounter     api.Int64Counter
+	HLEVMTxTypeCounter api.Int64Counter
 
 	// observable gauges, Core
 	HLCoreBlockHeightGauge     api.Int64ObservableGauge
@@ -79,8 +77,6 @@ var (
 	HLConsensusVoteTimeDiffGauge           api.Float64ObservableGauge
 	HLConsensusCurrentRoundGauge           api.Int64ObservableGauge
 	HLConsensusHeartbeatSentCounter        api.Int64Counter
-	HLConsensusHeartbeatAckCounter         api.Int64Counter
-	HLConsensusHeartbeatDelayHist          api.Float64Histogram
 	HLConsensusConnectivityGauge           api.Float64ObservableGauge
 	HLConsensusDisconnectedSinceRoundGauge api.Int64ObservableGauge
 	HLConsensusHeartbeatStatusGauge        api.Float64ObservableGauge
@@ -251,22 +247,6 @@ func createInstruments() error {
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create EVM transaction type counter: %w", err)
-	}
-
-	HLEVMContractCreateCounter, err = meter.Int64Counter(
-		"hl_evm_contract_create_total",
-		api.WithDescription("Total number of EVM contract creations"),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create EVM contract creation counter: %w", err)
-	}
-
-	HLEVMContractTxCounter, err = meter.Int64Counter(
-		"hl_evm_contract_tx_total",
-		api.WithDescription("Total number of EVM contract transactions"),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create EVM contract transaction counter: %w", err)
 	}
 
 	HLCoreTxCounter, err = meter.Int64Counter(
@@ -575,35 +555,6 @@ func createInstruments() error {
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create consensus heartbeat sent counter: %w", err)
-	}
-
-	HLConsensusHeartbeatAckCounter, err = meter.Int64Counter(
-		"hl_consensus_heartbeat_ack_received_total",
-		api.WithDescription("Deprecated and unpopulated by the current heartbeat path because it mixed self loops with peer acknowledgements; use hl_consensus_heartbeat_peer_acks_total"),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create consensus heartbeat ack counter: %w", err)
-	}
-
-	HLConsensusHeartbeatDelayHist, err = meter.Float64Histogram(
-		"hl_consensus_heartbeat_ack_delay_ms",
-		api.WithDescription("Deprecated and unpopulated by the current heartbeat path because it mixed self loops with peer delay; use the separate peer and self-loop seconds histograms"),
-		// IMPORTANT: do not set api.WithUnit("ms"). The OTel→Prometheus bridge
-		// auto-appends "_milliseconds" when a unit is declared, which collides
-		// with the "_ms" suffix already in the metric name and produces
-		// hl_consensus_heartbeat_ack_delay_ms_milliseconds_bucket — a name no
-		// dashboard expects, so the panel sits empty even though the data is
-		// being recorded. The other ms histograms in this file (block_time,
-		// apply_duration, evm_block_time) embed "_milliseconds" in the name
-		// and don't double up; this one used the "_ms" abbreviation.
-		api.WithExplicitBucketBoundaries(
-			1, 2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100,
-			150, 200, 250, 300, 400, 500, 600, 700, 800, 900, 1000,
-			1500, 2000, 3000, 5000, 10000,
-		),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create consensus heartbeat delay histogram: %w", err)
 	}
 
 	HLConsensusConnectivityGauge, err = meter.Float64ObservableGauge(

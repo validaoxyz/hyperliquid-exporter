@@ -56,7 +56,7 @@ func SetEVMGasSnapshot(gasUsed, gasLimit float64, ratio *float64) {
 	}
 	metricsMutex.Lock()
 	// Removing the old labeled state is the explicit in-process deprecation
-	// path for the heuristic block_type dimension.
+	// path for the retired heuristic block-tier dimension.
 	delete(labeledValues, HLEVMGasUsedGauge)
 	delete(labeledValues, HLEVMGasLimitGauge)
 	delete(labeledValues, HLEVMSGasUtilGauge)

@@ -17,7 +17,7 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
-const defaultRecipientMetricLimit = 1000
+const defaultRecipientMetricLimit = 20
 
 // StartEVMMonitor follows committed records from evm_block_and_receipts. The
 // stream is serial, but the processor itself is synchronized so test probes or
@@ -32,10 +32,6 @@ func StartEVMMonitor(ctx context.Context, cfg config.Config, errCh chan<- error)
 		cfg.EnableContractMetrics,
 		processor.recipients.limit,
 	)
-	if cfg.EVMBlockTypeMetrics {
-		logger.InfoComponent("evm", "EVM block-type metrics are retired; gas limit and gas-used ratio are emitted without a heuristic tier label")
-	}
-
 	// Preserve the historical validator-status grace period without making
 	// shutdown wait for an unconditional sleep.
 	if !sleepCtx(ctx, 60*time.Second) {
@@ -122,7 +118,6 @@ type evmMetricSink interface {
 	recordTxCount(int)
 	incrementTxType(string)
 	incrementTxShape(string, uint64)
-	incrementContractCreations(uint64)
 	incrementRecipient(string)
 	incrementReceiptOutcome(string, uint64)
 	markCountMismatch(int64)
@@ -166,12 +161,6 @@ func (productionEVMSink) incrementTxType(txType string) {
 
 func (productionEVMSink) incrementTxShape(shape string, count uint64) {
 	metrics.IncrementEVMTxShape(shape, count)
-}
-
-func (productionEVMSink) incrementContractCreations(count uint64) {
-	for i := uint64(0); i < count; i++ {
-		metrics.IncrementEVMContractCreations()
-	}
 }
 
 func (productionEVMSink) incrementRecipient(address string) {
@@ -260,8 +249,6 @@ func (p *evmProcessor) processLine(line string) error {
 	for _, shape := range []string{streamevm.TxShapeCreate, streamevm.TxShapeMessage, streamevm.TxShapeUnknown} {
 		p.sink.incrementTxShape(shape, shapeCounts[shape])
 	}
-	p.sink.incrementContractCreations(shapeCounts[streamevm.TxShapeCreate])
-
 	if obs.ReceiptsEnabled {
 		p.sink.incrementReceiptOutcome("success", obs.ReceiptOutcomes.Success)
 		p.sink.incrementReceiptOutcome("failed", obs.ReceiptOutcomes.Failed)

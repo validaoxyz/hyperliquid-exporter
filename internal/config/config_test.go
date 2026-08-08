@@ -81,39 +81,6 @@ func TestLoadConfigNodeBinaryFlagWins(t *testing.T) {
 	}
 }
 
-func TestLoadConfigPreservesEVMBlockTypeFlag(t *testing.T) {
-	t.Setenv("HOME", "/home/operator")
-	t.Setenv("NODE_HOME", "")
-	t.Setenv("BINARY_HOME", "")
-	t.Setenv("NODE_BINARY", "")
-
-	for _, enableEVM := range []bool{false, true} {
-		for _, enableBlockType := range []bool{false, true} {
-			name := "evm_false_block_false"
-			if enableEVM {
-				name = "evm_true_block_false"
-			}
-			if enableBlockType {
-				name += "_block_true"
-			}
-			t.Run(name, func(t *testing.T) {
-				cfg, err := LoadConfig(&Flags{
-					Chain:               "testnet",
-					EnableEVM:           enableEVM,
-					EVMBlockTypeMetrics: enableBlockType,
-				})
-				if err != nil {
-					t.Fatalf("LoadConfig() error = %v", err)
-				}
-				if cfg.EnableEVM != enableEVM || cfg.EVMBlockTypeMetrics != enableBlockType {
-					t.Fatalf("got EVM=%v blockType=%v, want %v/%v",
-						cfg.EnableEVM, cfg.EVMBlockTypeMetrics, enableEVM, enableBlockType)
-				}
-			})
-		}
-	}
-}
-
 func TestLoadConfigRejectsMissingOrUnknownChain(t *testing.T) {
 	t.Setenv("HOME", "/home/operator")
 	for _, flags := range []*Flags{nil, {Chain: ""}, {Chain: "devnet"}} {

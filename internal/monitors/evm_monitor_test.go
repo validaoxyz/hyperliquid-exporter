@@ -25,7 +25,6 @@ type recordingEVMSink struct {
 	txCounts           []int
 	txTypes            []string
 	shapes             map[string]uint64
-	contractCreates    uint64
 	recipients         []string
 	receiptOutcomes    map[string]uint64
 	mismatchHeights    []int64
@@ -68,9 +67,6 @@ func (s *recordingEVMSink) incrementTxType(value string) {
 }
 func (s *recordingEVMSink) incrementTxShape(shape string, count uint64) {
 	s.shapes[shape] += count
-}
-func (s *recordingEVMSink) incrementContractCreations(count uint64) {
-	s.contractCreates += count
 }
 func (s *recordingEVMSink) incrementRecipient(address string) {
 	s.recipients = append(s.recipients, address)
@@ -182,6 +178,9 @@ func TestEVMProcessorCountMismatchPersistsAcrossEqualBlock(t *testing.T) {
 }
 
 func TestRecipientLimiterStickyCapAndOther(t *testing.T) {
+	if got := newRecipientLimiter(true, 0).limit; got != 20 {
+		t.Fatalf("default recipient limit = %d, want 20", got)
+	}
 	limiter := newRecipientLimiter(true, 2)
 	a := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	b := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
