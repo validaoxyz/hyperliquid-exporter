@@ -764,12 +764,12 @@ var (
 
 // Mempool monitor — from data/node_logs/mempool/hourly/<date>/<hour>.
 // Per-event counter with bounded cardinality (allowlist of known event
-// tags + 'other' rollup). add_tx and verify_block carry an explicit
-// status sub-label; for other events status is the empty string.
+// tags + 'other' rollup). add_tx and verify_block carry a closed status
+// sub-label; for other events status is "not_applicable".
 var (
 	HLMempoolEventsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "hl_mempool_events_total",
-		Help: "Mempool events emitted by hl-node, by event_type. add_tx and verify_block carry a status sub-label (ok / error / …). New tags are bucketed as event_type=\"other\".",
+		Help: "Valid mempool records observed since exporter start. add_tx and verify_block status is one of ok, err, other; other event types use not_applicable. Unknown tags use event_type=\"other\".",
 	}, []string{"event_type", "status"})
 
 	HLMempoolSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
@@ -815,14 +815,14 @@ var (
 		Help:    "Distribution of individual operation count per split-client mempool transaction record.",
 		Buckets: []float64{1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000},
 	})
-	HLMempoolTxsLatestTime = promauto.NewGauge(prometheus.GaugeOpts{
+	HLMempoolTxsLatestTime = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_mempool_txs_latest_time",
-		Help: "Unix timestamp from the latest split-client mempool transaction record processed.",
-	})
-	HLMempoolTxsSampleAgeSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+		Help: "Source Unix timestamp from the latest valid split-client mempool transaction record; absent before first observation.",
+	}, []string{})
+	HLMempoolTxsSampleAgeSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_mempool_txs_sample_age_seconds",
-		Help: "Wall-clock age of the latest split-client mempool transaction record processed, in seconds.",
-	})
+		Help: "Wall-clock age since exporter receipt of the latest valid split-client mempool transaction record; absent before first observation and advances through quiet/error periods.",
+	}, []string{})
 )
 
 // Operator-config FAILED_LOAD tripwire. Counts files under

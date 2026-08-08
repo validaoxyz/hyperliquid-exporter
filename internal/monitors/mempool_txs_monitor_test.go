@@ -105,3 +105,48 @@ func TestReadMempoolTxsEventsDoesNotConsumePartialLine(t *testing.T) {
 		t.Fatalf("final offset = %d, want %d", offset, len(line)*2+2)
 	}
 }
+
+func TestParseMempoolTxsTriggerAndUnknownFields(t *testing.T) {
+	line := []byte(`["2026-06-01T17:59:25.990970382",{"signed_actions":[{"action":{"type":"order","orders":[{"b":true,"t":{"trigger":{"isMarket":true,"triggerPx":"10","tpsl":"tp"}}},{"b":false,"t":{"limit":{"tif":"FutureTIF"}}},{"b":true,"t":{"limit":{"tif":null}}}]}},{"action":{"type":"futureAction"}}]}]`)
+	stats, reason, ok := parseMempoolTxsLineDetailed(line)
+	if !ok || reason != "" {
+		t.Fatalf("parse = ok:%v reason:%q", ok, reason)
+	}
+	if got := stats.orderCounts[mempoolTxOrderLabel{side: "buy", tif: "trigger"}]; got != 1 {
+		t.Fatalf("trigger orders = %d, want 1", got)
+	}
+	if got := stats.orderCounts[mempoolTxOrderLabel{side: "sell", tif: "other"}]; got != 1 {
+		t.Fatalf("unknown TIF orders = %d, want 1", got)
+	}
+	if got := stats.orderCounts[mempoolTxOrderLabel{side: "buy", tif: "unknown"}]; got != 1 {
+		t.Fatalf("null TIF orders = %d, want 1", got)
+	}
+	if stats.parserEvents["unknown_tif"] != 1 || stats.parserEvents["null_tif"] != 1 || stats.parserEvents["unknown_action"] != 1 {
+		t.Fatalf("parser events = %#v", stats.parserEvents)
+	}
+	if stats.actionCounts["other"] != 1 {
+		t.Fatalf("unknown action was not bounded: %#v", stats.actionCounts)
+	}
+}
+
+func TestParseMempoolTxsRejectsIncompleteEnvelope(t *testing.T) {
+	tests := []struct {
+		name   string
+		line   string
+		reason string
+	}{
+		{name: "invalid envelope", line: `{}`, reason: "invalid_envelope"},
+		{name: "invalid timestamp", line: `[7,{"signed_actions":[]}]`, reason: "invalid_timestamp"},
+		{name: "missing actions", line: `["2026-06-01T17:59:25.990970382",{}]`, reason: "missing_signed_actions"},
+		{name: "null actions", line: `["2026-06-01T17:59:25.990970382",{"signed_actions":null}]`, reason: "missing_signed_actions"},
+		{name: "wrong actions", line: `["2026-06-01T17:59:25.990970382",{"signed_actions":{}}]`, reason: "invalid_signed_actions"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, reason, ok := parseMempoolTxsLineDetailed([]byte(tt.line))
+			if ok || reason != tt.reason {
+				t.Fatalf("parse = ok:%v reason:%q, want false/%q", ok, reason, tt.reason)
+			}
+		})
+	}
+}

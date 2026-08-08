@@ -182,3 +182,37 @@ func TestTailStreamDetectsSameInodeTruncation(t *testing.T) {
 		t.Fatalf("line after truncation = %q", got)
 	}
 }
+
+func TestTailStreamReportsBoundedFailureStage(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	missing := filepath.Join(t.TempDir(), "missing")
+	failures := make(chan tailStreamFailure, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tailStream(ctx, tailStreamOpts{
+			component:   "stream_test",
+			name:        "missing stream",
+			resolve:     func() (string, error) { return missing, nil },
+			rescanEvery: 5 * time.Millisecond,
+			eofSleep:    5 * time.Millisecond,
+			onLine:      func(string) {},
+			onFailure:   func(failure tailStreamFailure) { failures <- failure },
+		})
+	}()
+	select {
+	case got := <-failures:
+		if got != tailStreamFailureOpen {
+			t.Fatalf("failure = %q, want open", got)
+		}
+	case <-time.After(streamTestTimeout):
+		t.Fatal("timed out waiting for failure callback")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(streamTestTimeout):
+		t.Fatal("tail did not cancel after open failure")
+	}
+}

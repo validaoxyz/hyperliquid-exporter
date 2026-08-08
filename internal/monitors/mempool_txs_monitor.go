@@ -15,8 +15,6 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
-const mempoolTxsPollInterval = 10 * time.Second
-
 // mempoolTxActionTypeAllowlist bounds the action-type label set. New action
 // variants fall into type="other" until reviewed.
 var mempoolTxActionTypeAllowlist = map[string]bool{
@@ -66,10 +64,8 @@ var mempoolTxOrderTIFAllowlist = map[string]bool{
 	"unknown":        true,
 }
 
-type mempoolTxOuterRecord [2]json.RawMessage
-
 type mempoolTxPayload struct {
-	SignedActions []mempoolTxSignedAction `json:"signed_actions"`
+	SignedActions json.RawMessage `json:"signed_actions"`
 }
 
 type mempoolTxSignedAction struct {
@@ -91,9 +87,10 @@ type mempoolTxModify struct {
 type mempoolTxOrder struct {
 	IsBuy *bool `json:"b,omitempty"`
 	T     struct {
-		Limit struct {
-			TIF string `json:"tif,omitempty"`
+		Limit *struct {
+			TIF json.RawMessage `json:"tif,omitempty"`
 		} `json:"limit,omitempty"`
+		Trigger json.RawMessage `json:"trigger,omitempty"`
 	} `json:"t,omitempty"`
 }
 
@@ -109,6 +106,7 @@ type mempoolTxParsedLine struct {
 	actionCounts    map[string]int
 	operationCounts map[string]int
 	orderCounts     map[mempoolTxOrderLabel]int
+	parserEvents    map[string]int
 }
 
 // StartMempoolTxsMonitor watches $NODE_HOME/data/mempool_txs/hourly.
@@ -120,77 +118,58 @@ type mempoolTxParsedLine struct {
 // exporter startup, then offset-track appended complete JSONL records.
 func StartMempoolTxsMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
 	root := filepath.Join(cfg.NodeHome, "data", "mempool_txs", "hourly")
-	if _, err := os.Stat(root); err != nil {
-		logger.InfoComponent("mempool_txs",
-			"mempool_txs directory not present (%s); monitor idle", root)
-		<-ctx.Done()
-		return
-	}
-
+	metrics.RegisterSource(metrics.SourceMempoolTxs, true)
 	logger.InfoComponent("mempool_txs", "watching %s", root)
-
-	var currentFile string
-	var currentOffset int64
-	var initialized bool
-
-	tick := func() {
-		latest, err := latestHourlyFile(root)
-		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				logger.DebugComponent("mempool_txs", "find latest: %v", err)
-			}
-			return
-		}
-
-		if latest != currentFile {
-			info, err := os.Stat(latest)
+	var lastReceipt time.Time
+	tailStream(ctx, tailStreamOpts{
+		component:   "mempool_txs",
+		name:        "mempool_txs stream",
+		rescanEvery: 2 * time.Second,
+		eofSleep:    250 * time.Millisecond,
+		bufSize:     1 << 20,
+		resolve: func() (string, error) {
+			metrics.MarkMonitorAttempt("mempool_txs")
+			metrics.MarkSourceAttempt(metrics.SourceMempoolTxs)
+			path, err := latestHourlyFile(root)
 			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					metrics.MarkSourceAbsent(metrics.SourceMempoolTxs)
+				} else {
+					metrics.MarkSourceError(metrics.SourceMempoolTxs, metrics.SourceFailureDiscovery)
+				}
+			}
+			return path, err
+		},
+		onLine: func(line string) {
+			metrics.MarkMonitorAttempt("mempool_txs")
+			metrics.MarkSourceAttempt(metrics.SourceMempoolTxs)
+			metrics.HLMempoolTxsBytesTotal.Add(float64(len(line)))
+			stats, reason, ok := parseMempoolTxsLineDetailed([]byte(line))
+			if !ok {
+				metrics.HLMempoolTxsParserEventsTotal.WithLabelValues(reason).Inc()
+				metrics.MarkSourceError(metrics.SourceMempoolTxs, metrics.SourceFailureSchema)
 				return
 			}
-			currentFile = latest
-			if !initialized {
-				currentOffset = info.Size()
-				initialized = true
-				logger.InfoComponent("mempool_txs", "switched to %s (starting at EOF=%d)", latest, info.Size())
-				return
+			publishMempoolTxsLine(stats)
+			lastReceipt = time.Now()
+			metrics.HLMempoolTxsSampleAgeSeconds.WithLabelValues().Set(0)
+			metrics.MarkSourceValidObservation(metrics.SourceMempoolTxs, stats.timestamp)
+			metrics.MarkSourcePublication(metrics.SourceMempoolTxs)
+			metrics.MarkMonitorValidObservation("mempool_txs")
+			metrics.MarkMonitorPublication("mempool_txs")
+		},
+		onIdle: func() {
+			if !lastReceipt.IsZero() {
+				metrics.HLMempoolTxsSampleAgeSeconds.WithLabelValues().Set(time.Since(lastReceipt).Seconds())
 			}
-			currentOffset = 0
-			logger.InfoComponent("mempool_txs", "switched to %s (starting at beginning)", latest)
-		}
-
-		if currentFile == "" {
-			return
-		}
-		if info, err := os.Stat(currentFile); err == nil && info.Size() < currentOffset {
-			currentOffset = 0
-		}
-
-		newOffset, _, err := readMempoolTxsEvents(currentFile, currentOffset)
-		if err != nil {
-			logger.DebugComponent("mempool_txs", "read %s: %v", currentFile, err)
-			return
-		}
-		currentOffset = newOffset
-		// refresh the age unconditionally: a quiet or dead stream must show
-		// a climbing age, which is the whole point of the gauge
-		if !mempoolTxsLastRecord.IsZero() {
-			metrics.HLMempoolTxsSampleAgeSeconds.Set(time.Since(mempoolTxsLastRecord).Seconds())
-		}
-		metrics.MarkMonitorTick("mempool_txs")
-	}
-
-	ticker := time.NewTicker(mempoolTxsPollInterval)
-	defer ticker.Stop()
-	tick()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			tick()
-		}
-	}
+		},
+		onSwitch: func(string) {
+			metrics.MarkSourceReadOutcome(metrics.SourceMempoolTxs, true)
+		},
+		onFailure: func(failure tailStreamFailure) {
+			markTailSourceFailure(metrics.SourceMempoolTxs, failure)
+		},
+	})
 }
 
 func readMempoolTxsEvents(path string, offset int64) (int64, int, error) {
@@ -213,9 +192,11 @@ func readMempoolTxsEvents(path string, offset int64) (int64, int, error) {
 			}
 			offset += int64(len(line))
 			metrics.HLMempoolTxsBytesTotal.Add(float64(len(line)))
-			if stats, ok := parseMempoolTxsLine(line); ok {
+			if stats, reason, ok := parseMempoolTxsLineDetailed(line); ok {
 				publishMempoolTxsLine(stats)
 				processed++
+			} else {
+				metrics.HLMempoolTxsParserEventsTotal.WithLabelValues(reason).Inc()
 			}
 		}
 		if err != nil {
@@ -229,53 +210,81 @@ func readMempoolTxsEvents(path string, offset int64) (int64, int, error) {
 }
 
 func parseMempoolTxsLine(line []byte) (mempoolTxParsedLine, bool) {
-	var outer mempoolTxOuterRecord
-	if err := json.Unmarshal(line, &outer); err != nil {
-		return mempoolTxParsedLine{}, false
+	stats, _, ok := parseMempoolTxsLineDetailed(line)
+	return stats, ok
+}
+
+func parseMempoolTxsLineDetailed(line []byte) (mempoolTxParsedLine, string, bool) {
+	var outer []json.RawMessage
+	if err := json.Unmarshal(line, &outer); err != nil || len(outer) != 2 {
+		return mempoolTxParsedLine{}, "invalid_envelope", false
 	}
 	var tsStr string
 	if err := json.Unmarshal(outer[0], &tsStr); err != nil {
-		return mempoolTxParsedLine{}, false
+		return mempoolTxParsedLine{}, "invalid_timestamp", false
 	}
 	ts, ok := parseVisorTime(tsStr)
 	if !ok {
-		return mempoolTxParsedLine{}, false
+		return mempoolTxParsedLine{}, "invalid_timestamp", false
 	}
 
 	var payload mempoolTxPayload
 	if err := json.Unmarshal(outer[1], &payload); err != nil {
-		return mempoolTxParsedLine{}, false
+		return mempoolTxParsedLine{}, "invalid_payload", false
+	}
+	if len(payload.SignedActions) == 0 || string(payload.SignedActions) == "null" {
+		return mempoolTxParsedLine{}, "missing_signed_actions", false
+	}
+	var signedActions []mempoolTxSignedAction
+	if err := json.Unmarshal(payload.SignedActions, &signedActions); err != nil {
+		return mempoolTxParsedLine{}, "invalid_signed_actions", false
 	}
 
 	stats := mempoolTxParsedLine{
 		timestamp:       ts,
-		signedActions:   len(payload.SignedActions),
+		signedActions:   len(signedActions),
 		actionCounts:    make(map[string]int),
 		operationCounts: make(map[string]int),
 		orderCounts:     make(map[mempoolTxOrderLabel]int),
+		parserEvents:    make(map[string]int),
 	}
 
-	for _, signedAction := range payload.SignedActions {
-		actionType := mempoolTxActionTypeLabel(signedAction.Action.Type)
+	for _, signedAction := range signedActions {
+		actionType, known := mempoolTxActionTypeLabel(signedAction.Action.Type)
+		if !known {
+			stats.parserEvents["unknown_action"]++
+		}
 		ops := mempoolTxOperationCount(signedAction.Action)
 		stats.operations += ops
 		stats.actionCounts[actionType]++
 		stats.operationCounts[actionType] += ops
 
 		for _, order := range signedAction.Action.Orders {
-			stats.orderCounts[mempoolTxOrderMetricLabel(order)]++
+			label, reason := mempoolTxOrderMetricLabel(order)
+			stats.orderCounts[label]++
+			if reason != "" {
+				stats.parserEvents[reason]++
+			}
 		}
 		if signedAction.Action.Order != nil {
-			stats.orderCounts[mempoolTxOrderMetricLabel(*signedAction.Action.Order)]++
+			label, reason := mempoolTxOrderMetricLabel(*signedAction.Action.Order)
+			stats.orderCounts[label]++
+			if reason != "" {
+				stats.parserEvents[reason]++
+			}
 		}
 		for _, modify := range signedAction.Action.Modifies {
 			if modify.Order != nil {
-				stats.orderCounts[mempoolTxOrderMetricLabel(*modify.Order)]++
+				label, reason := mempoolTxOrderMetricLabel(*modify.Order)
+				stats.orderCounts[label]++
+				if reason != "" {
+					stats.parserEvents[reason]++
+				}
 			}
 		}
 	}
 
-	return stats, true
+	return stats, "", true
 }
 
 func publishMempoolTxsLine(stats mempoolTxParsedLine) {
@@ -292,24 +301,23 @@ func publishMempoolTxsLine(stats mempoolTxParsedLine) {
 	for label, count := range stats.orderCounts {
 		metrics.HLMempoolTxsOrderOperationsTotal.WithLabelValues(label.side, label.tif).Add(float64(count))
 	}
+	for reason, count := range stats.parserEvents {
+		metrics.HLMempoolTxsParserEventsTotal.WithLabelValues(reason).Add(float64(count))
+	}
 
 	if !stats.timestamp.IsZero() {
-		mempoolTxsLastRecord = stats.timestamp
-		metrics.HLMempoolTxsLatestTime.Set(float64(stats.timestamp.Unix()))
+		metrics.HLMempoolTxsLatestTime.WithLabelValues().Set(float64(stats.timestamp.Unix()))
 	}
 }
 
-// mempoolTxsLastRecord backs the sample-age gauge; single-goroutine access.
-var mempoolTxsLastRecord time.Time
-
-func mempoolTxActionTypeLabel(actionType string) string {
+func mempoolTxActionTypeLabel(actionType string) (string, bool) {
 	if actionType == "" {
-		return "other"
+		return "other", false
 	}
 	if mempoolTxActionTypeAllowlist[actionType] {
-		return actionType
+		return actionType, true
 	}
-	return "other"
+	return "other", false
 }
 
 func mempoolTxOperationCount(action mempoolTxAction) int {
@@ -327,7 +335,7 @@ func mempoolTxOperationCount(action mempoolTxAction) int {
 	}
 }
 
-func mempoolTxOrderMetricLabel(order mempoolTxOrder) mempoolTxOrderLabel {
+func mempoolTxOrderMetricLabel(order mempoolTxOrder) (mempoolTxOrderLabel, string) {
 	side := "unknown"
 	if order.IsBuy != nil {
 		if *order.IsBuy {
@@ -337,12 +345,28 @@ func mempoolTxOrderMetricLabel(order mempoolTxOrder) mempoolTxOrderLabel {
 		}
 	}
 
-	tif := order.T.Limit.TIF
-	if tif == "" {
-		tif = "unknown"
+	if len(order.T.Trigger) > 0 && string(order.T.Trigger) != "null" {
+		var trigger map[string]json.RawMessage
+		if err := json.Unmarshal(order.T.Trigger, &trigger); err != nil {
+			return mempoolTxOrderLabel{side: side, tif: "unknown"}, "invalid_trigger"
+		}
+		return mempoolTxOrderLabel{side: side, tif: "trigger"}, ""
+	}
+	if order.T.Limit == nil {
+		return mempoolTxOrderLabel{side: side, tif: "unknown"}, "missing_order_kind"
+	}
+	if len(order.T.Limit.TIF) == 0 {
+		return mempoolTxOrderLabel{side: side, tif: "unknown"}, "missing_tif"
+	}
+	if string(order.T.Limit.TIF) == "null" {
+		return mempoolTxOrderLabel{side: side, tif: "unknown"}, "null_tif"
+	}
+	var tif string
+	if err := json.Unmarshal(order.T.Limit.TIF, &tif); err != nil {
+		return mempoolTxOrderLabel{side: side, tif: "unknown"}, "invalid_tif_type"
 	}
 	if !mempoolTxOrderTIFAllowlist[tif] {
-		tif = "other"
+		return mempoolTxOrderLabel{side: side, tif: "other"}, "unknown_tif"
 	}
-	return mempoolTxOrderLabel{side: side, tif: tif}
+	return mempoolTxOrderLabel{side: side, tif: tif}, ""
 }

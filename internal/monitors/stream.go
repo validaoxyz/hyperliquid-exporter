@@ -34,7 +34,18 @@ type tailStreamOpts struct {
 	onLine      func(line string)
 	onIdle      func()            // optional: once per EOF pause, for batch flushing
 	onSwitch    func(path string) // optional: after switching to a new file
+	onFailure   func(tailStreamFailure)
 }
+
+type tailStreamFailure string
+
+const (
+	tailStreamFailureOpen   tailStreamFailure = "open"
+	tailStreamFailureStat   tailStreamFailure = "stat"
+	tailStreamFailureSeek   tailStreamFailure = "seek"
+	tailStreamFailureRead   tailStreamFailure = "read"
+	tailStreamFailureRecord tailStreamFailure = "record"
+)
 
 type pendingStreamSwitch struct {
 	path          string
@@ -88,12 +99,18 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 	activate := func(path string, skipExisting bool) bool {
 		candidate, err := os.Open(path)
 		if err != nil {
+			if o.onFailure != nil {
+				o.onFailure(tailStreamFailureOpen)
+			}
 			logger.WarningComponent(o.component, "%s: cannot open %s: %v", o.name, path, err)
 			return false
 		}
 		info, err := candidate.Stat()
 		if err != nil {
 			_ = candidate.Close()
+			if o.onFailure != nil {
+				o.onFailure(tailStreamFailureStat)
+			}
 			logger.WarningComponent(o.component, "%s: cannot stat %s: %v", o.name, path, err)
 			return false
 		}
@@ -102,6 +119,9 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 			offset, err = candidate.Seek(0, io.SeekEnd)
 			if err != nil {
 				_ = candidate.Close()
+				if o.onFailure != nil {
+					o.onFailure(tailStreamFailureSeek)
+				}
 				logger.WarningComponent(o.component, "%s: seek to end of %s: %v", o.name, path, err)
 				return false
 			}
@@ -207,6 +227,9 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 					} else {
 						pending = append(pending, chunk...)
 						if len(pending) > pendingLineCap {
+							if o.onFailure != nil {
+								o.onFailure(tailStreamFailureRecord)
+							}
 							logger.WarningComponent(o.component, "%s: discarding oversized partial record (%d bytes)", o.name, len(pending))
 							discardedBytes = int64(len(pending))
 							pending = nil
@@ -214,6 +237,9 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 					}
 				}
 				if err != io.EOF {
+					if o.onFailure != nil {
+						o.onFailure(tailStreamFailureRead)
+					}
 					logger.WarningComponent(o.component, "%s: read error: %v", o.name, err)
 				}
 				break
@@ -257,6 +283,9 @@ func tailStream(ctx context.Context, o tailStreamOpts) {
 					continue
 				}
 			} else if time.Since(next.detectedAt) >= rotationDrainGrace {
+				if o.onFailure != nil {
+					o.onFailure(tailStreamFailureRecord)
+				}
 				logger.WarningComponent(o.component, "%s: dropping unterminated tail while switching from %s to %s", o.name, current, next.path)
 				if activate(next.path, false) {
 					continue
