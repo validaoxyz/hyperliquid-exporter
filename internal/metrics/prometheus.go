@@ -8,13 +8,45 @@ import (
 	"os"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/logger"
 )
 
-const scrapeTimeout = 30 * time.Second
+const (
+	scrapeTimeout      = 30 * time.Second
+	maxScrapesInFlight = 5
+)
 
 func StartPrometheusServer(ctx context.Context, port int, enablePprof bool) error {
+	mux := newPrometheusMux(enablePprof, prometheus.DefaultGatherer)
+	server := newPrometheusServer(port, mux)
+
+	go func() {
+		logger.Info("Starting Prometheus metrics server on port %d", port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			// an exporter that cannot serve metrics is worse than a dead
+			// one: it looks alive while every scrape fails (seen live with
+			// a port collision). Die loudly so systemd restarts us and the
+			// failure is visible.
+			logger.Error("Prometheus server failed (exiting): %v", err)
+			os.Exit(1)
+		}
+	}()
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			logger.Error("Error shutting down Prometheus server: %v", err)
+		}
+	}()
+
+	return nil
+}
+
+func newPrometheusMux(enablePprof bool, gatherer prometheus.Gatherer) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// http.TimeoutHandler buffers the response and writes a 503 if the inner
@@ -22,7 +54,7 @@ func StartPrometheusServer(ctx context.Context, port int, enablePprof bool) erro
 	// never races with the inner handler on the ResponseWriter — which was the
 	// source of the "superfluous response.WriteHeader" log spam.
 	metricsHandler := http.TimeoutHandler(
-		promhttp.Handler(),
+		promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{MaxRequestsInFlight: maxScrapesInFlight}),
 		scrapeTimeout,
 		"Metrics collection timed out\n",
 	)
@@ -61,32 +93,15 @@ func StartPrometheusServer(ctx context.Context, port int, enablePprof bool) erro
 		logger.Info("pprof endpoints enabled on /debug/pprof/")
 	}
 
-	server := &http.Server{
+	return mux
+}
+
+func newPrometheusServer(port int, handler http.Handler) *http.Server {
+	return &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      35 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
-
-	go func() {
-		logger.Info("Starting Prometheus metrics server on port %d", port)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			// an exporter that cannot serve metrics is worse than a dead
-			// one: it looks alive while every scrape fails (seen live with
-			// a port collision). Die loudly so systemd restarts us and the
-			// failure is visible.
-			logger.Error("Prometheus server failed (exiting): %v", err)
-			os.Exit(1)
-		}
-	}()
-
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			logger.Error("Error shutting down Prometheus server: %v", err)
-		}
-	}()
-
-	return nil
 }
