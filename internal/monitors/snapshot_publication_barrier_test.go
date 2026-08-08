@@ -111,6 +111,13 @@ func TestCorrectedLogicalSourcesUseSnapshotBarrier(t *testing.T) {
 		assertUsesSnapshotBarrier(t, func() { tickOperatorConfig(root) })
 	})
 
+	t.Run("rocksdb", func(t *testing.T) {
+		root := t.TempDir()
+		assertUsesSnapshotBarrier(t, func() {
+			tickRocksDB(root, newRocksDBMonitorState(), time.Unix(100, 0))
+		})
+	})
+
 	t.Run("validator_status", func(t *testing.T) {
 		line := `["2026-08-08T00:00:00.000000000",{"home_validator":"0x2222222222222222222222222222222222222222","round":1,"current_stakes":[],"current_jailed_validators":[]}]`
 		assertUsesSnapshotBarrier(t, func() {

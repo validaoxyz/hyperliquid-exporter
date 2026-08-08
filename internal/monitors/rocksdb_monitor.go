@@ -64,6 +64,20 @@ type rocksDBMonitorState struct {
 	dbs map[string]*rocksDBInstanceState
 }
 
+type rocksDBTickDecision struct {
+	name          string
+	instance      *rocksDBInstanceState
+	setPresent    bool
+	present       float64
+	parseOK       float64
+	withdraw      bool
+	publish       bool
+	sstFiles      int
+	stats         rocksDBStats
+	lastValid     time.Time
+	sampleChanged bool
+}
+
 func newRocksDBMonitorState() *rocksDBMonitorState {
 	state := &rocksDBMonitorState{dbs: make(map[string]*rocksDBInstanceState, len(rocksDBs))}
 	for _, db := range rocksDBs {
@@ -93,6 +107,7 @@ func StartRocksDBMonitor(ctx context.Context, cfg config.Config, errCh chan<- er
 func tickRocksDB(nodeHome string, state *rocksDBMonitorState, now time.Time) {
 	metrics.MarkMonitorAttempt("rocksdb")
 	metrics.MarkSourceAttempt(metrics.SourceRocksDB)
+	decisions := make([]rocksDBTickDecision, 0, len(rocksDBs))
 	validNew := false
 	anyPresent := false
 	uncertainPresence := false
@@ -107,42 +122,46 @@ func tickRocksDB(nodeHome string, state *rocksDBMonitorState, now time.Time) {
 	var newest time.Time
 	for _, db := range rocksDBs {
 		instance := state.dbs[db.name]
+		decision := rocksDBTickDecision{
+			name:      db.name,
+			instance:  instance,
+			parseOK:   -1,
+			lastValid: instance.lastValid,
+		}
 		dir := filepath.Join(nodeHome, db.relPath)
 		if _, err := os.Stat(dir); err != nil {
 			if os.IsNotExist(err) {
-				withdrawRocksDBSnapshot(db.name, instance)
-				metrics.HLRocksDBSourcePresent.WithLabelValues(db.name).Set(0)
-				metrics.HLRocksDBStatsParseOK.WithLabelValues(db.name).Set(-1)
+				decision.withdraw = true
+				decision.setPresent = true
+				decision.present = 0
 			} else {
 				uncertainPresence = true
 				recordFailure(metrics.SourceFailureStat)
-				metrics.HLRocksDBStatsParseOK.WithLabelValues(db.name).Set(-1)
 			}
-			metrics.SetRocksDBLastValidAge(db.name, instance.lastValid, now)
+			decisions = append(decisions, decision)
 			continue
 		}
 		logPath := filepath.Join(dir, "LOG")
 		if _, err := os.Stat(logPath); err != nil {
 			if os.IsNotExist(err) {
-				withdrawRocksDBSnapshot(db.name, instance)
-				metrics.HLRocksDBSourcePresent.WithLabelValues(db.name).Set(0)
-				metrics.HLRocksDBStatsParseOK.WithLabelValues(db.name).Set(-1)
+				decision.withdraw = true
+				decision.setPresent = true
+				decision.present = 0
 			} else {
 				uncertainPresence = true
 				recordFailure(metrics.SourceFailureStat)
-				metrics.HLRocksDBStatsParseOK.WithLabelValues(db.name).Set(-1)
 			}
-			metrics.SetRocksDBLastValidAge(db.name, instance.lastValid, now)
+			decisions = append(decisions, decision)
 			continue
 		}
 		anyPresent = true
-		metrics.HLRocksDBSourcePresent.WithLabelValues(db.name).Set(1)
+		decision.setPresent = true
+		decision.present = 1
 
 		sstFiles, err := countSSTFilesComplete(dir)
 		if err != nil {
 			recordFailure(metrics.SourceFailureWalk)
-			metrics.HLRocksDBStatsParseOK.WithLabelValues(db.name).Set(-1)
-			metrics.SetRocksDBLastValidAge(db.name, instance.lastValid, now)
+			decisions = append(decisions, decision)
 			continue
 		}
 		stats, err := readRocksDBStatsComplete(logPath)
@@ -153,39 +172,61 @@ func tickRocksDB(nodeHome string, state *rocksDBMonitorState, now time.Time) {
 			if stage != metrics.SourceFailureSchema {
 				parseState = -1
 			}
-			metrics.HLRocksDBStatsParseOK.WithLabelValues(db.name).Set(parseState)
-			metrics.SetRocksDBLastValidAge(db.name, instance.lastValid, now)
+			decision.parseOK = parseState
+			decisions = append(decisions, decision)
 			continue
 		}
 
-		publishRocksDBSnapshot(db.name, sstFiles, stats)
-		metrics.HLRocksDBStatsParseOK.WithLabelValues(db.name).Set(1)
-		instance.lastValid = now
-		metrics.HLRocksDBStatsLastValidTimestamp.WithLabelValues(db.name).Set(float64(now.Unix()))
+		decision.publish = true
+		decision.sstFiles = sstFiles
+		decision.stats = stats
+		decision.parseOK = 1
+		decision.lastValid = now
 		if !stats.sampleTime.Equal(instance.lastSampleTime) {
-			instance.lastSampleTime = stats.sampleTime
+			decision.sampleChanged = true
 			validNew = true
 			if stats.sampleTime.After(newest) {
 				newest = stats.sampleTime
 			}
 		}
-		instance.published = true
-		metrics.SetRocksDBLastValidAge(db.name, instance.lastValid, now)
+		decisions = append(decisions, decision)
 	}
 
-	if validNew {
-		metrics.MarkSourceValidObservation(metrics.SourceRocksDB, newest)
-		metrics.MarkMonitorValidObservation("rocksdb")
-	}
-	if anyPresent {
-		metrics.MarkSourcePublication(metrics.SourceRocksDB)
-		metrics.MarkMonitorPublication("rocksdb")
-	} else if !uncertainPresence {
-		metrics.MarkSourceAbsent(metrics.SourceRocksDB)
-	}
-	if failureStage != "" {
-		metrics.MarkSourceError(metrics.SourceRocksDB, failureStage)
-	}
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		for _, decision := range decisions {
+			if decision.withdraw {
+				withdrawRocksDBSnapshot(decision.name, decision.instance)
+			}
+			if decision.publish {
+				publishRocksDBSnapshot(decision.name, decision.sstFiles, decision.stats)
+				decision.instance.lastValid = decision.lastValid
+				if decision.sampleChanged {
+					decision.instance.lastSampleTime = decision.stats.sampleTime
+				}
+				decision.instance.published = true
+				metrics.HLRocksDBStatsLastValidTimestamp.WithLabelValues(decision.name).Set(float64(now.Unix()))
+			}
+			if decision.setPresent {
+				metrics.HLRocksDBSourcePresent.WithLabelValues(decision.name).Set(decision.present)
+			}
+			metrics.HLRocksDBStatsParseOK.WithLabelValues(decision.name).Set(decision.parseOK)
+			metrics.SetRocksDBLastValidAge(decision.name, decision.instance.lastValid, now)
+		}
+
+		if validNew {
+			metrics.MarkSourceValidObservation(metrics.SourceRocksDB, newest)
+			metrics.MarkMonitorValidObservation("rocksdb")
+		}
+		if anyPresent {
+			metrics.MarkSourcePublication(metrics.SourceRocksDB)
+			metrics.MarkMonitorPublication("rocksdb")
+		} else if !uncertainPresence {
+			metrics.MarkSourceAbsent(metrics.SourceRocksDB)
+		}
+		if failureStage != "" {
+			metrics.MarkSourceError(metrics.SourceRocksDB, failureStage)
+		}
+	})
 }
 
 func rocksDBFailurePriority(stage metrics.SourceFailureStage) int {
