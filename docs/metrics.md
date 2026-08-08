@@ -10,6 +10,7 @@ This reference separates what the exporter observed from what an operator may in
 - Counters are monotonic only for the exporter process lifetime. Use `rate()` or `increase()` and expect a reset after restart.
 - Gauges represent current source values or retained last-good observations. Read their source-health and age companions before treating a value as current.
 - A few deprecated gauges retain `_total` or `_count` in their names. Their inventory type is authoritative; never choose a query function from the suffix alone.
+- The `Exporters` column is exact. Optional OTLP includes only families marked `OTel bridge`; Prometheus-only families are not sent through OTLP.
 
 The inventory labels are the bounded union emitted by current production paths. Resource and scrape labels such as `job`, `instance`, and operator-added labels are not repeated in every row.
 
@@ -19,7 +20,7 @@ The inventory labels are the bounded union emitted by current production paths. 
 
 Use these families together:
 
-- `hl_exporter_monitor_registered`, `hl_exporter_monitor_running`, `hl_exporter_monitor_workers`, and `hl_exporter_monitor_exited_total` describe worker lifecycle.
+- `hl_exporter_monitor_registered`, `hl_exporter_monitor_running`, `hl_exporter_monitor_workers`, and `hl_exporter_monitor_exited_seconds` describe worker lifecycle.
 - `hl_exporter_monitor_last_attempt_seconds`, `hl_exporter_monitor_last_valid_observation_seconds`, and `hl_exporter_monitor_last_publication_seconds` separate polling from accepted data and publication.
 - `hl_exporter_source_enabled`, `present`, `read_ok`, `schema_ok`, `ever_observed`, source timestamp, last-valid age, and bounded error counters describe each fixed source.
 - `hl_exporter_monitor_last_tick_seconds` is a deprecated compatibility alias for the last valid observation. It is not generic loop activity.
@@ -426,7 +427,7 @@ Run `go generate ./internal/metrics` after changing a declaration. `go test ./in
 | `hl_p2p_dominant_inbound_switches_total` | Counter | Prometheus | - | base | Candidate A-to-B changes during continuously fresh epochs since exporter start; clear and recovery are not switches. | `network_prometheus.go` |
 | `hl_p2p_dominant_inbound_tenure_seconds` | Gauge | Prometheus | - | base | Wall-clock seconds since the candidate was selected in the current uninterrupted fresh epoch. | `network_prometheus.go` |
 | `hl_p2p_dominant_inbound_tie_count` | Gauge | Prometheus | - | base | Endpoints exactly tied for maximum inbound EWMA before lexicographic tie-breaking; zero without a candidate. | `network_prometheus.go` |
-| `hl_p2p_gossip_events_total` | Counter | Prometheus | `event_type` | base | Newline-committed gossip-connection events observed after exporter start, by fixed event type; retained startup history is not replayed and the counter resets on exporter restart. | `prometheus_instruments.go` |
+| `hl_p2p_gossip_events_total` | Counter | Prometheus | `event_type` | base | Newline-committed gossip-connection events observed after exporter start, by fixed event type; history found by a successful initial scan is skipped, a file first found after an initial discovery failure is read from its start, and the counter resets on exporter restart. | `prometheus_instruments.go` |
 | `hl_p2p_gossip_last_read_success_timestamp_seconds` | Gauge | Prometheus | - | base | Exporter wall-clock Unix timestamp of the latest successful gossip-connection poll, independent of event arrival. | `network_prometheus.go` |
 | `hl_p2p_gossip_parse_errors_total` | Counter | Prometheus | `reason` | base | Rejected complete gossip-connection records since exporter start, partitioned by a fixed reason. | `network_prometheus.go` |
 | `hl_p2p_gossip_source_up` | Gauge | Prometheus | - | base | Whether the latest gossip-connection discovery/read/scan attempt succeeded; quiet input remains up. | `network_prometheus.go` |
@@ -489,9 +490,9 @@ Run `go generate ./internal/metrics` after changing a declaration. `go test ./in
 | `hl_tokio_task_scheduled_total` | Gauge | Prometheus | `task` | base | Cumulative times the task was scheduled (woken) since the source process started. | `prometheus_instruments.go` |
 | `hl_tokio_task_short_delays_total` | Gauge | Prometheus | `task` | base | Cumulative short scheduling delays since source start (complements long_delays). | `prometheus_instruments.go` |
 | `hl_tokio_task_slow_polls_total` | Gauge | Prometheus | `task` | base | Cumulative slow polls (poll exceeded the runtime's slow-poll threshold). | `prometheus_instruments.go` |
-| `hl_validator_api_cache_age_seconds` | Gauge | Prometheus | - | base | Wall-clock age in seconds of the last successful validatorSummaries network refresh. | `validator_api_metrics.go` |
+| `hl_validator_api_cache_age_seconds` | Gauge | Prometheus | - | base | Wall-clock age in seconds of the last successful validatorSummaries network refresh; absent until the first successful refresh. | `validator_api_metrics.go` |
 | `hl_validator_api_cache_stale` | Gauge | Prometheus | - | base | Whether the most recent validatorSummaries result was a stale cache fallback after a failed refresh (1=yes, 0=no). | `validator_api_metrics.go` |
-| `hl_validator_api_last_success_seconds` | Gauge | Prometheus | - | base | Unix timestamp of the most recent complete valid validatorSummaries refresh; never advanced by cache fallback. | `validator_api_metrics.go` |
+| `hl_validator_api_last_success_seconds` | Gauge | Prometheus | - | base | Unix timestamp of the most recent complete valid validatorSummaries refresh; absent until the first successful refresh and never advanced by cache fallback. | `validator_api_metrics.go` |
 | `hl_validator_api_outcomes_total` | Counter | Prometheus | `outcome` | base | Validator-summary resolver outcomes since exporter start from a fixed vocabulary. | `validator_api_metrics.go` |
 | `hl_validator_api_unknown_periods_total` | Counter | Prometheus | - | base | Validator-summary stat rows dropped because period was not one of day, week, or month. | `validator_api_metrics.go` |
 | `hl_validator_api_up` | Gauge | Prometheus | - | base | Whether the most recent validatorSummaries refresh produced a complete valid snapshot (1=yes, 0=no). Fresh-cache reads do not change this state. | `validator_api_metrics.go` |

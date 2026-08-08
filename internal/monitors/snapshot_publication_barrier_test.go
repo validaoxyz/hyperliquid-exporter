@@ -7,6 +7,7 @@ import (
 	"time"
 
 	dto "github.com/prometheus/client_model/go"
+	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
 	hyperliquidapi "github.com/validaoxyz/hyperliquid-exporter/internal/hyperliquid-api"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
@@ -106,6 +107,25 @@ func TestCorrectedLogicalSourcesUseSnapshotBarrier(t *testing.T) {
 	t.Run("operator_config", func(t *testing.T) {
 		root := t.TempDir()
 		assertUsesSnapshotBarrier(t, func() { tickOperatorConfig(root) })
+	})
+
+	t.Run("validator_status", func(t *testing.T) {
+		line := `["2026-08-08T00:00:00.000000000",{"home_validator":"0x2222222222222222222222222222222222222222","round":1,"current_stakes":[],"current_jailed_validators":[]}]`
+		assertUsesSnapshotBarrier(t, func() {
+			if err := processValidatorStatusLine(line); err != nil {
+				t.Errorf("process validator status: %v", err)
+			}
+		})
+	})
+
+	t.Run("consensus_status", func(t *testing.T) {
+		monitor := NewConsensusMonitor(&config.Config{})
+		line := `["2026-08-08T00:00:00.000000000",{"round":1,"heartbeat_statuses":[],"disconnected_validators":[]}]`
+		assertUsesSnapshotBarrier(t, func() {
+			if err := monitor.processStatusLine(line); err != nil {
+				t.Errorf("process consensus status: %v", err)
+			}
+		})
 	})
 
 	t.Run("info_meta", func(t *testing.T) {

@@ -2,7 +2,11 @@ package monitors
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
@@ -70,6 +74,14 @@ func TestDecodeStatusStakeRowsRejectsNullAndMalformedRows(t *testing.T) {
 		if _, err := decodeStatusStakeRows(json.RawMessage(raw)); err != nil {
 			t.Fatalf("valid current_stakes rejected: %s: %v", raw, err)
 		}
+	}
+}
+
+func TestDecodeStatusStakeRowsRejectsOversizedGeneration(t *testing.T) {
+	const row = `["0x1111111111111111111111111111111111111111",1]`
+	raw := `[` + strings.Repeat(row+`,`, validatorSummaryLimit) + row + `]`
+	if _, err := decodeStatusStakeRows(json.RawMessage(raw)); err == nil {
+		t.Fatalf("accepted %d current_stakes rows", validatorSummaryLimit+1)
 	}
 }
 
@@ -163,4 +175,77 @@ func TestProcessValidatorStatusLineLegacySchema(t *testing.T) {
 	if got, ok := jailedLocalPrev[priorSigner]; !ok || got != priorLabels || len(jailedLocalPrev) != 1 {
 		t.Fatalf("omitted legacy jailed field impersonated empty: %v", jailedLocalPrev)
 	}
+}
+
+func TestReadValidatorStatusWithdrawsJailedRowsOnAbsenceAndStaleness(t *testing.T) {
+	oldJailed := jailedLocalPrev
+	oldAddress := lastValidatorAddress
+	oldSource := lastMappingSource
+	jailedLocalPrev = make(map[string][3]string)
+	lastValidatorAddress = ""
+	lastMappingSource = ""
+	metrics.HLConsensusValidatorJailedLocal.Reset()
+	t.Cleanup(func() {
+		metrics.HLConsensusValidatorJailedLocal.Reset()
+		jailedLocalPrev = oldJailed
+		lastValidatorAddress = oldAddress
+		lastMappingSource = oldSource
+	})
+
+	nodeHome := t.TempDir()
+	statusDir := filepath.Join(nodeHome, "data", "node_logs", "status", "hourly")
+	dateDir := filepath.Join(statusDir, "20260808")
+	path := filepath.Join(dateDir, "1")
+	line := `["2026-08-08T01:00:00.000000000",{"home_validator":"0x2222222222222222222222222222222222222222","round":1,"current_stakes":[],"current_jailed_validators":["0x1111111111111111111111111111111111111111"]}]` + "\n"
+	write := func() {
+		t.Helper()
+		if err := os.MkdirAll(dateDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertPublished := func() {
+		t.Helper()
+		if rows := b03CollectorRows(t, metrics.HLConsensusValidatorJailedLocal); len(rows) != 1 {
+			t.Fatalf("jailed-local rows = %d, want 1", len(rows))
+		}
+	}
+	assertWithdrawn := func() {
+		t.Helper()
+		if rows := b03CollectorRows(t, metrics.HLConsensusValidatorJailedLocal); len(rows) != 0 {
+			t.Fatalf("withdrawal retained %d jailed-local rows", len(rows))
+		}
+		if len(jailedLocalPrev) != 0 {
+			t.Fatalf("withdrawal retained jailed-local state: %v", jailedLocalPrev)
+		}
+	}
+
+	write()
+	if err := readValidatorStatus(nodeHome); err != nil {
+		t.Fatal(err)
+	}
+	assertPublished()
+	if err := os.RemoveAll(statusDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := readValidatorStatus(nodeHome); err != nil {
+		t.Fatal(err)
+	}
+	assertWithdrawn()
+
+	write()
+	if err := readValidatorStatus(nodeHome); err != nil {
+		t.Fatal(err)
+	}
+	assertPublished()
+	stale := time.Now().Add(-13 * time.Hour)
+	if err := os.Chtimes(path, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	if err := readValidatorStatus(nodeHome); err != nil {
+		t.Fatal(err)
+	}
+	assertWithdrawn()
 }

@@ -157,10 +157,10 @@ var (
 		Help: "Number of distinct canonical IP endpoint rows reported in the latest complete tcp_traffic sample per traffic direction, including zero-valued rows; this is observation, not connectivity.",
 	}, []string{"direction"})
 
-	HLP2PSampleAgeSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+	HLP2PSampleAgeSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_p2p_sample_age_seconds",
 		Help: "Wall-clock seconds since exporter receipt of the latest complete valid tcp_traffic snapshot; advances without new records.",
-	})
+	}, []string{})
 )
 
 // hl-node / hl-visor process metrics (from internal/monitors/process_monitor.go).
@@ -206,7 +206,7 @@ var (
 var (
 	HLP2PGossipEventsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "hl_p2p_gossip_events_total",
-		Help: "Newline-committed gossip-connection events observed after exporter start, by fixed event type; retained startup history is not replayed and the counter resets on exporter restart.",
+		Help: "Newline-committed gossip-connection events observed after exporter start, by fixed event type; history found by a successful initial scan is skipped, a file first found after an initial discovery failure is read from its start, and the counter resets on exporter restart.",
 	}, []string{"event_type"})
 )
 
@@ -854,10 +854,10 @@ var (
 		Name: "hl_p2p_unique_peers_seen",
 		Help: "Deprecated alias: qualified process-local traffic endpoints refreshed within the fixed window after two consecutive top-16 positive snapshots; observation is not connectivity.",
 	}, []string{"window"})
-	HLP2PPeersTotal = promauto.NewGauge(prometheus.GaugeOpts{
+	HLP2PPeersTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_p2p_peers",
 		Help: "Deprecated alias: unique canonical IPs with any positive value in the latest complete tcp_traffic snapshot; observation is not connectivity.",
-	})
+	}, []string{})
 	HLP2PPeersAddedTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "hl_p2p_peers_added_total",
 		Help: "Deprecated alias: qualified process-local traffic-endpoint admissions since exporter start after two consecutive eligible snapshots.",

@@ -1041,22 +1041,23 @@ func (m *ConsensusMonitor) monitorStatusLogs(ctx context.Context, errCh chan<- e
 				logger.DebugComponent("consensus", "Error processing status line: %v", err)
 				errLines++
 			} else {
-				metrics.MarkSourceValidObservation(metrics.SourceConsensusStatus, m.lastStatusSourceTime)
 				okLines++
 			}
 		},
 		onSwitch: func(string) { metrics.MarkSourceAvailable(metrics.SourceConsensusStatus) },
 		onIdle: func() {
-			if errLines > 0 {
-				metrics.AddConsensusMonitorErrors("status", errLines)
-				errLines = 0
-			}
-			if okLines > 0 {
-				metrics.AddConsensusMonitorLines("status", okLines)
-				metrics.SetConsensusMonitorLastProcessed("status", time.Now().Unix())
-				metrics.MarkSourcePublication(metrics.SourceConsensusStatus)
-				okLines = 0
-			}
+			metrics.WithPrometheusSnapshotUpdate(func() {
+				if errLines > 0 {
+					metrics.AddConsensusMonitorErrors("status", errLines)
+					errLines = 0
+				}
+				if okLines > 0 {
+					metrics.AddConsensusMonitorLines("status", okLines)
+					metrics.SetConsensusMonitorLastProcessed("status", time.Now().Unix())
+					metrics.MarkSourcePublication(metrics.SourceConsensusStatus)
+					okLines = 0
+				}
+			})
 		},
 	})
 }
@@ -1104,19 +1105,24 @@ func (m *ConsensusMonitor) processStatusLine(line string) error {
 		})
 	}
 
-	metrics.ReplaceConsensusStatusSnapshot(heartbeats, disconnected)
-	if snapshot.HeartbeatFieldPresent {
-		metrics.HLConsensusStatusFieldReported.WithLabelValues("heartbeat_statuses").Set(1)
-	} else {
-		metrics.HLConsensusStatusFieldReported.WithLabelValues("heartbeat_statuses").Set(0)
-	}
-	if snapshot.DisconnectedPresent {
-		metrics.HLConsensusStatusFieldReported.WithLabelValues("disconnected_validators").Set(1)
-	} else {
-		metrics.HLConsensusStatusFieldReported.WithLabelValues("disconnected_validators").Set(0)
-	}
-	m.publishEligibleStatusSummaries(snapshot)
-	m.lastStatusSourceTime = snapshot.SourceTime
+	eligible, apiUpdatedAt := metrics.GetAPIActiveAndUnjailedValidators()
+	now := time.Now()
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		metrics.ReplaceConsensusStatusSnapshot(heartbeats, disconnected)
+		if snapshot.HeartbeatFieldPresent {
+			metrics.HLConsensusStatusFieldReported.WithLabelValues("heartbeat_statuses").Set(1)
+		} else {
+			metrics.HLConsensusStatusFieldReported.WithLabelValues("heartbeat_statuses").Set(0)
+		}
+		if snapshot.DisconnectedPresent {
+			metrics.HLConsensusStatusFieldReported.WithLabelValues("disconnected_validators").Set(1)
+		} else {
+			metrics.HLConsensusStatusFieldReported.WithLabelValues("disconnected_validators").Set(0)
+		}
+		publishEligibleStatusSummariesUnlocked(snapshot, eligible, apiUpdatedAt, now)
+		m.lastStatusSourceTime = snapshot.SourceTime
+		metrics.MarkSourceValidObservation(metrics.SourceConsensusStatus, snapshot.SourceTime)
+	})
 	return nil
 }
 
@@ -1306,12 +1312,13 @@ func isJSONArray(raw json.RawMessage) bool {
 	return len(trimmed) >= 2 && trimmed[0] == '[' && trimmed[len(trimmed)-1] == ']'
 }
 
-func (m *ConsensusMonitor) publishEligibleStatusSummaries(snapshot statusSnapshot) {
-	eligible, apiUpdatedAt := metrics.GetAPIActiveAndUnjailedValidators()
-	publishEligibleStatusSummariesAt(snapshot, eligible, apiUpdatedAt, time.Now())
+func publishEligibleStatusSummariesAt(snapshot statusSnapshot, eligible []metrics.EligibleValidator, apiUpdatedAt, now time.Time) {
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		publishEligibleStatusSummariesUnlocked(snapshot, eligible, apiUpdatedAt, now)
+	})
 }
 
-func publishEligibleStatusSummariesAt(snapshot statusSnapshot, eligible []metrics.EligibleValidator, apiUpdatedAt, now time.Time) {
+func publishEligibleStatusSummariesUnlocked(snapshot statusSnapshot, eligible []metrics.EligibleValidator, apiUpdatedAt, now time.Time) {
 	if apiUpdatedAt.IsZero() || now.Sub(apiUpdatedAt) > validatorAPITargetFreshness || apiUpdatedAt.After(now.Add(time.Minute)) {
 		metrics.HLConsensusStatusEligibleSummary.DeleteLabelValues("missing_heartbeat")
 		metrics.HLConsensusStatusEligibleSummary.DeleteLabelValues("disconnected")

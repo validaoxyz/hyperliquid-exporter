@@ -238,6 +238,80 @@ func TestTickTCPTraffic_RejectsSourceTimeRegression(t *testing.T) {
 	}
 }
 
+func TestTickTCPTrafficWithdrawsConfirmedAbsenceAndRepublishesSameRecord(t *testing.T) {
+	root := t.TempDir()
+	dateDir := filepath.Join(root, "20260808")
+	path := filepath.Join(dateDir, "3")
+	line := `["2026-08-08T03:00:30",[[["In","192.0.2.1",4001],2],[["Out","192.0.2.1",4001],3]]]` + "\n"
+	write := func() {
+		t.Helper()
+		if err := os.MkdirAll(dateDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reset := func() {
+		metrics.HLP2PPeerTraffic.Reset()
+		metrics.HLP2PTotalTraffic.Reset()
+		metrics.HLP2PPeerCount.Reset()
+		metrics.HLP2PTCPTrafficByServicePort.Reset()
+		metrics.HLP2PTrafficEndpointsCurrent.Reset()
+		metrics.HLP2PPeersTotal.Reset()
+		metrics.HLP2PTCPTrafficSampleTimestampSeconds.Reset()
+		metrics.HLP2PSampleAgeSeconds.Reset()
+	}
+	reset()
+	t.Cleanup(reset)
+
+	state := newTCPTrafficMonitorState([]uint16{4001})
+	write()
+	tickTCPTraffic(root, state)
+	for name, collector := range map[string]prometheus.Collector{
+		"peer":       metrics.HLP2PPeerTraffic,
+		"total":      metrics.HLP2PTotalTraffic,
+		"count":      metrics.HLP2PPeerCount,
+		"port":       metrics.HLP2PTCPTrafficByServicePort,
+		"endpoints":  metrics.HLP2PTrafficEndpointsCurrent,
+		"alias":      metrics.HLP2PPeersTotal,
+		"timestamp":  metrics.HLP2PTCPTrafficSampleTimestampSeconds,
+		"sample_age": metrics.HLP2PSampleAgeSeconds,
+	} {
+		if rows := b03CollectorRows(t, collector); len(rows) == 0 {
+			t.Fatalf("valid snapshot did not publish %s", name)
+		}
+	}
+
+	if err := os.RemoveAll(dateDir); err != nil {
+		t.Fatal(err)
+	}
+	tickTCPTraffic(root, state)
+	for name, collector := range map[string]prometheus.Collector{
+		"peer":       metrics.HLP2PPeerTraffic,
+		"total":      metrics.HLP2PTotalTraffic,
+		"count":      metrics.HLP2PPeerCount,
+		"port":       metrics.HLP2PTCPTrafficByServicePort,
+		"endpoints":  metrics.HLP2PTrafficEndpointsCurrent,
+		"alias":      metrics.HLP2PPeersTotal,
+		"timestamp":  metrics.HLP2PTCPTrafficSampleTimestampSeconds,
+		"sample_age": metrics.HLP2PSampleAgeSeconds,
+	} {
+		if rows := b03CollectorRows(t, collector); len(rows) != 0 {
+			t.Fatalf("confirmed absence retained %s rows: %d", name, len(rows))
+		}
+	}
+	if sourceTime, receipt, in, out := LatestTCPTrafficObservation(); !sourceTime.IsZero() || !receipt.IsZero() || len(in) != 0 || len(out) != 0 {
+		t.Fatalf("confirmed absence retained shared snapshot: source=%v receipt=%v in=%d out=%d", sourceTime, receipt, len(in), len(out))
+	}
+
+	write()
+	tickTCPTraffic(root, state)
+	if rows := b03CollectorRows(t, metrics.HLP2PPeerTraffic); len(rows) != 2 {
+		t.Fatalf("same recovered record published %d peer rows, want 2", len(rows))
+	}
+}
+
 func TestTCPTrafficProtectedGatherNeverSeesMixedGeneration(t *testing.T) {
 	metrics.HLP2PPeerTraffic.Reset()
 	metrics.HLP2PTotalTraffic.Reset()

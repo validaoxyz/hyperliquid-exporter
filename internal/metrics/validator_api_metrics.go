@@ -26,14 +26,14 @@ var (
 		Name: "hl_validator_api_cache_stale",
 		Help: "Whether the most recent validatorSummaries result was a stale cache fallback after a failed refresh (1=yes, 0=no).",
 	})
-	HLValidatorAPILastSuccessSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+	HLValidatorAPILastSuccessSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_validator_api_last_success_seconds",
-		Help: "Unix timestamp of the most recent complete valid validatorSummaries refresh; never advanced by cache fallback.",
-	})
-	HLValidatorAPICacheAgeSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+		Help: "Unix timestamp of the most recent complete valid validatorSummaries refresh; absent until the first successful refresh and never advanced by cache fallback.",
+	}, []string{})
+	HLValidatorAPICacheAgeSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_validator_api_cache_age_seconds",
-		Help: "Wall-clock age in seconds of the last successful validatorSummaries network refresh.",
-	})
+		Help: "Wall-clock age in seconds of the last successful validatorSummaries network refresh; absent until the first successful refresh.",
+	}, []string{})
 	HLValidatorAPIOutcomesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "hl_validator_api_outcomes_total",
 		Help: "Validator-summary resolver outcomes since exporter start from a fixed vocabulary.",
@@ -51,20 +51,22 @@ func SetValidatorAPILastSuccess(at time.Time) {
 		return
 	}
 	validatorAPILastSuccessUnix.Store(at.Unix())
-	HLValidatorAPILastSuccessSeconds.Set(float64(at.Unix()))
+	HLValidatorAPILastSuccessSeconds.WithLabelValues().Set(float64(at.Unix()))
 	publishValidatorAPICacheAgeAt(time.Now())
 }
 
 func publishValidatorAPICacheAgeAt(now time.Time) {
 	lastSuccess := validatorAPILastSuccessUnix.Load()
 	if lastSuccess <= 0 {
+		HLValidatorAPILastSuccessSeconds.DeleteLabelValues()
+		HLValidatorAPICacheAgeSeconds.DeleteLabelValues()
 		return
 	}
 	age := now.Unix() - lastSuccess
 	if age < 0 {
 		age = 0
 	}
-	HLValidatorAPICacheAgeSeconds.Set(float64(age))
+	HLValidatorAPICacheAgeSeconds.WithLabelValues().Set(float64(age))
 }
 
 func init() {

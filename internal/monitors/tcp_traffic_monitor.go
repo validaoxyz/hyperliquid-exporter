@@ -133,22 +133,22 @@ func tickTCPTraffic(root string, state *tcpTrafficMonitorState) {
 	metrics.MarkSourceAttempt(metrics.SourceTCPTraffic)
 	now := time.Now()
 	if !state.lastReceipt.IsZero() {
-		metrics.HLP2PSampleAgeSeconds.Set(nonnegativeDuration(now.Sub(state.lastReceipt)).Seconds())
+		metrics.HLP2PSampleAgeSeconds.WithLabelValues().Set(nonnegativeDuration(now.Sub(state.lastReceipt)).Seconds())
 	}
 
 	filePath, err := latestHourlyFile(root)
 	if err != nil {
-		trafficFailure("discover", err)
+		trafficFailure("discover", err, state)
 		return
 	}
 	data, err := os.ReadFile(filePath)
 	if err != nil {
-		trafficFailure("read", err)
+		trafficFailure("read", err, state)
 		return
 	}
 	line, ok := lastFullLine(data)
 	if !ok {
-		trafficFailure("record", errors.New("no complete newline-committed record"))
+		trafficFailure("record", errors.New("no complete newline-committed record"), state)
 		return
 	}
 	record, err := parseTCPTrafficRecordWithPorts(line, state.servicePorts)
@@ -158,7 +158,7 @@ func tickTCPTraffic(root string, state *tcpTrafficMonitorState) {
 		if errors.As(err, &parseErr) {
 			stage = parseErr.stage
 		}
-		trafficFailure(stage, err)
+		trafficFailure(stage, err, state)
 		return
 	}
 
@@ -167,7 +167,7 @@ func tickTCPTraffic(root string, state *tcpTrafficMonitorState) {
 		return
 	}
 	if !state.lastSource.IsZero() && !record.timestamp.After(state.lastSource) {
-		trafficFailure("timestamp", errors.New("traffic source timestamp did not advance"))
+		trafficFailure("timestamp", errors.New("traffic source timestamp did not advance"), state)
 		return
 	}
 
@@ -178,14 +178,20 @@ func tickTCPTraffic(root string, state *tcpTrafficMonitorState) {
 	state.lastSource = record.timestamp
 }
 
-func trafficFailure(stage string, err error) {
+func trafficFailure(stage string, err error, state *tcpTrafficMonitorState) {
 	metrics.WithPrometheusSnapshotUpdate(func() {
 		metrics.HLP2PTCPTrafficSourceUp.Set(0)
 		metrics.HLP2PTCPTrafficErrorsTotal.WithLabelValues(stage).Inc()
 		if stage == "discover" {
 			metrics.MarkSourceError(metrics.SourceTCPTraffic, metrics.SourceFailureDiscovery)
 			if errors.Is(err, os.ErrNotExist) {
+				hadSnapshot := state != nil && state.lastRecord != ""
+				withdrawTCPTraffic(state)
 				metrics.MarkSourceAbsent(metrics.SourceTCPTraffic)
+				if hadSnapshot {
+					metrics.MarkSourcePublication(metrics.SourceTCPTraffic)
+					metrics.MarkMonitorPublication("tcp_traffic")
+				}
 			}
 		} else if stage == "read" {
 			metrics.MarkSourceError(metrics.SourceTCPTraffic, metrics.SourceFailureRead)
@@ -194,6 +200,39 @@ func trafficFailure(stage string, err error) {
 		}
 		metrics.IncMonitorError("tcp_traffic")
 	})
+}
+
+func withdrawTCPTraffic(state *tcpTrafficMonitorState) {
+	if state == nil {
+		return
+	}
+	for _, direction := range []string{"in", "out"} {
+		for ip := range state.prevPublished[direction] {
+			metrics.HLP2PPeerTraffic.DeleteLabelValues(ip, direction)
+		}
+		clear(state.prevPublished[direction])
+		metrics.HLP2PTotalTraffic.DeleteLabelValues(direction)
+		metrics.HLP2PPeerCount.DeleteLabelValues(direction)
+		for _, port := range servicePortLabels(state.servicePorts) {
+			metrics.HLP2PTCPTrafficByServicePort.DeleteLabelValues(port, direction)
+		}
+	}
+	metrics.HLP2PTrafficEndpointsCurrent.DeleteLabelValues()
+	metrics.HLP2PPeersTotal.DeleteLabelValues()
+	metrics.HLP2PTCPTrafficSampleTimestampSeconds.DeleteLabelValues()
+	metrics.HLP2PSampleAgeSeconds.DeleteLabelValues()
+
+	sharedTCPTraffic.mu.Lock()
+	sharedTCPTraffic.timestamp = time.Time{}
+	sharedTCPTraffic.receivedAt = time.Time{}
+	sharedTCPTraffic.inbound = nil
+	sharedTCPTraffic.outbound = nil
+	sharedTCPTraffic.mu.Unlock()
+
+	state.lastRecord = ""
+	state.lastReceipt = time.Time{}
+	state.lastSource = time.Time{}
+	clear(state.admission)
 }
 
 func commitTCPTraffic(record tcpTrafficRecord, receipt time.Time, state *tcpTrafficMonitorState) {
@@ -207,15 +246,15 @@ func commitTCPTraffic(record tcpTrafficRecord, receipt time.Time, state *tcpTraf
 		sharedTCPTraffic.mu.Unlock()
 
 		current := positiveEndpointSet(record.inbound, record.outbound)
-		metrics.HLP2PTrafficEndpointsCurrent.Set(float64(len(current)))
-		metrics.HLP2PPeersTotal.Set(float64(len(current))) // one-release alias
+		metrics.HLP2PTrafficEndpointsCurrent.WithLabelValues().Set(float64(len(current)))
+		metrics.HLP2PPeersTotal.WithLabelValues().Set(float64(len(current))) // one-release alias
 		advanceTrafficAdmissions(record, receipt, state)
 
 		publishTCPDirection("in", record.inbound, state.prevPublished["in"])
 		publishTCPDirection("out", record.outbound, state.prevPublished["out"])
 		publishTrafficPorts(record.byPort, state.servicePorts)
-		metrics.HLP2PTCPTrafficSampleTimestampSeconds.Set(unixTimestampSeconds(record.timestamp))
-		metrics.HLP2PSampleAgeSeconds.Set(0)
+		metrics.HLP2PTCPTrafficSampleTimestampSeconds.WithLabelValues().Set(unixTimestampSeconds(record.timestamp))
+		metrics.HLP2PSampleAgeSeconds.WithLabelValues().Set(0)
 
 		metrics.MarkSourceValidObservation(metrics.SourceTCPTraffic, record.timestamp)
 		metrics.MarkSourcePublication(metrics.SourceTCPTraffic)

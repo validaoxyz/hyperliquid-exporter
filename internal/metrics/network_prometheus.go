@@ -34,10 +34,10 @@ var (
 		Name: "hl_p2p_tcp_traffic_source_up",
 		Help: "Whether latest-file discovery/read and one complete newline-committed all-rows-valid traffic snapshot succeeded (1=yes, 0=no).",
 	})
-	HLP2PTCPTrafficSampleTimestampSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+	HLP2PTCPTrafficSampleTimestampSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_p2p_tcp_traffic_sample_timestamp_seconds",
 		Help: "Timestamp carried by the most recently committed TCP traffic snapshot.",
-	})
+	}, []string{})
 	HLP2PTCPTrafficErrorsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "hl_p2p_tcp_traffic_errors_total",
 		Help: "TCP traffic snapshot failures since exporter start, partitioned by a fixed stage.",
@@ -191,10 +191,10 @@ var (
 		Help: "Whether the dominant-candidate state derives from a complete traffic snapshot received no more than 90 seconds ago.",
 	})
 
-	HLP2PTrafficEndpointsCurrent = promauto.NewGauge(prometheus.GaugeOpts{
+	HLP2PTrafficEndpointsCurrent = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_p2p_traffic_endpoints_current",
 		Help: "Unique canonical IPs with any positive value in the latest complete traffic snapshot; this is observation, not connectivity.",
-	})
+	}, []string{})
 	HLP2PTrafficEndpointsSeen = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_p2p_traffic_endpoints_seen",
 		Help: "Qualified process-local traffic endpoints refreshed within the fixed observation window.",

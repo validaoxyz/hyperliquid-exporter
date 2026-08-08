@@ -45,6 +45,9 @@ func decodeStatusStakeRows(raw json.RawMessage) ([][]interface{}, error) {
 			return nil, fmt.Errorf("invalid validator_to_stake: %w", rowsErr)
 		}
 	}
+	if len(rawRows) > validatorSummaryLimit {
+		return nil, fmt.Errorf("current_stakes count %d exceeds limit %d", len(rawRows), validatorSummaryLimit)
+	}
 
 	rows := make([][]interface{}, 0, len(rawRows))
 	for i, rawRow := range rawRows {
@@ -231,8 +234,7 @@ func readValidatorStatus(nodeHome string) error {
 	// check if status directory exists first - if not, this isn't a validator node
 	if _, err := os.Stat(statusDir); err != nil {
 		if os.IsNotExist(err) {
-			metrics.MarkSourceAbsent(metrics.SourceValidatorStatus)
-			metrics.SetIsValidator(false)
+			withdrawValidatorStatus(true)
 			return nil
 		}
 		metrics.MarkSourceError(metrics.SourceValidatorStatus, metrics.SourceFailureStat)
@@ -241,8 +243,7 @@ func readValidatorStatus(nodeHome string) error {
 	latestFile, err := latestHourlyFile(statusDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			metrics.MarkSourceAbsent(metrics.SourceValidatorStatus)
-			metrics.SetIsValidator(false)
+			withdrawValidatorStatus(true)
 			return nil
 		}
 		metrics.MarkSourceError(metrics.SourceValidatorStatus, metrics.SourceFailureDiscovery)
@@ -258,7 +259,7 @@ func readValidatorStatus(nodeHome string) error {
 
 	// if last file is > 12 hours, optimistically assume node is no longer a validator
 	if time.Since(fileInfo.ModTime()) > 12*time.Hour {
-		metrics.SetIsValidator(false)
+		withdrawValidatorStatus(false)
 		return nil
 	}
 
@@ -270,16 +271,22 @@ func readValidatorStatus(nodeHome string) error {
 	}
 	metrics.MarkSourceReadOutcome(metrics.SourceValidatorStatus, true)
 
-	if err := processValidatorStatusLine(lastLine); err != nil {
+	data, err := parseValidatorStatusLine(lastLine)
+	if err != nil {
 		logger.WarningComponent("consensus", "Error processing validator status line: %v", err)
 		metrics.MarkSourceError(metrics.SourceValidatorStatus, metrics.SourceFailureSchema)
 		return err
 	}
 
-	metrics.MarkSourceValidObservation(metrics.SourceValidatorStatus, time.Time{})
-	metrics.MarkSourcePublication(metrics.SourceValidatorStatus)
-	metrics.MarkMonitorValidObservation("validator_status")
-	metrics.MarkMonitorPublication("validator_status")
+	var logEvent validatorStatusLogEvent
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		logEvent = commitValidatorStatus(data)
+		metrics.MarkSourceValidObservation(metrics.SourceValidatorStatus, data.SourceTime)
+		metrics.MarkSourcePublication(metrics.SourceValidatorStatus)
+		metrics.MarkMonitorValidObservation("validator_status")
+		metrics.MarkMonitorPublication("validator_status")
+	})
+	logValidatorStatusEvent(logEvent)
 	return nil
 }
 
@@ -288,7 +295,22 @@ func processValidatorStatusLine(line string) error {
 	if err != nil {
 		return err
 	}
+	var logEvent validatorStatusLogEvent
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		logEvent = commitValidatorStatus(data)
+	})
+	logValidatorStatusEvent(logEvent)
+	return nil
+}
 
+type validatorStatusLogEvent struct {
+	kind      string
+	validator string
+	signer    string
+	source    string
+}
+
+func commitValidatorStatus(data parsedValidatorStatus) validatorStatusLogEvent {
 	// register identity info from current_stakes; signer mappings only
 	// exist on the legacy row shape, newer builds rely on the API mapping
 	_, signerToValidator := registerStakeRows(data.StakeRows)
@@ -313,9 +335,9 @@ func processValidatorStatusLine(line string) error {
 
 			// only log if this is a change from last state
 			if validatorAddr != lastValidatorAddress || lastMappingSource != "local" {
-				logger.InfoComponent("consensus", "Found validator address: %s (signer: %s)", validatorAddr, data.HomeValidator)
 				lastValidatorAddress = validatorAddr
 				lastMappingSource = "local"
+				return validatorStatusLogEvent{kind: "found", validator: validatorAddr, signer: data.HomeValidator, source: "local"}
 			}
 		} else if validatorAddr, ok := metrics.GetValidatorForSigner(homeSigner); ok {
 			// fallback to global mapping from API
@@ -326,9 +348,9 @@ func processValidatorStatusLine(line string) error {
 
 			// only log if this is a change from last state
 			if validatorAddr != lastValidatorAddress || lastMappingSource != "api" {
-				logger.InfoComponent("consensus", "Found validator address from API: %s (signer: %s)", validatorAddr, data.HomeValidator)
 				lastValidatorAddress = validatorAddr
 				lastMappingSource = "api"
+				return validatorStatusLogEvent{kind: "found", validator: validatorAddr, signer: data.HomeValidator, source: "api"}
 			}
 		} else {
 			// The node is still a validator, but its signer is not a validator
@@ -344,13 +366,45 @@ func processValidatorStatusLine(line string) error {
 
 		// only log if we previously had a validator address
 		if lastValidatorAddress != "" {
-			logger.InfoComponent("consensus", "No validator address found")
 			lastValidatorAddress = ""
 			lastMappingSource = ""
+			return validatorStatusLogEvent{kind: "cleared"}
 		}
 	}
 
-	return nil
+	return validatorStatusLogEvent{}
+}
+
+func withdrawValidatorStatus(absent bool) {
+	var logEvent validatorStatusLogEvent
+	metrics.WithPrometheusSnapshotUpdate(func() {
+		publishJailedLocal(nil)
+		metrics.SetIsValidator(false)
+		if lastValidatorAddress != "" {
+			lastValidatorAddress = ""
+			lastMappingSource = ""
+			logEvent = validatorStatusLogEvent{kind: "cleared"}
+		}
+		if absent {
+			metrics.MarkSourceAbsent(metrics.SourceValidatorStatus)
+		}
+		metrics.MarkSourcePublication(metrics.SourceValidatorStatus)
+		metrics.MarkMonitorPublication("validator_status")
+	})
+	logValidatorStatusEvent(logEvent)
+}
+
+func logValidatorStatusEvent(event validatorStatusLogEvent) {
+	switch event.kind {
+	case "found":
+		if event.source == "api" {
+			logger.InfoComponent("consensus", "Found validator address from API: %s (signer: %s)", event.validator, event.signer)
+		} else {
+			logger.InfoComponent("consensus", "Found validator address: %s (signer: %s)", event.validator, event.signer)
+		}
+	case "cleared":
+		logger.InfoComponent("consensus", "No validator address found")
+	}
 }
 
 func validateStatusSignerSet(signers []string) ([]string, error) {

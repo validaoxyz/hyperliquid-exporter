@@ -1,6 +1,6 @@
 # Hyperliquid Exporter
 
-A Prometheus and optional OTLP exporter for Hyperliquid node operators. It reads bounded node files, streams, API responses, and Linux host state for HyperCore, HyperEVM, HyperBFT, network, and process metrics. See the [metrics reference](docs/metrics.md) for the generated inventory and interpretation limits.
+A Prometheus exporter with optional OTLP for the families marked `OTel bridge` in the metrics reference. It reads bounded node files, streams, API responses, and Linux host state for HyperCore, HyperEVM, HyperBFT, network, and process metrics. See the [metrics reference](docs/metrics.md) for the generated inventory and interpretation limits.
 
 ## Install
 
