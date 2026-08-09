@@ -2,6 +2,10 @@
 
 ## [v4.0.4] - 2026-08-09
 
+### Changed
+
+- Publish Linux amd64 and arm64 release builds only.
+
 ### Fixed
 
 - Accept the current `dropping connection after sending abci state` payload shape while retaining the historical boolean form.
