@@ -1,5 +1,11 @@
 # Changelog
 
+## [v4.0.5] - 2026-08-09
+
+### Fixed
+
+- Avoid a false critical-message schema error during exporter startup while the paired daily projection is loading.
+
 ## [v4.0.4] - 2026-08-09
 
 ### Changed
