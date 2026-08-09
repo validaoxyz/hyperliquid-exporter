@@ -320,8 +320,3 @@ func (m *ReplicaMonitor) GetVerificationStats() ReplicaVerificationStats {
 
 	return statsCopy
 }
-
-// returns the category for a given action type
-func getCategoryForAction(actionType string) string {
-	return actiontypes.Category(actionType)
-}

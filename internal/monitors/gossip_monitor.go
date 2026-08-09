@@ -499,15 +499,6 @@ func childSnapshotKey(snapshot childSnapshot) string {
 	return buf.String()
 }
 
-func (m *GossipMonitor) processGossipFile(path string) error {
-	snapshot, found, err := readLatestChildSnapshot(path)
-	if err != nil || !found {
-		return err
-	}
-	m.commitSnapshot(snapshot, time.Now())
-	return nil
-}
-
 func (m *GossipMonitor) getLatestGossipLogFile() (string, error) {
 	return latestHourlyFile(m.gossipDir)
 }

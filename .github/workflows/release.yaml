@@ -1,5 +1,8 @@
 name: Build and Release
 
+env:
+  GOTOOLCHAIN: local
+
 on:
   push:
     tags:
@@ -10,21 +13,47 @@ permissions:
 
 jobs:
   build-and-release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
 
     steps:
       - name: Check out code
-        uses: actions/checkout@v3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+
+      - name: Verify source
+        run: |
+          go mod tidy -diff
+          go mod verify
+          go test -count=1 -shuffle=on ./...
+          go test -race -count=1 ./...
+          go vet ./...
+          go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          go generate ./...
+          git diff --exit-code
+          go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
+      - name: Verify alert rules
+        run: |
+          image='prom/prometheus@sha256:2b6f734e372c1b4717008f7d0a0152316aedd4d13ae17ef1e3268dbfaf68041b'
+          docker run --rm --network none --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
+            -v "$PWD:/repo:ro" --entrypoint /bin/promtool "$image" \
+            check rules /repo/alerts/*.rules.yml
+          docker run --rm --network none --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
+            -v "$PWD:/repo:ro" --entrypoint /bin/promtool "$image" \
+            test rules /repo/alerts/tests/*.test.yml
 
       - name: Build binaries
         run: |
           mkdir -p bin
-          platforms=("linux/amd64" "darwin/amd64" "darwin/arm64" "windows/amd64")
+          platforms=("linux/amd64" "linux/arm64" "darwin/amd64" "darwin/arm64" "windows/amd64")
           for platform in "${platforms[@]}"; do
             OS=${platform%/*}
             ARCH=${platform#*/}
@@ -34,6 +63,7 @@ jobs:
             fi
             echo "Building $OUTPUT_NAME..."
             GOOS=$OS GOARCH=$ARCH CGO_ENABLED=0 go build \
+              -trimpath \
               -ldflags "-X github.com/validaoxyz/hyperliquid-exporter/internal/metrics.BuildVersion=${GITHUB_REF_NAME} -X github.com/validaoxyz/hyperliquid-exporter/internal/metrics.BuildCommit=${GITHUB_SHA:0:7}" \
               -o bin/${OUTPUT_NAME} ./cmd/hl-exporter
           done
@@ -41,16 +71,18 @@ jobs:
       - name: Compress binaries
         run: |
           cd bin
+          # Keep raw binaries for automated fleet installs and add archives for manual downloads.
           for file in *; do
             if [[ $file == *.exe ]]; then
-              zip ${file%.*}.zip $file
+              zip "${file%.*}.zip" "$file"
             else
-              tar -czf $file.tar.gz $file
+              tar -czf "$file.tar.gz" "$file"
             fi
           done
+          sha256sum * > SHA256SUMS
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: bin/*
         env:

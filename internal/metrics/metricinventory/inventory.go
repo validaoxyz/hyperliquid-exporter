@@ -9,7 +9,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -119,20 +119,17 @@ var compatibilityAliases = map[string]struct{}{
 
 func Scan(dir string) ([]Entry, error) {
 	fset := token.NewFileSet()
-	packages, err := parser.ParseDir(fset, dir, func(info fs.FileInfo) bool {
-		return !strings.HasSuffix(info.Name(), "_test.go")
-	}, 0)
+	files, err := parseMetricFiles(fset, dir)
 	if err != nil {
 		return nil, fmt.Errorf("parse metrics package: %w", err)
 	}
-	pkg := packages["metrics"]
-	if pkg == nil {
+	if len(files) == 0 {
 		return nil, fmt.Errorf("metrics package not found in %s", dir)
 	}
-	labelSets := collectLabelSets(pkg)
+	labelSets := collectLabelSets(files)
 
 	entries := make(map[string]Entry)
-	for fileName, file := range pkg.Files {
+	for fileName, file := range files {
 		source := filepath.Base(fileName)
 		for _, declaration := range file.Decls {
 			switch declaration := declaration.(type) {
@@ -169,6 +166,32 @@ func Scan(dir string) ([]Entry, error) {
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
 	return result, nil
+}
+
+// parseMetricFiles intentionally parses every non-test Go source file without
+// applying host build tags. The generated public inventory describes all
+// supported platform declarations, not only the platform running generation.
+func parseMetricFiles(fset *token.FileSet, dir string) (map[string]*ast.File, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	files := make(map[string]*ast.File)
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return nil, fmt.Errorf("parse %s: %w", name, err)
+		}
+		if file.Name.Name == "metrics" {
+			files[path] = file
+		}
+	}
+	return files, nil
 }
 
 func inspectDeclaration(node ast.Node, source, profile string, labelSets map[string][]string, entries map[string]Entry) error {
@@ -306,9 +329,9 @@ func labelsFromCall(call *ast.CallExpr, labelSets map[string][]string) []string 
 	return nil
 }
 
-func collectLabelSets(pkg *ast.Package) map[string][]string {
+func collectLabelSets(files map[string]*ast.File) map[string][]string {
 	result := map[string][]string{}
-	for _, file := range pkg.Files {
+	for _, file := range files {
 		ast.Inspect(file, func(node ast.Node) bool {
 			valueSpec, ok := node.(*ast.ValueSpec)
 			if !ok {

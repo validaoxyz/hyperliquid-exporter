@@ -288,15 +288,6 @@ func (p *evmProcessor) commitUnavailable(kind tailStreamUnavailable) {
 	})
 }
 
-// processEVMBlockAndReceiptsLine is retained as the package-level parsing
-// entrypoint used by focused tests and older integrations. StartEVMMonitor uses
-// its own processor so independent monitor runs never share interval state.
-var defaultEVMProcessor = newEVMProcessor(productionEVMSink{}, false, 0)
-
-func processEVMBlockAndReceiptsLine(line string) error {
-	return defaultEVMProcessor.processLine(line)
-}
-
 type recipientLimiter struct {
 	mu      sync.Mutex
 	enabled bool

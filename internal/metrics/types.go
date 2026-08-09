@@ -32,9 +32,6 @@ var (
 	callbacks     []api.Registration
 )
 
-// TODO commonLabels holds the common labels to be added to all metrics
-var commonLabels []attribute.KeyValue
-
 // ValidatorInfo is the mutable API-derived identity attached to a validator.
 // It is deliberately separate from the immutable OTel resource identity.
 type ValidatorInfo struct {

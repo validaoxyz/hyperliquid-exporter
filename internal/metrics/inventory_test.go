@@ -125,6 +125,8 @@ func TestMetricInventoryOTelRuntimeProfile(t *testing.T) {
 	exporter, err := otelprometheus.New(
 		otelprometheus.WithRegisterer(registry),
 		otelprometheus.WithoutScopeInfo(),
+		prometheusTranslationCompatibilityOption(),
+		prometheusUnitCompatibilityOption(),
 	)
 	if err != nil {
 		t.Fatalf("create isolated OTel Prometheus exporter: %v", err)

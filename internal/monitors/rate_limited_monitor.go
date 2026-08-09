@@ -61,10 +61,6 @@ func StartRateLimitedMonitor(ctx context.Context, cfg config.Config) {
 	}
 }
 
-func tickRateLimited(root string) {
-	tickRateLimitedAt(root, time.Now(), make(map[string]time.Time))
-}
-
 func tickRateLimitedAt(root string, now time.Time, lastNonempty map[string]time.Time) {
 	metrics.MarkMonitorAttempt("rate_limited")
 	committed := 0
@@ -170,13 +166,4 @@ func scanRateLimitedStream(hourlyRoot string, now time.Time) (rateLimitedSnapsho
 		}
 	}
 	return snapshot, nil
-}
-
-// countNonEmptyNewestDate is retained for compatibility with existing tests.
-func countNonEmptyNewestDate(hourlyRoot string) int {
-	snapshot, err := scanRateLimitedStream(hourlyRoot, time.Now())
-	if err != nil {
-		return 0
-	}
-	return snapshot.retained
 }

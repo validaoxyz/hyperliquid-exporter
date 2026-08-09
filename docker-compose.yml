@@ -9,6 +9,6 @@ services:
       - "--replica-metrics=true" # Enable replica monitor for core tx metrics
     volumes:
       - /home/ubuntu/hl:/hl:ro # Hyperliquid node data directory
-      - /home/ubuntu/hl-node:/bin/hl-node # Hyperliquid node binary
+      - /home/ubuntu/hl-node:/bin/hl-node:ro # Hyperliquid node binary
     ports:
       - 8086:8086

@@ -5,7 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -134,15 +134,27 @@ func declaredMetricKinds(t *testing.T) map[string]string {
 		t.Fatal("resolve current test file")
 	}
 	dir := filepath.Dir(currentFile)
-	packages, err := parser.ParseDir(token.NewFileSet(), dir, func(info fs.FileInfo) bool {
-		return !strings.HasSuffix(info.Name(), "_test.go")
-	}, 0)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Fatalf("parse metrics package: %v", err)
+		t.Fatalf("read metrics package: %v", err)
 	}
-	pkg := packages["metrics"]
-	if pkg == nil {
-		t.Fatal("parsed metrics package is missing")
+	fset := token.NewFileSet()
+	files := make([]*ast.File, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		if err != nil {
+			t.Fatalf("parse metrics source %s: %v", name, err)
+		}
+		if file.Name.Name == "metrics" {
+			files = append(files, file)
+		}
+	}
+	if len(files) == 0 {
+		t.Fatal("parsed metrics package has no source files")
 	}
 
 	constructors := map[string]string{
@@ -158,7 +170,7 @@ func declaredMetricKinds(t *testing.T) map[string]string {
 		"Int64Counter":           "otel_counter",
 	}
 	declared := make(map[string]string)
-	for _, file := range pkg.Files {
+	for _, file := range files {
 		ast.Inspect(file, func(node ast.Node) bool {
 			call, ok := node.(*ast.CallExpr)
 			if !ok {

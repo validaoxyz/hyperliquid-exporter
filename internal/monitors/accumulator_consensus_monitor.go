@@ -254,14 +254,6 @@ func drainAccumulatorBucketResult(hourlyRoot string, st *accumulatorBucketState)
 	return result, nil
 }
 
-// drainAccumulatorFile consumes complete lines from st.path starting at
-// st.offset, advances the offset, and returns the summed deltas. A torn
-// final line is left in place for the next pass.
-func drainAccumulatorFile(st *accumulatorBucketState) float64 {
-	result, _ := drainAccumulatorFileResult(st)
-	return result.sum
-}
-
 func drainAccumulatorFileResult(st *accumulatorBucketState) (accumulatorDrainResult, error) {
 	var result accumulatorDrainResult
 	data, err := os.ReadFile(st.path)

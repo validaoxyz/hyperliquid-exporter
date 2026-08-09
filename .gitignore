@@ -15,3 +15,6 @@ hl/
 
 # Keep locally exported Grafana dashboard drafts out of the repository
 grafana/
+
+# Keep local audit, deployment, and review evidence out of the public repository
+.agent-notes/

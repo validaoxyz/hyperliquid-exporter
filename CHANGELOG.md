@@ -1,5 +1,20 @@
 # Changelog
 
+## [v4.0.3] - 2026-08-09
+
+### Changed
+
+- Refreshed Go, OpenTelemetry, gRPC, and Prometheus dependencies. Source builds now require Go 1.25.12 or newer.
+- Expanded release checks to cover tests, race checks, vet, vulnerability scanning, generated docs, and alert fixtures.
+- Preserved existing Prometheus metric names, labels, and units.
+- Fixed Docker target architecture selection, pinned base images, and added a Linux arm64 release asset.
+
+## [v4.0.2] - 2026-08-09
+
+### Fixed
+
+- Accepted the tagged-object `Tc` round-advance reason emitted by current `hl-node` builds.
+
 ## [v4.0.1] - 2026-08-09
 
 ### Fixed

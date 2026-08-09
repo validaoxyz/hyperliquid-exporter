@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/prometheus/otlptranslator"
 	"github.com/validaoxyz/hyperliquid-exporter/internal/config"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -18,6 +19,21 @@ import (
 )
 
 const providerStartupCleanupTimeout = 5 * time.Second
+
+// prometheusTranslationCompatibilityOption keeps the established escaping and
+// counter-suffix behavior stable across OpenTelemetry bridge upgrades.
+func prometheusTranslationCompatibilityOption() prometheus.Option {
+	return prometheus.WithTranslationStrategy(otlptranslator.UnderscoreEscapingWithSuffixes)
+}
+
+// prometheusUnitCompatibilityOption prevents the newer bridge from appending
+// custom instrument units to established metric family names. Instrument names
+// already contain their intended unit where one belongs in the public name.
+func prometheusUnitCompatibilityOption() prometheus.Option {
+	//lint:ignore SA1019 The replacement translation strategies cannot preserve
+	// both established unit-free names and Prometheus counter suffixes.
+	return prometheus.WithoutUnits()
+}
 
 // InitMetrics initializes the metrics system and returns ownership of the SDK
 // provider. The caller must stop metric producers before invoking Shutdown on
@@ -112,6 +128,8 @@ func InitProvider(ctx context.Context, cfg MetricsConfig) (*ProviderOwner, error
 	if cfg.EnablePrometheus {
 		promExporter, err := prometheus.New(
 			prometheus.WithoutScopeInfo(),
+			prometheusTranslationCompatibilityOption(),
+			prometheusUnitCompatibilityOption(),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create Prometheus exporter: %w", err)

@@ -52,6 +52,22 @@ var procTCPSources = []struct {
 	{label: "tcp6", path: "/proc/net/tcp6"},
 }
 
+// tcpStateNames maps the hex state codes used by /proc/net/tcp to the
+// well-known names. See net/tcp_states.h in the kernel.
+var tcpStateNames = map[uint8]string{
+	0x01: "ESTABLISHED",
+	0x02: "SYN_SENT",
+	0x03: "SYN_RECV",
+	0x04: "FIN_WAIT1",
+	0x05: "FIN_WAIT2",
+	0x06: "TIME_WAIT",
+	0x07: "CLOSE",
+	0x08: "CLOSE_WAIT",
+	0x09: "LAST_ACK",
+	0x0A: "LISTEN",
+	0x0B: "CLOSING",
+}
+
 func activeProcTCPSources(enableTCP6 bool) []struct {
 	label string
 	path  string

@@ -5,12 +5,11 @@ import (
 	"sync"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 	api "go.opentelemetry.io/otel/metric"
 )
 
 var (
-	meter metric.Meter
+	meter api.Meter
 )
 
 // ProviderOwner owns the one shutdown/flush operation for the SDK meter

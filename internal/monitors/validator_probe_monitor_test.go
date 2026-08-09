@@ -80,7 +80,7 @@ func TestValidatorProbeDeadlineBackoffOutcomesAndExpiry(t *testing.T) {
 	deadlineSeen := false
 	validatorDialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
 		deadline, ok := ctx.Deadline()
-		if !ok || deadline.Sub(time.Now()) > validatorProbeTimeout+100*time.Millisecond {
+		if !ok || time.Until(deadline) > validatorProbeTimeout+100*time.Millisecond {
 			t.Errorf("probe dial lacks target-wide deadline: %v, %v", deadline, ok)
 		}
 		deadlineSeen = true

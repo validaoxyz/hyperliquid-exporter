@@ -1,24 +1,29 @@
-FROM golang:1.23.2-alpine3.20 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.25.12-alpine3.23@sha256:cc985ef6f9c3bf9ece7488129c9abe0a150388ccdfa428d886fc709dca0b230a AS builder
 ARG VERSION=docker
 ARG GIT_COMMIT=unknown
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
-ADD cmd/ ./cmd
-ADD internal ./internal
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
 RUN mkdir ./bin
-RUN GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
+RUN GOOS=$TARGETOS GOARCH=$TARGETARCH CGO_ENABLED=0 go build \
+    -trimpath \
     -ldflags "-X github.com/validaoxyz/hyperliquid-exporter/internal/metrics.BuildVersion=${VERSION} -X github.com/validaoxyz/hyperliquid-exporter/internal/metrics.BuildCommit=${GIT_COMMIT}" \
     -o ./bin/hl_exporter ./cmd/hl-exporter
 
-FROM ubuntu:24.04
+FROM ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
 WORKDIR /app
 COPY --from=builder /app/bin/hl_exporter /bin/hl_exporter
 
 ENV NODE_HOME="/hl/"
 ENV BINARY_HOME="/bin"
 
-RUN apt-get update && apt-get install -y ca-certificates curl wget
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl wget \
+    && rm -rf /var/lib/apt/lists/*
 
 EXPOSE 8086
 ENTRYPOINT ["/bin/hl_exporter"]
