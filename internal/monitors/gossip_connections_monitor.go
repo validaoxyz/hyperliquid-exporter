@@ -204,8 +204,13 @@ func validKnownGossipPayload(tag string, inner []json.RawMessage) bool {
 		var endpoint, stream string
 		return unmarshalRequiredJSON(inner[1], &endpoint) == nil && unmarshalRequiredJSON(inner[2], &stream) == nil
 	case "closing gossip stream because no quorum yet", "finished checks", "sending abci_state",
-		"successfully sent abci_state", "dropping connection after sending abci state":
+		"successfully sent abci_state":
 		return validGossipIPFlagPayload(inner, false)
+	case "dropping connection after sending abci state":
+		// Current mainnet can use a short string in the third field while
+		// retained generations use a bool. The payload is validation-only;
+		// neither value becomes a metric label.
+		return validGossipIPBoolOrStringPayload(inner)
 	case "sending evm kvs", "marking node_ip as verified",
 		"closing gossip stream because peer is already connected":
 		// Current mainnet emits these as object-only events while retained
@@ -255,6 +260,18 @@ func validGossipIPFlagPayload(inner []json.RawMessage, allowObjectOnly bool) boo
 	}
 	var flag bool
 	return unmarshalRequiredJSON(inner[2], &flag) == nil
+}
+
+func validGossipIPBoolOrStringPayload(inner []json.RawMessage) bool {
+	if len(inner) != 3 || !rawExactIPObject(inner[1]) {
+		return false
+	}
+	var flag bool
+	if unmarshalRequiredJSON(inner[2], &flag) == nil {
+		return true
+	}
+	var detail string
+	return unmarshalRequiredJSON(inner[2], &detail) == nil && strings.TrimSpace(detail) != ""
 }
 
 func rawExactIPObject(raw json.RawMessage) bool {
