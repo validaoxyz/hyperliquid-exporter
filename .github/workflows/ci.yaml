@@ -50,12 +50,12 @@ jobs:
           image='prom/prometheus@sha256:2b6f734e372c1b4717008f7d0a0152316aedd4d13ae17ef1e3268dbfaf68041b'
           docker run --rm --network none --read-only \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
-            -v "$PWD:/repo:ro" --entrypoint /bin/promtool "$image" \
-            check rules /repo/alerts/*.rules.yml
+            -v "$PWD:/repo:ro" --workdir /repo --entrypoint /bin/promtool "$image" \
+            check rules ./alerts/*.rules.yml
           docker run --rm --network none --read-only \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
-            -v "$PWD:/repo:ro" --entrypoint /bin/promtool "$image" \
-            test rules /repo/alerts/tests/*.test.yml
+            -v "$PWD:/repo:ro" --workdir /repo --entrypoint /bin/promtool "$image" \
+            test rules ./alerts/tests/*.test.yml
 
   build:
     runs-on: ubuntu-24.04
