@@ -65,15 +65,20 @@ func (s *critGenerationStore) get(source string) (critDailyProjection, bool) {
 
 // withAvailable serializes a rich-projection match and commit against daily
 // generation replacement/withdrawal. The callback runs only while the exact
-// daily generation remains available.
-func (s *critGenerationStore) withAvailable(source string, fn func(critGeneration) bool) (critGeneration, bool) {
+// daily generation remains available. available distinguishes a daily
+// projection that has not arrived yet from a present projection that failed
+// the generation match.
+func (s *critGenerationStore) withAvailable(source string, fn func(critGeneration) bool) (generation critGeneration, available, matched bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	projection, ok := s.sources[source]
-	if !ok || !projection.available || !fn(projection.generation) {
-		return critGeneration{}, false
+	if !ok || !projection.available {
+		return critGeneration{}, false, false
 	}
-	return projection.generation, true
+	if !fn(projection.generation) {
+		return projection.generation, true, false
+	}
+	return projection.generation, true, true
 }
 
 var sharedCritGenerations = newCritGenerationStore()

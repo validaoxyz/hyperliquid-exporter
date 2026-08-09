@@ -65,6 +65,72 @@ func critRichFixture(base time.Time, bugs, crits int64, locations string) string
 	return fmt.Sprintf(`{"start_time":%q,"n_bugs":%d,"n_crits":%d,"code_location_and_stats":%s}`, base.UTC().Format("2006-01-02T15:04:05.999999999"), bugs, crits, locations)
 }
 
+func TestCriticalRichProjectionWaitsForDailyGenerationWithoutSchemaError(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	base := now.Add(-time.Hour)
+	path := filepath.Join(t.TempDir(), "hl-visor.json")
+	locations := `[[{"fln":"/build/src/startup.rs","line":7},{"n":3,"is_ignored":false,"first_seen":"2026-08-08T00:00:00","last_seen":"2026-08-08T00:01:00"}]]`
+	if err := os.WriteFile(path, []byte(critRichFixture(base, 1, 2, locations)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	store := newCritGenerationStore()
+	state := &critLocationsState{store: store, active: make(map[[2]string]struct{})}
+	labels := map[string]string{"file": "startup.rs", "line": "7"}
+	metrics.HLNodeCritLocation.DeleteLabelValues("startup.rs", "7")
+	metrics.HLNodeCritLocationIgnored.DeleteLabelValues("startup.rs", "7")
+	metrics.HLNodeCritLocationLastSeenSeconds.DeleteLabelValues("startup.rs", "7")
+	defer func() {
+		metrics.HLNodeCritLocation.DeleteLabelValues("startup.rs", "7")
+		metrics.HLNodeCritLocationIgnored.DeleteLabelValues("startup.rs", "7")
+		metrics.HLNodeCritLocationLastSeenSeconds.DeleteLabelValues("startup.rs", "7")
+	}()
+	schemaErrors := metrics.HLExporterSourceErrorsTotal.WithLabelValues("critical_locations", "schema")
+	errorsBefore := hostMetricValue(t, schemaErrors)
+	if err := tickCritLocationsAt(path, state, now.Add(time.Second)); err != nil {
+		t.Fatalf("valid rich projection before daily startup: %v", err)
+	}
+	if got := hostMetricValue(t, schemaErrors); got != errorsBefore {
+		t.Fatalf("pending daily generation incremented schema errors: before=%v after=%v", errorsBefore, got)
+	}
+	if value, ok := b03CollectorValue(t, metrics.HLCriticalMessageProjectionAvailable, map[string]string{"source": "hl-visor", "projection": "rich"}); !ok || value != 0 {
+		t.Fatalf("pending rich availability = %v, %v", value, ok)
+	}
+	if value, ok := b03CollectorValue(t, metrics.HLCriticalMessageProjectionParseOK, map[string]string{"source": "hl-visor", "projection": "rich"}); !ok || value != 1 {
+		t.Fatalf("pending rich parse state = %v, %v", value, ok)
+	}
+	if value, ok := b03CollectorValue(t, metrics.HLCriticalMessageGenerationMatch, map[string]string{"source": "hl-visor"}); !ok || value != 0 {
+		t.Fatalf("pending generation match = %v, %v", value, ok)
+	}
+	if b03CollectorHasLabels(t, metrics.HLNodeCritLocation, labels) {
+		t.Fatal("pending rich projection published an unmatched location")
+	}
+
+	store.set("hl-visor", critDailyProjection{
+		available: true,
+		generation: critGeneration{
+			Source:     "hl-visor",
+			SampleTime: now,
+			BaseTime:   base,
+			NBugs:      1,
+			NCrits:     2,
+			NLocations: 1,
+		},
+	})
+	if err := tickCritLocationsAt(path, state, now.Add(2*time.Second)); err != nil {
+		t.Fatalf("matching daily generation did not recover: %v", err)
+	}
+	if value, ok := b03CollectorValue(t, metrics.HLNodeCritLocation, labels); !ok || value != 3 {
+		t.Fatalf("recovered rich location = %v, %v", value, ok)
+	}
+	if value, ok := b03CollectorValue(t, metrics.HLCriticalMessageGenerationMatch, map[string]string{"source": "hl-visor"}); !ok || value != 1 {
+		t.Fatalf("recovered generation match = %v, %v", value, ok)
+	}
+}
+
 func TestCriticalVisorGenerationMatchingRollbackAndEmptyClear(t *testing.T) {
 	root := t.TempDir()
 	now := time.Now().UTC().Truncate(time.Second)

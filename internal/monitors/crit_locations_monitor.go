@@ -116,7 +116,7 @@ func tickCritLocationsAt(path string, state *critLocationsState, now time.Time) 
 		return err
 	}
 	generationChanged := false
-	daily, matched := state.store.withAvailable(source, func(generation critGeneration) bool {
+	daily, dailyAvailable, matched := state.store.withAvailable(source, func(generation critGeneration) bool {
 		if !critRichMatchesDaily(snapshot, info.ModTime(), generation) {
 			return false
 		}
@@ -125,6 +125,17 @@ func tickCritLocationsAt(path string, state *critLocationsState, now time.Time) 
 		state.lastGeneration = generation
 		return true
 	})
+	if !dailyAvailable {
+		// The rich projection can be readable before the daily monitor has
+		// completed its first poll. This is a healthy pending join, not a
+		// malformed rich projection or a generation mismatch.
+		metrics.SetCriticalMessageProjectionState(source, "rich", false, 1)
+		metrics.HLCriticalMessageGenerationMatch.WithLabelValues(source).Set(0)
+		metrics.MarkSourceReadOutcome(metrics.SourceCriticalLocations, true)
+		metrics.MarkSourcePublication(metrics.SourceCriticalLocations)
+		metrics.MarkMonitorPublication("crit_locations")
+		return nil
+	}
 	if !matched {
 		metrics.SetCriticalMessageProjectionState(source, "rich", false, 1)
 		metrics.HLCriticalMessageGenerationMatch.WithLabelValues(source).Set(0)
