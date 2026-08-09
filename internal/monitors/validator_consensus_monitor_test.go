@@ -186,6 +186,84 @@ func TestRoundAdvanceRejectsNullRequiredFields(t *testing.T) {
 	}
 }
 
+func TestRoundAdvanceAcceptsObservedStringAndTaggedObjectReasons(t *testing.T) {
+	for name, tc := range map[string]struct {
+		reason string
+		label  string
+	}{
+		"qc string":            {`"Qc"`, "qc"},
+		"tc string":            {`"Tc"`, "tc"},
+		"tc tagged object":     {`{"Tc":{"last_vote_round":11,"next_proposer":{"Ok":"0x1111..1111"},"proposer":{"Ok":"0x2222..2222"},"suspect":"NoVote"}}`, "tc"},
+		"future string":        {`"future_reason"`, "other"},
+		"future tagged object": {`{"Future":{"field":1}}`, "other"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := NewConsensusMonitor(&config.Config{})
+			before := validatorMetricValue(t, metrics.HLConsensusRoundAdvanceEvents.WithLabelValues(tc.label))
+			raw := json.RawMessage(`{"prev_round":11,"round":12,"reason":` + tc.reason + `}`)
+			if err := m.processRoundAdvance(raw, time.Now()); err != nil {
+				t.Fatalf("observed reason rejected: %v", err)
+			}
+			if got := validatorMetricValue(t, metrics.HLConsensusRoundAdvanceEvents.WithLabelValues(tc.label)) - before; got != 1 {
+				t.Fatalf("%s delta = %v, want 1", tc.label, got)
+			}
+			if m.latestConsensusRound != 12 {
+				t.Fatalf("latest round = %d, want 12", m.latestConsensusRound)
+			}
+		})
+	}
+}
+
+func TestProcessConsensusLineAcceptsObservedTaggedTCReasonWithoutSourceError(t *testing.T) {
+	m := NewConsensusMonitor(&config.Config{})
+	tcBefore := validatorMetricValue(t, metrics.HLConsensusRoundAdvanceEvents.WithLabelValues("tc"))
+	labelsDecode := map[string]string{"source": "consensus_round_advance", "stage": "decode"}
+	labelsSchema := map[string]string{"source": "consensus_round_advance", "stage": "schema"}
+	decodeBefore, _ := b03CollectorValue(t, metrics.HLExporterSourceErrorsTotal, labelsDecode)
+	schemaBefore, _ := b03CollectorValue(t, metrics.HLExporterSourceErrorsTotal, labelsSchema)
+
+	line := `["2026-08-09T01:05:06.914547237",["round advance",{"prev_round":819363188,"round":819363189,"reason":{"Tc":{"last_vote_round":819363188,"next_proposer":{"Ok":"0x1111..1111"},"proposer":{"Ok":"0x2222..2222"},"suspect":"NoVote"}}}]]`
+	if err := m.processConsensusLine(line); err != nil {
+		t.Fatalf("live tagged TC round advance rejected: %v", err)
+	}
+	if got := validatorMetricValue(t, metrics.HLConsensusRoundAdvanceEvents.WithLabelValues("tc")) - tcBefore; got != 1 {
+		t.Fatalf("tc reason delta = %v, want 1", got)
+	}
+	if got, _ := b03CollectorValue(t, metrics.HLExporterSourceErrorsTotal, labelsDecode); got != decodeBefore {
+		t.Fatalf("tagged TC incremented decode errors: %v -> %v", decodeBefore, got)
+	}
+	if got, _ := b03CollectorValue(t, metrics.HLExporterSourceErrorsTotal, labelsSchema); got != schemaBefore {
+		t.Fatalf("tagged TC incremented schema errors: %v -> %v", schemaBefore, got)
+	}
+}
+
+func TestRoundAdvanceRejectsMalformedReasonAtomically(t *testing.T) {
+	for name, reason := range map[string]string{
+		"null":              `null`,
+		"empty string":      `""`,
+		"empty object":      `{}`,
+		"null payload":      `{"Tc":null}`,
+		"multiple variants": `{"Tc":{},"Qc":{}}`,
+		"array":             `[]`,
+		"number":            `1`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := NewConsensusMonitor(&config.Config{})
+			before := validatorMetricValue(t, metrics.HLConsensusRoundAdvanceEvents.WithLabelValues("other"))
+			raw := json.RawMessage(`{"prev_round":11,"round":12,"reason":` + reason + `}`)
+			if err := m.processRoundAdvance(raw, time.Now()); err == nil {
+				t.Fatalf("malformed reason accepted: %s", reason)
+			}
+			if m.latestConsensusRound != 0 {
+				t.Fatalf("malformed reason advanced local round to %d", m.latestConsensusRound)
+			}
+			if got := validatorMetricValue(t, metrics.HLConsensusRoundAdvanceEvents.WithLabelValues("other")); got != before {
+				t.Fatalf("malformed reason incremented bounded other counter")
+			}
+		})
+	}
+}
+
 func TestLocalConsensusStatusRejectsNullOperands(t *testing.T) {
 	for _, field := range []string{"round", "last_vote_round", "last_commit_round", "qc_round"} {
 		t.Run(field, func(t *testing.T) {

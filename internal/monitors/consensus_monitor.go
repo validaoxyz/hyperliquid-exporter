@@ -551,15 +551,15 @@ func (m *ConsensusMonitor) processVoteStruct(vote *ConsensusVoteMessage, timesta
 
 func (m *ConsensusMonitor) processRoundAdvance(raw json.RawMessage, sourceTime time.Time) error {
 	var event struct {
-		PrevRound *int64  `json:"prev_round"`
-		Round     *int64  `json:"round"`
-		Reason    *string `json:"reason"`
+		PrevRound *int64          `json:"prev_round"`
+		Round     *int64          `json:"round"`
+		Reason    json.RawMessage `json:"reason"`
 	}
 	if err := json.Unmarshal(raw, &event); err != nil {
 		metrics.MarkSourceError(metrics.SourceConsensusRoundAdvance, metrics.SourceFailureDecode)
 		return fmt.Errorf("unmarshal round advance: %w", err)
 	}
-	if event.PrevRound == nil || event.Round == nil || event.Reason == nil || strings.TrimSpace(*event.Reason) == "" {
+	if event.PrevRound == nil || event.Round == nil || len(event.Reason) == 0 {
 		metrics.MarkSourceError(metrics.SourceConsensusRoundAdvance, metrics.SourceFailureSchema)
 		return fmt.Errorf("round advance is missing required fields")
 	}
@@ -567,12 +567,10 @@ func (m *ConsensusMonitor) processRoundAdvance(raw json.RawMessage, sourceTime t
 		metrics.MarkSourceError(metrics.SourceConsensusRoundAdvance, metrics.SourceFailureSchema)
 		return fmt.Errorf("invalid round advance values")
 	}
-	reason := "other"
-	switch strings.ToLower(*event.Reason) {
-	case "qc":
-		reason = "qc"
-	case "tc":
-		reason = "tc"
+	reason, err := parseRoundAdvanceReason(event.Reason)
+	if err != nil {
+		metrics.MarkSourceError(metrics.SourceConsensusRoundAdvance, metrics.SourceFailureSchema)
+		return fmt.Errorf("invalid round advance reason: %w", err)
 	}
 	metrics.HLConsensusRoundAdvanceEvents.WithLabelValues(reason).Inc()
 	metrics.HLConsensusLocalRound.WithLabelValues("round_advance").Set(float64(*event.Round))
@@ -580,6 +578,57 @@ func (m *ConsensusMonitor) processRoundAdvance(raw json.RawMessage, sourceTime t
 	metrics.MarkSourceValidObservation(metrics.SourceConsensusRoundAdvance, sourceTime)
 	metrics.MarkSourcePublication(metrics.SourceConsensusRoundAdvance)
 	return nil
+}
+
+// parseRoundAdvanceReason accepts both enum encodings observed from hl-node:
+// unit variants such as "Qc" are JSON strings, while data-bearing variants
+// such as Tc are externally tagged objects: {"Tc": {...}}. Nested payloads
+// are intentionally opaque because this metric publishes only the bounded
+// reason class.
+func parseRoundAdvanceReason(raw json.RawMessage) (string, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return "", fmt.Errorf("reason is null")
+	}
+	if trimmed[0] == '"' {
+		var value string
+		if err := json.Unmarshal(trimmed, &value); err != nil {
+			return "", err
+		}
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return "", fmt.Errorf("reason is empty")
+		}
+		return boundedRoundAdvanceReason(value), nil
+	}
+
+	var variant map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &variant); err != nil {
+		return "", err
+	}
+	if len(variant) != 1 {
+		return "", fmt.Errorf("reason object has %d variants", len(variant))
+	}
+	for name, payload := range variant {
+		name = strings.TrimSpace(name)
+		payload = bytes.TrimSpace(payload)
+		if name == "" || len(payload) == 0 || bytes.Equal(payload, []byte("null")) {
+			return "", fmt.Errorf("reason variant is empty")
+		}
+		return boundedRoundAdvanceReason(name), nil
+	}
+	return "", fmt.Errorf("reason is invalid")
+}
+
+func boundedRoundAdvanceReason(value string) string {
+	switch strings.ToLower(value) {
+	case "qc":
+		return "qc"
+	case "tc":
+		return "tc"
+	default:
+		return "other"
+	}
 }
 
 func (m *ConsensusMonitor) processLocalConsensusStatus(raw json.RawMessage, sourceTime time.Time) error {
