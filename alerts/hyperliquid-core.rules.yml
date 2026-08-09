@@ -1,0 +1,28 @@
+groups:
+  - name: hyperliquid-core
+    rules:
+      - alert: HyperliquidCoreHeightStalled
+        expr: |
+          (deriv(hl_core_block_height[5m]) < 1)
+            and on(job, instance)
+          (up == 1)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Hyperliquid Core height has stalled"
+          description: "Reported Core height has advanced at less than 1 block per second for 5 minutes while the exporter target remains scrapeable."
+
+      - alert: HyperliquidCoreHeightSlow
+        expr: |
+          (deriv(hl_core_block_height[5m]) >= 1)
+            and
+          (deriv(hl_core_block_height[5m]) < 5)
+            and on(job, instance)
+          (up == 1)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Hyperliquid Core height is advancing slowly"
+          description: "Reported Core height has advanced at 1 to 5 blocks per second for 15 minutes while the exporter target remains scrapeable."

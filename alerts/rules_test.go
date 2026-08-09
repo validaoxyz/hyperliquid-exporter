@@ -29,6 +29,18 @@ type ruleContract struct {
 }
 
 var approvedRuleContracts = map[string]map[string]ruleContract{
+	"hyperliquid-core.rules.yml": {
+		"HyperliquidCoreHeightStalled": {
+			expr:        `(deriv(hl_core_block_height[5m]) < 1) and on(job, instance) (up == 1)`,
+			forDuration: "5m",
+			severity:    "critical",
+		},
+		"HyperliquidCoreHeightSlow": {
+			expr:        `(deriv(hl_core_block_height[5m]) >= 1) and (deriv(hl_core_block_height[5m]) < 5) and on(job, instance) (up == 1)`,
+			forDuration: "15m",
+			severity:    "warning",
+		},
+	},
 	"hyperliquid-exporter.rules.yml": {
 		"HyperliquidExporterDown": {
 			expr:        `up{job=~"hyperliquid-exporter(/.*)?"} == 0`,
@@ -158,6 +170,7 @@ func TestRuleMetricAndSafetyContracts(t *testing.T) {
 	allowedFunctions := map[string]bool{
 		"and":      true,
 		"by":       true,
+		"deriv":    true,
 		"increase": true,
 		"on":       true,
 		"or":       true,
@@ -456,6 +469,7 @@ func declaredPrometheusMetricTypes(t *testing.T, dir string) map[string]string {
 			}
 			constructor := callName(call.Fun)
 			metricType := ""
+			otel := false
 			switch constructor {
 			case "NewCounter", "NewCounterVec":
 				metricType = "counter"
@@ -465,10 +479,22 @@ func declaredPrometheusMetricTypes(t *testing.T, dir string) map[string]string {
 				metricType = "histogram"
 			case "NewSummary", "NewSummaryVec":
 				metricType = "summary"
+			case "Int64Counter", "Float64Counter":
+				metricType = "counter"
+				otel = true
+			case "Int64ObservableGauge", "Float64ObservableGauge":
+				metricType = "gauge"
+				otel = true
+			case "Int64Histogram", "Float64Histogram":
+				metricType = "histogram"
+				otel = true
 			default:
 				return true
 			}
 			name := metricNameFromOptions(call.Args[0])
+			if otel {
+				name = metricNameFromLiteral(call.Args[0])
+			}
 			if name == "" || !strings.HasPrefix(name, "hl_") {
 				return true
 			}
@@ -480,6 +506,18 @@ func declaredPrometheusMetricTypes(t *testing.T, dir string) map[string]string {
 		})
 	}
 	return metricTypes
+}
+
+func metricNameFromLiteral(expr ast.Expr) string {
+	literal, ok := expr.(*ast.BasicLit)
+	if !ok || literal.Kind != token.STRING {
+		return ""
+	}
+	name, err := strconv.Unquote(literal.Value)
+	if err != nil {
+		return ""
+	}
+	return name
 }
 
 func callName(expr ast.Expr) string {

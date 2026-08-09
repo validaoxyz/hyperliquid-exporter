@@ -1,0 +1,87 @@
+rule_files:
+  - ../hyperliquid-core.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: HyperliquidCoreHeightStalled firing
+    interval: 1m
+    input_series:
+      - series: 'hl_core_block_height{job="hyperliquid-exporter",instance="stalled"}'
+        values: '1000 1000 1000 1000 1000 1000 1000'
+      - series: 'up{job="hyperliquid-exporter",instance="stalled"}'
+        values: '1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: HyperliquidCoreHeightStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: hyperliquid-exporter
+              instance: stalled
+            exp_annotations:
+              summary: "Hyperliquid Core height has stalled"
+              description: "Reported Core height has advanced at less than 1 block per second for 5 minutes while the exporter target remains scrapeable."
+
+  - name: HyperliquidCoreHeightStalled nonfiring
+    interval: 1m
+    input_series:
+      - series: 'hl_core_block_height{job="hyperliquid-exporter",instance="healthy"}'
+        values: '0+900x7'
+      - series: 'up{job="hyperliquid-exporter",instance="healthy"}'
+        values: '1x8'
+      - series: 'hl_core_block_height{job="hyperliquid-exporter",instance="scrape-down"}'
+        values: '1000 1000 1000 1000 1000 1000 1000 1000'
+      - series: 'up{job="hyperliquid-exporter",instance="scrape-down"}'
+        values: '0x8'
+      - series: 'hl_core_block_height{job="hyperliquid-exporter",instance="short"}'
+        values: '1000 1000 1000 1000 1000'
+      - series: 'up{job="hyperliquid-exporter",instance="short"}'
+        values: '1x5'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: HyperliquidCoreHeightStalled
+        exp_alerts: []
+
+  - name: HyperliquidCoreHeightSlow firing
+    interval: 1m
+    input_series:
+      - series: 'hl_core_block_height{job="hyperliquid-exporter",instance="slow"}'
+        values: '0+120x17'
+      - series: 'up{job="hyperliquid-exporter",instance="slow"}'
+        values: '1x18'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: HyperliquidCoreHeightSlow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: hyperliquid-exporter
+              instance: slow
+            exp_annotations:
+              summary: "Hyperliquid Core height is advancing slowly"
+              description: "Reported Core height has advanced at 1 to 5 blocks per second for 15 minutes while the exporter target remains scrapeable."
+
+  - name: HyperliquidCoreHeightSlow nonfiring
+    interval: 1m
+    input_series:
+      - series: 'hl_core_block_height{job="hyperliquid-exporter",instance="healthy"}'
+        values: '0+900x17'
+      - series: 'up{job="hyperliquid-exporter",instance="healthy"}'
+        values: '1x18'
+      - series: 'hl_core_block_height{job="hyperliquid-exporter",instance="stalled"}'
+        values: '1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000'
+      - series: 'up{job="hyperliquid-exporter",instance="stalled"}'
+        values: '1x18'
+      - series: 'hl_core_block_height{job="hyperliquid-exporter",instance="scrape-down"}'
+        values: '0+120x17'
+      - series: 'up{job="hyperliquid-exporter",instance="scrape-down"}'
+        values: '0x18'
+      - series: 'hl_core_block_height{job="hyperliquid-exporter",instance="short"}'
+        values: '0+120x15'
+      - series: 'up{job="hyperliquid-exporter",instance="short"}'
+        values: '1x16'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: HyperliquidCoreHeightSlow
+        exp_alerts: []
