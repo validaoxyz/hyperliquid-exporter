@@ -54,9 +54,9 @@ func TestRawValidatorLatencyRetainsFragmentIdentityAndPollPeak(t *testing.T) {
 		t.Fatalf("raw record replayed: %+v, %v", result, err)
 	}
 
-	if err := os.Remove(path); err != nil {
-		t.Fatal(err)
-	}
+	// Rewrite the same inode to a larger file. File identity and size alone
+	// cannot distinguish this from an append; the committed-tail fingerprint
+	// must reset the stream to byte zero.
 	if err := os.WriteFile(path, []byte(
 		rawLatencyFixture(now.Add(time.Second), 11, 0.3)+"\n"+
 			rawLatencyFixture(now.Add(2*time.Second), 12, 1.7)+"\n"+

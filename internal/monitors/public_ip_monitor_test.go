@@ -103,6 +103,8 @@ func TestPublicIPMissingFailureAndRecreationLifecycle(t *testing.T) {
 }
 
 func TestPublicIPAgeHelpMakesNoCadencePromise(t *testing.T) {
+	metrics.HLNodePublicIPAgeSeconds.WithLabelValues().Set(0)
+	t.Cleanup(func() { metrics.HLNodePublicIPAgeSeconds.DeleteLabelValues() })
 	families, err := prometheus.DefaultGatherer.Gather()
 	if err != nil {
 		t.Fatal(err)

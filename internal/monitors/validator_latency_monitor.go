@@ -3,6 +3,7 @@ package monitors
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -44,10 +45,13 @@ type rawLatencyState struct {
 }
 
 type fileTailState struct {
-	path     string
-	info     os.FileInfo
-	offset   int64
-	fragment []byte
+	path             string
+	info             os.FileInfo
+	offset           int64
+	fragment         []byte
+	fingerprintStart int64
+	fingerprint      [sha256.Size]byte
+	hasFingerprint   bool
 }
 
 type rawLatencyReadResult struct {
@@ -329,6 +333,7 @@ func (m *ValidatorLatencyMonitor) withdrawRawLatency() {
 }
 
 const validatorTailMaxRecordBytes = 8 << 20
+const validatorTailFingerprintBytes = int64(64 << 10)
 
 // readCompleteAppends tails one file by stable identity and retains the final
 // unterminated record. State advances only after a successful read. A new EMA
@@ -345,6 +350,15 @@ func readCompleteAppends(state *fileTailState, path string, bootstrapBytes int64
 	}
 
 	reset := state.path != path || state.info == nil || !os.SameFile(state.info, info) || state.offset > info.Size()
+	if !reset && state.offset > 0 {
+		start, fingerprint, err := tailBoundaryFingerprint(f, state.offset)
+		if err != nil {
+			return nil, err
+		}
+		if !state.hasFingerprint || start != state.fingerprintStart || fingerprint != state.fingerprint {
+			reset = true
+		}
+	}
 	offset := state.offset
 	fragment := append([]byte(nil), state.fragment...)
 	discardPrefix := false
@@ -382,11 +396,18 @@ func readCompleteAppends(state *fileTailState, path string, bootstrapBytes int64
 	if len(fragment) > validatorTailMaxRecordBytes {
 		return nil, fmt.Errorf("unterminated record exceeds %d bytes", validatorTailMaxRecordBytes)
 	}
+	fingerprintStart, fingerprint, err := tailBoundaryFingerprint(f, info.Size())
+	if err != nil {
+		return nil, err
+	}
 
 	state.path = path
 	state.info = info
 	state.offset = info.Size()
 	state.fragment = fragment
+	state.fingerprintStart = fingerprintStart
+	state.fingerprint = fingerprint
+	state.hasFingerprint = info.Size() > 0
 	if len(complete) == 0 {
 		return nil, nil
 	}
@@ -399,6 +420,26 @@ func readCompleteAppends(state *fileTailState, path string, bootstrapBytes int64
 		}
 	}
 	return lines, nil
+}
+
+// tailBoundaryFingerprint distinguishes an append from same-path replacement
+// even when a filesystem immediately reuses the previous inode. Matching the
+// bounded committed tail is sufficient: if that prefix is unchanged, reading
+// from the prior offset remains correct for this append-only stream contract.
+func tailBoundaryFingerprint(f *os.File, end int64) (int64, [sha256.Size]byte, error) {
+	var fingerprint [sha256.Size]byte
+	if end <= 0 {
+		return 0, fingerprint, nil
+	}
+	start := end - validatorTailFingerprintBytes
+	if start < 0 {
+		start = 0
+	}
+	data := make([]byte, end-start)
+	if _, err := f.ReadAt(data, start); err != nil {
+		return 0, fingerprint, fmt.Errorf("fingerprint committed tail: %w", err)
+	}
+	return start, sha256.Sum256(data), nil
 }
 
 // monitors the exponential moving average file
