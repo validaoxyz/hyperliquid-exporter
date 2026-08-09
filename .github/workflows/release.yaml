@@ -53,14 +53,11 @@ jobs:
       - name: Build binaries
         run: |
           mkdir -p bin
-          platforms=("linux/amd64" "linux/arm64" "darwin/amd64" "darwin/arm64" "windows/amd64")
+          platforms=("linux/amd64" "linux/arm64")
           for platform in "${platforms[@]}"; do
             OS=${platform%/*}
             ARCH=${platform#*/}
             OUTPUT_NAME="hl_exporter_${OS}_${ARCH}"
-            if [ "$OS" = "windows" ]; then
-              OUTPUT_NAME+=".exe"
-            fi
             echo "Building $OUTPUT_NAME..."
             GOOS="$OS" GOARCH="$ARCH" CGO_ENABLED=0 go build \
               -trimpath \
@@ -74,11 +71,7 @@ jobs:
           # Keep raw binaries for automated fleet installs and add archives for manual downloads.
           for file in ./*; do
             base=${file#./}
-            if [[ $base == *.exe ]]; then
-              zip "${base%.*}.zip" "$base"
-            else
-              tar -czf "$base.tar.gz" "$base"
-            fi
+            tar -czf "$base.tar.gz" "$base"
           done
           sha256sum ./* > SHA256SUMS
 
