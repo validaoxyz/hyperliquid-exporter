@@ -128,7 +128,7 @@ func TestTickLZ4_SameTimestampContentReplacementReconciles(t *testing.T) {
 	}
 }
 
-func TestSelectLatestLZ4Pair_RejectsCrossWindowAndTornRecord(t *testing.T) {
+func TestSelectLatestLZ4Pair_RejectsCrossWindowAndRetainsPriorPairOnTornTail(t *testing.T) {
 	crossWindow := []byte(
 		`["2026-05-25T10:00:00",[[["In","192.0.2.1",4001],10,2,0.5]]]` + "\n" +
 			`["2026-05-25T10:05:00",[20,2,0.6]]` + "\n")
@@ -137,9 +137,76 @@ func TestSelectLatestLZ4Pair_RejectsCrossWindowAndTornRecord(t *testing.T) {
 	}
 	torn := []byte(
 		`["2026-05-25T10:00:00",[[["In","192.0.2.1",4001],10,2,0.5]]]` + "\n" +
-			`["2026-05-25T10:00:01",[20,2,0.6]]`)
-	if _, err := selectLatestLZ4Pair(torn); err == nil {
-		t.Fatal("accepted an unterminated global record")
+			`["2026-05-25T10:00:01",[20,2,0.6]]` + "\n" +
+			`["2026-05-25T10:05:00",[[["In","192.0.2.2",4001],30,3,0.7]]]` + "\n" +
+			`["2026-05-25T10:05:01",[40`)
+	pair, err := selectLatestLZ4Pair(torn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pairTimestamp(pair).Equal(time.Date(2026, 5, 25, 10, 0, 1, 0, time.UTC)) || pair.global.bytes != 20 {
+		t.Fatalf("torn tail did not retain prior complete pair: %+v", pair)
+	}
+}
+
+func TestSelectLatestLZ4Pair_AcceptsCompleteFinalRecordWithoutNewline(t *testing.T) {
+	data := []byte(
+		`["2026-08-09T00:00:04.247163972",[[["In","192.0.2.1",4001],10,2,0.5]]]` + "\n" +
+			`["2026-08-09T00:00:04.247308733",[20,2,0.6]]`)
+	pair, err := selectLatestLZ4Pair(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pair.global.bytes != 20 || len(pair.peer.peers) != 1 || pair.peer.peers[0].ip != "192.0.2.1" {
+		t.Fatalf("unexpected unterminated-source pair: %+v", pair)
+	}
+}
+
+func TestSelectLatestLZ4Pair_RejectsCompleteInvalidFinalRecord(t *testing.T) {
+	data := []byte(
+		`["2026-05-25T10:00:00",[[["In","192.0.2.1",4001],10,2,0.5]]]` + "\n" +
+			`["2026-05-25T10:00:01",[20,2,0.6]]` + "\n" +
+			`["2026-05-25T10:05:00",{"unexpected":true}]`)
+	if _, err := selectLatestLZ4Pair(data); err == nil {
+		t.Fatal("accepted a complete but invalid final record")
+	}
+}
+
+func TestTickLZ4_DailyRolloverAcceptsCompleteFinalRecordWithoutNewline(t *testing.T) {
+	root := t.TempDir()
+	oldPath := filepath.Join(root, "20260808")
+	newPath := filepath.Join(root, "20260809")
+	oldWindow := []byte(
+		`["2026-08-08T23:55:04.245441218",[[["In","192.0.2.1",4001],10,2,0.5]]]` + "\n" +
+			`["2026-08-08T23:55:04.245477629",[20,2,0.6]]`)
+	newWindow := []byte(
+		`["2026-08-09T00:00:04.247163972",[[["In","192.0.2.2",4001],30,3,0.7]]]` + "\n" +
+			`["2026-08-09T00:00:04.247308733",[40,3,0.8]]`)
+	if err := os.WriteFile(oldPath, oldWindow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := newLz4MonitorState([]uint16{4001})
+	monitorErrors := metrics.HLExporterMonitorErrorsTotal.WithLabelValues("tcp_lz4")
+	sourceErrors := metrics.HLExporterSourceErrorsTotal.WithLabelValues(string(metrics.SourceTCPLZ4), string(metrics.SourceFailureSchema))
+	monitorBefore := hostMetricValue(t, monitorErrors)
+	sourceBefore := hostMetricValue(t, sourceErrors)
+	tickLz4(root, state)
+	oldSource := state.previousSource
+	if oldSource.IsZero() {
+		t.Fatal("old-day pair did not publish")
+	}
+	if err := os.WriteFile(newPath, newWindow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tickLz4(root, state)
+	if !state.previousSource.After(oldSource) {
+		t.Fatalf("daily rollover did not advance source time: old=%s new=%s", oldSource, state.previousSource)
+	}
+	if delta := hostMetricValue(t, monitorErrors) - monitorBefore; delta != 0 {
+		t.Fatalf("daily rollover monitor error delta=%v", delta)
+	}
+	if delta := hostMetricValue(t, sourceErrors) - sourceBefore; delta != 0 {
+		t.Fatalf("daily rollover source error delta=%v", delta)
 	}
 }
 

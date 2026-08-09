@@ -477,7 +477,7 @@ func clearLz4PeerSeries(prev map[string]map[string]bool) {
 }
 
 func selectLatestLZ4Pair(data []byte) (lz4Pair, error) {
-	lines := committedLinesReverse(data, maxLz4LinesToScan)
+	lines := lz4RecordLinesReverse(data, maxLz4LinesToScan)
 	if len(lines) == 0 {
 		return lz4Pair{}, errors.New("no complete LZ4 record")
 	}
@@ -511,6 +511,31 @@ func selectLatestLZ4Pair(data []byte) (lz4Pair, error) {
 		return pair, nil
 	}
 	return lz4Pair{}, errors.New("latest peer/global records are from different windows")
+}
+
+// lz4RecordLinesReverse applies the framing used by tcp_lz4_stats. Unlike the
+// append-only event streams, hl-node leaves the final complete JSON record in
+// each LZ4 snapshot file without a trailing newline; the next five-minute
+// record supplies its delimiter. Admit that suffix only when it is already a
+// complete JSON value. A partially written suffix remains ignored, preserving
+// the newest prior complete pair.
+func lz4RecordLinesReverse(data []byte, limit int) [][]byte {
+	lines := committedLinesReverse(data, limit)
+	if limit <= 0 || len(data) == 0 || data[len(data)-1] == '\n' {
+		return lines
+	}
+	start := bytes.LastIndexByte(data, '\n') + 1
+	tail := bytes.TrimSpace(data[start:])
+	if len(tail) == 0 || !json.Valid(tail) {
+		return lines
+	}
+	if len(lines) >= limit {
+		lines = lines[:limit-1]
+	}
+	out := make([][]byte, 0, len(lines)+1)
+	out = append(out, append([]byte(nil), tail...))
+	out = append(out, lines...)
+	return out
 }
 
 func newestCompatibleLZ4Pair(peers []lz4PeerRecord, globals []lz4GlobalRecord) (lz4Pair, bool) {

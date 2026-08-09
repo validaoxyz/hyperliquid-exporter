@@ -1,5 +1,11 @@
 # Changelog
 
+## [v4.0.1] - 2026-08-09
+
+### Fixed
+
+- Fixed temporary `tcp_lz4` source-health errors at UTC day rollover when `hl-node` writes a complete final JSON record without a trailing newline.
+
 ## [v4.0.0] - 2026-08-09
 
 ### Breaking
