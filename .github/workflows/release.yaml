@@ -62,7 +62,7 @@ jobs:
               OUTPUT_NAME+=".exe"
             fi
             echo "Building $OUTPUT_NAME..."
-            GOOS=$OS GOARCH=$ARCH CGO_ENABLED=0 go build \
+            GOOS="$OS" GOARCH="$ARCH" CGO_ENABLED=0 go build \
               -trimpath \
               -ldflags "-X github.com/validaoxyz/hyperliquid-exporter/internal/metrics.BuildVersion=${GITHUB_REF_NAME} -X github.com/validaoxyz/hyperliquid-exporter/internal/metrics.BuildCommit=${GITHUB_SHA:0:7}" \
               -o bin/${OUTPUT_NAME} ./cmd/hl-exporter
@@ -72,14 +72,15 @@ jobs:
         run: |
           cd bin
           # Keep raw binaries for automated fleet installs and add archives for manual downloads.
-          for file in *; do
-            if [[ $file == *.exe ]]; then
-              zip "${file%.*}.zip" "$file"
+          for file in ./*; do
+            base=${file#./}
+            if [[ $base == *.exe ]]; then
+              zip "${base%.*}.zip" "$base"
             else
-              tar -czf "$file.tar.gz" "$file"
+              tar -czf "$base.tar.gz" "$base"
             fi
           done
-          sha256sum * > SHA256SUMS
+          sha256sum ./* > SHA256SUMS
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
