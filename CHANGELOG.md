@@ -1,5 +1,11 @@
 # Changelog
 
+## [v4.0.6] - 2026-08-09
+
+### Fixed
+
+- Accept an alternate no-quorum gossip-close payload format alongside the existing structure.
+
 ## [v4.0.5] - 2026-08-09
 
 ### Fixed

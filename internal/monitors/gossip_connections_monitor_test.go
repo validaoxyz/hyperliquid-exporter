@@ -41,6 +41,11 @@ func TestParseGossipConnectionLine_KnownEvents(t *testing.T) {
 			"got_tcp_greeting",
 		},
 		{
+			"no quorum current testnet string array",
+			`["2026-08-09T08:18:55",["closing gossip stream because no quorum yet","waiting",[]]]`,
+			"closing_gossip_stream_no_quorum_yet",
+		},
+		{
 			"sending evm kvs current mainnet object-only",
 			`["2026-08-09T03:00:03",["sending evm kvs",{"Ip":"203.0.113.3"}]]`,
 			"sending_evm_kvs",
@@ -204,6 +209,11 @@ func TestParseGossipConnectionLine_ExactMatchingAndPayloadShape(t *testing.T) {
 	}
 	for _, line := range []string{
 		`["2026-08-08T03:00:03",["finished checks",{"Ip":"192.0.2.1"}]]`,
+		`["2026-08-09T08:18:55",["closing gossip stream because no quorum yet","",[]]]`,
+		`["2026-08-09T08:18:55",["closing gossip stream because no quorum yet","  ",[]]]`,
+		`["2026-08-09T08:18:55",["closing gossip stream because no quorum yet",null,[]]]`,
+		`["2026-08-09T08:18:55",["closing gossip stream because no quorum yet","waiting",{}]]`,
+		`["2026-08-09T08:18:55",["closing gossip stream because no quorum yet","waiting",null]]`,
 		`["2026-08-09T03:00:03",["sending evm kvs",{}]]`,
 		`["2026-08-09T03:00:03",["marking node_ip as verified",{"Ip":"192.0.2.1","extra":true}]]`,
 		`["2026-08-09T03:00:03",["closing gossip stream because peer is already connected",{"Ip":"192.0.2.1","extra":true}]]`,

@@ -203,8 +203,12 @@ func validKnownGossipPayload(tag string, inner []json.RawMessage) bool {
 		}
 		var endpoint, stream string
 		return unmarshalRequiredJSON(inner[1], &endpoint) == nil && unmarshalRequiredJSON(inner[2], &stream) == nil
-	case "closing gossip stream because no quorum yet", "finished checks", "sending abci_state",
-		"successfully sent abci_state":
+	case "closing gossip stream because no quorum yet":
+		// The post-2026-08-09 testnet build emits a nonempty string plus an
+		// array, while retained generations use the IP-object/bool form. The
+		// payload is validation-only and never becomes metric identity.
+		return validGossipIPFlagPayload(inner, false) || validGossipStringArrayPayload(inner)
+	case "finished checks", "sending abci_state", "successfully sent abci_state":
 		return validGossipIPFlagPayload(inner, false)
 	case "dropping connection after sending abci state":
 		// Current mainnet can use a short string in the third field while
@@ -272,6 +276,14 @@ func validGossipIPBoolOrStringPayload(inner []json.RawMessage) bool {
 	}
 	var detail string
 	return unmarshalRequiredJSON(inner[2], &detail) == nil && strings.TrimSpace(detail) != ""
+}
+
+func validGossipStringArrayPayload(inner []json.RawMessage) bool {
+	if len(inner) != 3 || !rawJSONArray(inner[2]) {
+		return false
+	}
+	var detail string
+	return unmarshalRequiredJSON(inner[1], &detail) == nil && strings.TrimSpace(detail) != ""
 }
 
 func rawExactIPObject(raw json.RawMessage) bool {
