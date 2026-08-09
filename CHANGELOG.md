@@ -2,48 +2,7 @@
 
 ## [v4.0.6] - 2026-08-09
 
-### Fixed
-
-- Accept an alternate no-quorum gossip-close payload format alongside the existing structure.
-
-## [v4.0.5] - 2026-08-09
-
-### Fixed
-
-- Avoid a false critical-message schema error during exporter startup while the paired daily projection is loading.
-
-## [v4.0.4] - 2026-08-09
-
-### Changed
-
-- Publish Linux amd64 and arm64 release builds only.
-
-### Fixed
-
-- Accept the current `dropping connection after sending abci state` payload shape while retaining the historical boolean form.
-
-## [v4.0.3] - 2026-08-09
-
-### Changed
-
-- Refreshed Go, OpenTelemetry, gRPC, and Prometheus dependencies. Source builds now require Go 1.25.12 or newer.
-- Expanded release checks to cover tests, race checks, vet, vulnerability scanning, generated docs, and alert fixtures.
-- Preserved existing Prometheus metric names, labels, and units.
-- Fixed Docker target architecture selection, pinned base images, and added a Linux arm64 release asset.
-
-## [v4.0.2] - 2026-08-09
-
-### Fixed
-
-- Accepted the tagged-object `Tc` round-advance reason emitted by current `hl-node` builds.
-
-## [v4.0.1] - 2026-08-09
-
-### Fixed
-
-- Fixed temporary `tcp_lz4` source-health errors at UTC day rollover when `hl-node` writes a complete final JSON record without a trailing newline.
-
-## [v4.0.0] - 2026-08-09
+This is the canonical v4 release.
 
 ### Breaking
 
@@ -51,7 +10,21 @@
 - Added explicit source presence, read, schema, and freshness reporting.
 - Metric renames and removals require migration; see [UPGRADING.md](UPGRADING.md).
 
-> Entries below describe the behavior of their dated releases. Current metric semantics and migrations are defined by the v4.0.0 section, [UPGRADING.md](UPGRADING.md), and the generated [metrics reference](docs/metrics.md).
+### Changed
+
+- Refreshed Go, OpenTelemetry, gRPC, and Prometheus dependencies. Source builds now require Go 1.25.12 or newer.
+- Expanded release checks to cover tests, race checks, vet, vulnerability scanning, generated docs, and alert fixtures.
+- Fixed Docker target architecture selection, pinned base images, and added a Linux arm64 release asset.
+- Published Linux amd64 and arm64 release builds only.
+
+### Fixed
+
+- Handle `tcp_lz4` UTC-day rollover when a complete final record has no trailing newline.
+- Accepted the tagged-object `Tc` round-advance reason emitted by current `hl-node` builds.
+- Accept current and historical observed gossip payload variants for connection drops and no-quorum closes.
+- Avoid a false critical-message schema error during startup while the paired daily projection is loading.
+
+> Entries below describe earlier major releases. Current metric semantics and migrations are defined by the v4.0.6 section, [UPGRADING.md](UPGRADING.md), and the generated [metrics reference](docs/metrics.md).
 
 ## [v3.1.0] - 2026-07-04
 

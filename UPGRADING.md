@@ -1,6 +1,6 @@
 # Upgrading Hyperliquid Exporter
 
-## Upgrading to v4.0.0
+## Upgrading to v4.0.6
 
 This release is breaking. It removes unproven dimensions and dead families, adds explicit source health, and renames several metrics whose old names asserted more than the source proves. Audit dashboards, alerts, recording rules, and remote-write consumers before rollout.
 
