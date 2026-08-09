@@ -65,7 +65,7 @@ jobs:
             GOOS="$OS" GOARCH="$ARCH" CGO_ENABLED=0 go build \
               -trimpath \
               -ldflags "-X github.com/validaoxyz/hyperliquid-exporter/internal/metrics.BuildVersion=${GITHUB_REF_NAME} -X github.com/validaoxyz/hyperliquid-exporter/internal/metrics.BuildCommit=${GITHUB_SHA:0:7}" \
-              -o bin/${OUTPUT_NAME} ./cmd/hl-exporter
+              -o "bin/${OUTPUT_NAME}" ./cmd/hl-exporter
           done
 
       - name: Compress binaries
