@@ -1,5 +1,11 @@
 # Changelog
 
+## [v4.0.4] - 2026-08-09
+
+### Fixed
+
+- Accept the current `dropping connection after sending abci state` payload shape while retaining the historical boolean form.
+
 ## [v4.0.3] - 2026-08-09
 
 ### Changed
