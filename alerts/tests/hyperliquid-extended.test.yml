@@ -20,8 +20,8 @@ tests:
               job: hyperliquid-exporter
               instance: node-a
             exp_annotations:
-              summary: "Retained Hyperliquid tmp material is stale"
-              description: "A complete tmp scan has reported non-receipt material bytes older than 24 hours for 15 minutes."
+              summary: "Retained Hyperliquid tmp material is stale on node-a"
+              description: "node-a has reported 4096 non-receipt tmp bytes older than 24 hours for 15 minutes after a complete scan."
 
   - name: HyperliquidTmpMaterialStale nonfiring
     interval: 1m

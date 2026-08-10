@@ -85,7 +85,7 @@ var approvedRuleContracts = map[string]map[string]ruleContract{
 	},
 	"hyperliquid-extended.rules.yml": {
 		"HyperliquidTmpMaterialStale": {
-			expr:        `(hl_node_tmp_scan_up == 1) and (hl_node_tmp_material_stale_bytes > 0)`,
+			expr:        `(hl_node_tmp_material_stale_bytes > 0) and on(job, instance) (hl_node_tmp_scan_up == 1)`,
 			forDuration: "15m",
 			severity:    "warning",
 		},
