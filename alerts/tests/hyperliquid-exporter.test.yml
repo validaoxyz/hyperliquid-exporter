@@ -161,8 +161,8 @@ tests:
               instance: node-a
               monitor: disk
             exp_annotations:
-              summary: "Hyperliquid exporter error reports were dropped"
-              description: "The exporter recorded at least one dropped monitor error report in the last 10 minutes."
+              summary: "Hyperliquid exporter dropped error reports on node-a"
+              description: "node-a dropped 1 error report(s) from monitor disk in 10 minutes. This is diagnostic; node-down and exporter-down alerts remain separate."
 
   - name: HyperliquidExporterErrorReportsDropped nonfiring reset and absent
     interval: 1m
@@ -180,19 +180,19 @@ tests:
     interval: 1m
     input_series:
       - series: 'hl_exporter_source_enabled{job="hyperliquid-exporter",instance="read-failed",source="block_fast"}'
-        values: '1 1 1 1 1 1 1'
+        values: '1x12'
       - series: 'hl_exporter_source_read_ok{job="hyperliquid-exporter",instance="read-failed",source="block_fast"}'
-        values: '0 0 0 0 0 0 0'
+        values: '0x12'
       - series: 'hl_exporter_source_schema_ok{job="hyperliquid-exporter",instance="read-failed",source="block_fast"}'
-        values: '1 1 1 1 1 1 1'
+        values: '1x12'
       - series: 'hl_exporter_source_enabled{job="hyperliquid-exporter",instance="schema-failed",source="evm_stream"}'
-        values: '1 1 1 1 1 1 1'
+        values: '1x12'
       - series: 'hl_exporter_source_read_ok{job="hyperliquid-exporter",instance="schema-failed",source="evm_stream"}'
-        values: '1 1 1 1 1 1 1'
+        values: '1x12'
       - series: 'hl_exporter_source_schema_ok{job="hyperliquid-exporter",instance="schema-failed",source="evm_stream"}'
-        values: '0 0 0 0 0 0 0'
+        values: '0x12'
     alert_rule_test:
-      - eval_time: 6m
+      - eval_time: 11m
         alertname: HyperliquidExporterSourceReadOrSchemaFailed
         exp_alerts:
           - exp_labels:
@@ -201,16 +201,16 @@ tests:
               instance: read-failed
               source: block_fast
             exp_annotations:
-              summary: "A Hyperliquid exporter source read or schema check failed"
-              description: "An enabled source has reported a failed last read or schema outcome for 5 minutes."
+              summary: "Hyperliquid exporter source block_fast failed on read-failed"
+              description: "The enabled block_fast source on read-failed has reported a failed read or schema outcome for 10 minutes."
           - exp_labels:
               severity: warning
               job: hyperliquid-exporter
               instance: schema-failed
               source: evm_stream
             exp_annotations:
-              summary: "A Hyperliquid exporter source read or schema check failed"
-              description: "An enabled source has reported a failed last read or schema outcome for 5 minutes."
+              summary: "Hyperliquid exporter source evm_stream failed on schema-failed"
+              description: "The enabled evm_stream source on schema-failed has reported a failed read or schema outcome for 10 minutes."
 
   - name: HyperliquidExporterSourceReadOrSchemaFailed nonfiring
     interval: 1m
@@ -241,5 +241,19 @@ tests:
         values: '1 1 1 1 1 1 1'
     alert_rule_test:
       - eval_time: 6m
+        alertname: HyperliquidExporterSourceReadOrSchemaFailed
+        exp_alerts: []
+
+  - name: HyperliquidExporterSourceReadOrSchemaFailed ignores short rollover
+    interval: 1m
+    input_series:
+      - series: 'hl_exporter_source_enabled{job="hyperliquid-exporter",instance="daily-rollover",source="tcp_lz4"}'
+        values: '1x12'
+      - series: 'hl_exporter_source_read_ok{job="hyperliquid-exporter",instance="daily-rollover",source="tcp_lz4"}'
+        values: '1x12'
+      - series: 'hl_exporter_source_schema_ok{job="hyperliquid-exporter",instance="daily-rollover",source="tcp_lz4"}'
+        values: '0 0 0 0 0 0 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 11m
         alertname: HyperliquidExporterSourceReadOrSchemaFailed
         exp_alerts: []

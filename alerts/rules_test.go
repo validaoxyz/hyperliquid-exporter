@@ -67,7 +67,7 @@ var approvedRuleContracts = map[string]map[string]ruleContract{
 		},
 		"HyperliquidExporterSourceReadOrSchemaFailed": {
 			expr:        `(hl_exporter_source_enabled == 1) and on(job, instance, source) ( (hl_exporter_source_read_ok == 0) or (hl_exporter_source_schema_ok == 0) )`,
-			forDuration: "5m",
+			forDuration: "10m",
 			severity:    "warning",
 		},
 	},
@@ -85,7 +85,7 @@ var approvedRuleContracts = map[string]map[string]ruleContract{
 	},
 	"hyperliquid-extended.rules.yml": {
 		"HyperliquidTmpMaterialStale": {
-			expr:        `(hl_node_tmp_material_stale_bytes > 0) and on(job, instance) (hl_node_tmp_scan_up == 1)`,
+			expr:        `(hl_node_tmp_material_stale_bytes >= 67108864) and on(job, instance) (hl_node_tmp_scan_up == 1)`,
 			forDuration: "15m",
 			severity:    "warning",
 		},

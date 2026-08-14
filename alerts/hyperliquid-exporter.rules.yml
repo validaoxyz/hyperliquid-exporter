@@ -52,8 +52,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Hyperliquid exporter error reports were dropped"
-          description: "The exporter recorded at least one dropped monitor error report in the last 10 minutes."
+          summary: "Hyperliquid exporter dropped error reports on {{ $labels.instance }}"
+          description: "{{ $labels.instance }} dropped {{ $value }} error report(s) from monitor {{ $labels.monitor }} in 10 minutes. This is diagnostic; node-down and exporter-down alerts remain separate."
 
       - alert: HyperliquidExporterSourceReadOrSchemaFailed
         expr: |
@@ -64,9 +64,9 @@ groups:
               or
             (hl_exporter_source_schema_ok == 0)
           )
-        for: 5m
+        for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "A Hyperliquid exporter source read or schema check failed"
-          description: "An enabled source has reported a failed last read or schema outcome for 5 minutes."
+          summary: "Hyperliquid exporter source {{ $labels.source }} failed on {{ $labels.instance }}"
+          description: "The enabled {{ $labels.source }} source on {{ $labels.instance }} has reported a failed read or schema outcome for 10 minutes."

@@ -10,7 +10,7 @@ tests:
       - series: 'hl_node_tmp_scan_up{job="hyperliquid-exporter",instance="node-a"}'
         values: '1x16'
       - series: 'hl_node_tmp_material_stale_bytes{job="hyperliquid-exporter",instance="node-a"}'
-        values: '4096x16'
+        values: '67108864x16'
     alert_rule_test:
       - eval_time: 16m
         alertname: HyperliquidTmpMaterialStale
@@ -20,8 +20,8 @@ tests:
               job: hyperliquid-exporter
               instance: node-a
             exp_annotations:
-              summary: "Retained Hyperliquid tmp material is stale on node-a"
-              description: "node-a has reported 4096 non-receipt tmp bytes older than 24 hours for 15 minutes after a complete scan."
+              summary: "Hyperliquid tmp data is accumulating on node-a"
+              description: "node-a has reported 64MiB of non-receipt tmp data older than 24 hours for 15 minutes after a complete scan (64 MiB threshold)."
 
   - name: HyperliquidTmpMaterialStale nonfiring
     interval: 1m
@@ -29,15 +29,15 @@ tests:
       - series: 'hl_node_tmp_scan_up{job="hyperliquid-exporter",instance="scan-failed"}'
         values: '0x16'
       - series: 'hl_node_tmp_material_stale_bytes{job="hyperliquid-exporter",instance="scan-failed"}'
-        values: '4096x16'
-      - series: 'hl_node_tmp_scan_up{job="hyperliquid-exporter",instance="material-zero"}'
+        values: '67108864x16'
+      - series: 'hl_node_tmp_scan_up{job="hyperliquid-exporter",instance="tiny-leftover"}'
         values: '1x16'
-      - series: 'hl_node_tmp_material_stale_bytes{job="hyperliquid-exporter",instance="material-zero"}'
-        values: '0x16'
+      - series: 'hl_node_tmp_material_stale_bytes{job="hyperliquid-exporter",instance="tiny-leftover"}'
+        values: '63x16'
       - series: 'hl_node_tmp_scan_up{job="hyperliquid-exporter",instance="short"}'
         values: '1x16'
       - series: 'hl_node_tmp_material_stale_bytes{job="hyperliquid-exporter",instance="short"}'
-        values: '0 0 0 0 0 0 0 0 0 0 4096 4096 4096 4096 4096 4096 4096'
+        values: '0 0 0 0 0 0 0 0 0 0 67108864 67108864 67108864 67108864 67108864 67108864 67108864'
     alert_rule_test:
       - eval_time: 16m
         alertname: HyperliquidTmpMaterialStale

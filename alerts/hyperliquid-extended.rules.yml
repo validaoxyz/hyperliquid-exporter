@@ -3,12 +3,12 @@ groups:
     rules:
       - alert: HyperliquidTmpMaterialStale
         expr: |
-          (hl_node_tmp_material_stale_bytes > 0)
+          (hl_node_tmp_material_stale_bytes >= 67108864)
             and on(job, instance)
           (hl_node_tmp_scan_up == 1)
         for: 15m
         labels:
           severity: warning
         annotations:
-          summary: "Retained Hyperliquid tmp material is stale on {{ $labels.instance }}"
-          description: "{{ $labels.instance }} has reported {{ $value }} non-receipt tmp bytes older than 24 hours for 15 minutes after a complete scan."
+          summary: "Hyperliquid tmp data is accumulating on {{ $labels.instance }}"
+          description: "{{ $labels.instance }} has reported {{ humanize1024 $value }}B of non-receipt tmp data older than 24 hours for 15 minutes after a complete scan (64 MiB threshold)."
