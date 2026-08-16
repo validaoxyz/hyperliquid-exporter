@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1.25.12-alpine3.23@sha256:cc985ef6f9c3bf9ece7488129c9abe0a150388ccdfa428d886fc709dca0b230a AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.6-alpine3.23@sha256:e57c41c1d5864341031181b0db34b9a537bb5773eb6428e4e5bdaea0f9135406 AS builder
 ARG VERSION=docker
 ARG GIT_COMMIT=unknown
 ARG TARGETOS
