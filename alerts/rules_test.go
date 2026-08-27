@@ -70,6 +70,10 @@ var approvedRuleContracts = map[string]map[string]ruleContract{
 			forDuration: "10m",
 			severity:    "warning",
 		},
+		"HyperliquidUnknownActionTypeObserved": {
+			expr:     `( sum by(job, instance) ( increase(hl_replica_signed_actions_total{action_type="other"}[10m]) ) > 0 ) or ( sum by(job, instance) ( increase(hl_mempool_txs_signed_actions_total{type="other"}[10m]) ) > 0 )`,
+			severity: "warning",
+		},
 	},
 	"hyperliquid-linux.rules.yml": {
 		"HyperliquidNodeProcessDown": {
@@ -275,6 +279,7 @@ func TestPromtoolFixturesCoverEveryRule(t *testing.T) {
 	for _, alertName := range []string{
 		"HyperliquidExporterMonitorPanicked",
 		"HyperliquidExporterErrorReportsDropped",
+		"HyperliquidUnknownActionTypeObserved",
 		"HyperliquidEVMTxReceiptCountMismatch",
 		"HyperliquidEVMParseErrors",
 	} {

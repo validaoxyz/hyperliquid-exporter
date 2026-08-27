@@ -1,5 +1,40 @@
 # Upgrading Hyperliquid Exporter
 
+## Unreleased action-vocabulary update
+
+### Testnet action-type boundary
+
+Before this update, the Testnet v4.0.6 exporter classified the official
+`outcomeDeploy` and `trailingStop` action types as `other`. The installed binary
+identified itself as commit `d078382` with SHA-256
+`bd6b621495a02d50945c888edd67a4c8f47eb9f7b9eeccdc3490b6e68c6a37ce`.
+At 2026-08-27 12:49 UTC, both the replica `other` counter and its paired
+`unknown_action` counter were `1,138`, up from `32` on 2026-08-24. They reached
+`1,258` by 15:38 UTC, when Prometheus reported an increase of about `3.03` over
+the preceding ten minutes. Bounded raw samples contained `outcomeDeploy` and
+`trailingStop`, but the aggregate cannot prove the composition of all
+historical actions.
+
+Keep both values as dated pre-upgrade snapshots tied to that binary. Immediately
+before rollout, record the then-current `other` and `unknown_action` values with
+the capture time as the final pre-upgrade boundary. Do not compare that absolute
+value with the post-upgrade `other` counter. This update gives `outcomeDeploy`
+and `trailingStop` their own series, and exporter restarts reset the process-local
+counters. Start a new comparison boundary after deployment.
+`HyperliquidUnknownActionTypeObserved` uses ten-minute counter increases, so it
+alerts only on new `other` observations from the replica or split-client mempool
+paths.
+
+Roll out the classifier before loading the alert rule. Confirm that new
+`outcomeDeploy` and `trailingStop` observations reach their named series, then
+load the rule and establish the post-upgrade boundary. Loading the rule while
+the old binary is still classifying these official actions as `other` will
+produce an expected warning.
+
+The two regression files named `*.constructed.*` are minimal raw stream
+envelopes, not captured chain records. They test top-level action classification
+only and make no claim about either action's payload schema.
+
 ## Upgrading to v4.0.6
 
 This release is breaking. It removes unproven dimensions and dead families, adds explicit source health, and renames several metrics whose old names asserted more than the source proves. Audit dashboards, alerts, recording rules, and remote-write consumers before rollout.

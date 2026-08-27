@@ -2,6 +2,7 @@ package replica
 
 import (
 	"encoding/json"
+	"os"
 	"reflect"
 	"testing"
 )
@@ -115,6 +116,28 @@ func TestExtractMetricsBoundsActionsOperationsAndMultiSigInner(t *testing.T) {
 	}
 	if got.MultiSigInner["governance"] != 1 || got.MultiSigInner["other"] != 1 || got.ParserEvents["unknown_multisig_inner"] != 1 {
 		t.Fatalf("multisig inner handling = inner:%#v parser:%#v", got.MultiSigInner, got.ParserEvents)
+	}
+}
+
+func TestExtractMetricsClassifiesConstructedTestnetNewActionTypes(t *testing.T) {
+	body, err := os.ReadFile("testdata/testnet_new_action_types.constructed.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, block := parseReplicaFixture(t, string(body))
+	defer p.ReturnBlock(block)
+	got, err := p.ExtractMetrics(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ActionCounts["outcomeDeploy"] != 1 || got.OperationCounts["outcomeDeploy"] != 1 {
+		t.Fatalf("outcomeDeploy metrics = actions:%d operations:%d", got.ActionCounts["outcomeDeploy"], got.OperationCounts["outcomeDeploy"])
+	}
+	if got.ActionCounts["trailingStop"] != 1 || got.OperationCounts["trailingStop"] != 1 {
+		t.Fatalf("trailingStop metrics = actions:%d operations:%d", got.ActionCounts["trailingStop"], got.OperationCounts["trailingStop"])
+	}
+	if got.ActionCounts["other"] != 0 || got.ParserEvents["unknown_action"] != 0 {
+		t.Fatalf("new official actions remained unknown: actions=%#v parser=%#v", got.ActionCounts, got.ParserEvents)
 	}
 }
 

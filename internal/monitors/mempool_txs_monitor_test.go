@@ -61,6 +61,26 @@ func TestParseMempoolTxsLine(t *testing.T) {
 	}
 }
 
+func TestParseMempoolTxsClassifiesConstructedTestnetNewActionTypes(t *testing.T) {
+	line, err := os.ReadFile("testdata/testnet_new_action_types.constructed.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, reason, ok := parseMempoolTxsLineDetailed(line)
+	if !ok || reason != "" {
+		t.Fatalf("parse = ok:%v reason:%q", ok, reason)
+	}
+	if stats.actionCounts["outcomeDeploy"] != 1 || stats.operationCounts["outcomeDeploy"] != 1 {
+		t.Fatalf("outcomeDeploy metrics = actions:%d operations:%d", stats.actionCounts["outcomeDeploy"], stats.operationCounts["outcomeDeploy"])
+	}
+	if stats.actionCounts["trailingStop"] != 1 || stats.operationCounts["trailingStop"] != 1 {
+		t.Fatalf("trailingStop metrics = actions:%d operations:%d", stats.actionCounts["trailingStop"], stats.operationCounts["trailingStop"])
+	}
+	if stats.actionCounts["other"] != 0 || stats.parserEvents["unknown_action"] != 0 {
+		t.Fatalf("new official actions remained unknown: actions=%#v parser=%#v", stats.actionCounts, stats.parserEvents)
+	}
+}
+
 func TestReadMempoolTxsEventsDoesNotConsumePartialLine(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mempool_txs")

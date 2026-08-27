@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Alert on new replica or split-client mempool actions that fall into the closed `other` bucket.
+- Cover the official Testnet `outcomeDeploy` and `trailingStop` types with constructed raw replica and mempool fixtures.
+
+### Changed
+
+- Classify `outcomeDeploy` as deployment and `trailingStop` as trading instead of unknown actions.
+
 ## [v4.0.6] - 2026-08-09
 
 This is the canonical v4 release.

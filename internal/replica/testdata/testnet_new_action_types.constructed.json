@@ -1,0 +1,20 @@
+{
+  "height": 669280816,
+  "abci_block": {
+    "time": "2026-08-27T12:49:00Z",
+    "round": 669280900,
+    "parent_round": 669280899,
+    "proposer": "constructed-fixture",
+    "signed_action_bundles": [
+      [
+        "constructed-bundle",
+        {
+          "signed_actions": [
+            {"action": {"type": "outcomeDeploy"}},
+            {"action": {"type": "trailingStop"}}
+          ]
+        }
+      ]
+    ]
+  }
+}

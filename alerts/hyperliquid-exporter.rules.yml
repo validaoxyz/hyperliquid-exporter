@@ -70,3 +70,22 @@ groups:
         annotations:
           summary: "Hyperliquid exporter source {{ $labels.source }} failed on {{ $labels.instance }}"
           description: "The enabled {{ $labels.source }} source on {{ $labels.instance }} has reported a failed read or schema outcome for 10 minutes."
+
+      - alert: HyperliquidUnknownActionTypeObserved
+        expr: |
+          (
+            sum by(job, instance) (
+              increase(hl_replica_signed_actions_total{action_type="other"}[10m])
+            ) > 0
+          )
+            or
+          (
+            sum by(job, instance) (
+              increase(hl_mempool_txs_signed_actions_total{type="other"}[10m])
+            ) > 0
+          )
+        labels:
+          severity: warning
+        annotations:
+          summary: "Hyperliquid exporter observed an unknown action type on {{ $labels.instance }}"
+          description: "At least one replica or split-client mempool action was classified as other in the last 10 minutes. Inspect a bounded raw record before updating the closed action vocabulary."

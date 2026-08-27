@@ -244,6 +244,46 @@ tests:
         alertname: HyperliquidExporterSourceReadOrSchemaFailed
         exp_alerts: []
 
+  - name: HyperliquidUnknownActionTypeObserved firing
+    interval: 1m
+    input_series:
+      - series: 'hl_replica_signed_actions_total{job="hyperliquid-exporter",instance="replica",action_type="other"}'
+        values: '0 0 1 1 1 1'
+      - series: 'hl_mempool_txs_signed_actions_total{job="hyperliquid-exporter",instance="mempool",type="other"}'
+        values: '0 0 0 1 1 1'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HyperliquidUnknownActionTypeObserved
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: hyperliquid-exporter
+              instance: replica
+            exp_annotations:
+              summary: "Hyperliquid exporter observed an unknown action type on replica"
+              description: "At least one replica or split-client mempool action was classified as other in the last 10 minutes. Inspect a bounded raw record before updating the closed action vocabulary."
+          - exp_labels:
+              severity: warning
+              job: hyperliquid-exporter
+              instance: mempool
+            exp_annotations:
+              summary: "Hyperliquid exporter observed an unknown action type on mempool"
+              description: "At least one replica or split-client mempool action was classified as other in the last 10 minutes. Inspect a bounded raw record before updating the closed action vocabulary."
+
+  - name: HyperliquidUnknownActionTypeObserved nonfiring reset and absent
+    interval: 1m
+    input_series:
+      - series: 'hl_replica_signed_actions_total{job="hyperliquid-exporter",instance="flat",action_type="other"}'
+        values: '3 3 3 3 3 3'
+      - series: 'hl_replica_signed_actions_total{job="hyperliquid-exporter",instance="reset-replica",action_type="other"}'
+        values: '9 9 0 0 0 0'
+      - series: 'hl_mempool_txs_signed_actions_total{job="hyperliquid-exporter",instance="reset-mempool",type="other"}'
+        values: '7 7 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HyperliquidUnknownActionTypeObserved
+        exp_alerts: []
+
   - name: HyperliquidExporterSourceReadOrSchemaFailed ignores short rollover
     interval: 1m
     input_series:

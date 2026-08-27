@@ -14,7 +14,7 @@ var known = map[string]struct{}{
 	"perpDeploy": {}, "scheduleCancel": {}, "sendAsset": {}, "sendToEvmWithData": {},
 	"setReferrer": {}, "SetGlobalAction": {}, "spotDeploy": {}, "spotSend": {},
 	"subAccountSpotTransfer": {}, "subAccountTransfer": {}, "tokenDelegate": {},
-	"twapCancel": {}, "twapOrder": {}, "updateIsolatedMargin": {}, "updateLeverage": {},
+	"trailingStop": {}, "twapCancel": {}, "twapOrder": {}, "updateIsolatedMargin": {}, "updateLeverage": {},
 	"usdClassTransfer": {}, "usdSend": {}, "userSetAbstraction": {}, "userDexAbstraction": {},
 	"ValidatorSignWithdrawalAction": {}, "vaultTransfer": {},
 	"VoteEthFinalizedWithdrawalAction": {}, "voteAppHash": {}, "withdraw3": {},
@@ -23,7 +23,7 @@ var known = map[string]struct{}{
 	"activateOutcomeDeployer": {}, "authorizeAqav2Role": {}, "CSignerAction": {},
 	"CValidatorAction": {}, "deployerSendToEvmForFrozenUser": {}, "gossipPriorityBid": {},
 	"hip3LiquidatorTransfer": {}, "l1ValidatorVoteBridgeDeposit": {}, "liquidate": {},
-	"reassessFees": {}, "stakingLinkDisableTradingUser": {}, "startFeeTrial": {},
+	"outcomeDeploy": {}, "reassessFees": {}, "stakingLinkDisableTradingUser": {}, "startFeeTrial": {},
 	"userOutcome": {}, "userPortfolioMargin": {}, "validatorL1Stream": {},
 	"validatorL1UpdateReferenceOracle": {}, "validatorL1Vote": {}, "voteL1Hash": {},
 
@@ -47,7 +47,7 @@ func Normalize(raw string) (string, bool) {
 // Category maps a normalized action to a small, stable operational category.
 func Category(action string) string {
 	switch action {
-	case "order", "twapOrder", "twapCancel", "cancel", "cancelByCloid",
+	case "order", "trailingStop", "twapOrder", "twapCancel", "cancel", "cancelByCloid",
 		"batchModify", "modify", "scheduleCancel", "liquidate":
 		return "trading"
 	case "usdClassTransfer", "usdSend", "spotSend", "sendAsset", "agentSendAsset", "sendToEvmWithData",
@@ -73,7 +73,7 @@ func Category(action string) string {
 		return "rewards"
 	case "evmRawTx", "evmUserModify", "evmUserSpotTransfer", "finalizeEvmContract":
 		return "evm"
-	case "perpDeploy", "spotDeploy", "activateOutcomeDeployer",
+	case "perpDeploy", "spotDeploy", "activateOutcomeDeployer", "outcomeDeploy",
 		"deployerSendToEvmForFrozenUser", "startFeeTrial", "reassessFees":
 		return "deployment"
 	case "borrowLend", "userOutcome", "hip3LiquidatorTransfer":
