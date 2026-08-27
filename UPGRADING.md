@@ -1,39 +1,38 @@
 # Upgrading Hyperliquid Exporter
 
-## Unreleased action-vocabulary update
+## Upgrading to v4.0.7
 
 ### Testnet action-type boundary
 
-Before this update, the Testnet v4.0.6 exporter classified the official
-`outcomeDeploy` and `trailingStop` action types as `other`. The installed binary
-identified itself as commit `d078382` with SHA-256
-`bd6b621495a02d50945c888edd67a4c8f47eb9f7b9eeccdc3490b6e68c6a37ce`.
-At 2026-08-27 12:49 UTC, both the replica `other` counter and its paired
-`unknown_action` counter were `1,138`, up from `32` on 2026-08-24. They reached
-`1,258` by 15:38 UTC, when Prometheus reported an increase of about `3.03` over
-the preceding ten minutes. Bounded raw samples contained `outcomeDeploy` and
-`trailingStop`, but the aggregate cannot prove the composition of all
-historical actions.
+Before v4.0.7, the Testnet `v4.0.6` exporter (commit `d078382`, SHA-256
+`bd6b621495a02d50945c888edd67a4c8f47eb9f7b9eeccdc3490b6e68c6a37ce`)
+classified the official `outcomeDeploy` and `trailingStop` action types as
+`other`.
 
-Keep both values as dated pre-upgrade snapshots tied to that binary. Immediately
-before rollout, record the then-current `other` and `unknown_action` values with
-the capture time as the final pre-upgrade boundary. Do not compare that absolute
-value with the post-upgrade `other` counter. This update gives `outcomeDeploy`
-and `trailingStop` their own series, and exporter restarts reset the process-local
-counters. Start a new comparison boundary after deployment.
-`HyperliquidUnknownActionTypeObserved` uses ten-minute counter increases, so it
-alerts only on new `other` observations from the replica or split-client mempool
-paths.
+Historical snapshots for both the replica `other` counter and paired
+`unknown_action` counter:
 
-Roll out the classifier before loading the alert rule. Confirm that new
-`outcomeDeploy` and `trailingStop` observations reach their named series, then
-load the rule and establish the post-upgrade boundary. Loading the rule while
-the old binary is still classifying these official actions as `other` will
-produce an expected warning.
+- **2026-08-27 12:49 UTC:** `1,138`
+- **2026-08-27 15:38 UTC:** `1,258` (approximate ten-minute increase: `3.03`)
+- **2026-08-27 16:11:48 UTC (final pre-upgrade snapshot):** `1,262`
 
-The two regression files named `*.constructed.*` are minimal raw stream
-envelopes, not captured chain records. They test top-level action classification
-only and make no claim about either action's payload schema.
+Although bounded raw samples contained `outcomeDeploy` and `trailingStop`, the
+historical aggregate composition remains unproven.
+
+### Upgrade considerations
+
+- **Do not compare absolute pre- and post-upgrade values:** Process restarts
+  reset process-local counters, and v4.0.7 moves `outcomeDeploy` and
+  `trailingStop` into their own named series. Establish a new measurement
+  boundary post-deployment.
+- **Deployment order:** Deploy the classifier before loading the
+  `HyperliquidUnknownActionTypeObserved` alert rule, which evaluates ten-minute
+  increases from the replica and split-client mempool paths. Verify that new
+  `outcomeDeploy` and `trailingStop` events route to their dedicated series
+  before activating the rule to prevent false alerts.
+- **Test fixtures:** Files matching `*.constructed.*` are constructed envelopes
+  that validate top-level classification only; they do not validate action
+  payload schemas.
 
 ## Upgrading to v4.0.6
 
