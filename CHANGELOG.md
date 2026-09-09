@@ -1,10 +1,10 @@
 # Changelog
 
-## [Unreleased]
+## [v4.1.0] - 2026-09-10
 
 ### Changed
 
-- Binary version/update probes and their `hl_software_version` and `hl_software_up_to_date` metrics now require `--binary-metrics`. They are disabled by default. Opting in permits local and downloaded binary execution; existing binary paths and skip flags still apply. See [UPGRADING.md](UPGRADING.md#unreleased).
+- Binary version/update probes and their `hl_software_version` and `hl_software_up_to_date` metrics now require `--binary-metrics`. They are disabled by default. Opting in permits local and downloaded binary execution; existing binary paths and skip flags still apply. See [UPGRADING.md](UPGRADING.md#upgrading-to-v410).
 - The default Compose configuration mounts only node data. Optional binary metrics use an explicit directory bind containing both `hl-node` and `hl-visor`.
 - Removed unused `curl`/`wget` packages from the runtime image. HTTPS API requests retain CA certificates.
 

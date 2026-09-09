@@ -39,6 +39,10 @@ func NodeBinaryReady(cfg config.Config) (string, error) {
 }
 
 func StartVersionMonitor(ctx context.Context, cfg config.Config, errCh chan<- error) {
+	if !cfg.EnableBinaryMetrics || cfg.SkipVersionCheck {
+		metrics.RegisterSource(metrics.SourceVersion, false)
+		return
+	}
 	metrics.RegisterSource(metrics.SourceVersion, true)
 	goSafe("version", func() {
 		// run immediately on startup

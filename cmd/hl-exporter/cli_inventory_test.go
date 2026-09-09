@@ -26,8 +26,8 @@ type cliFlag struct {
 func TestStartCLIInventoryMatchesDocs(t *testing.T) {
 	fs, _ := newStartFlagSet(flag.ContinueOnError, io.Discard)
 	want := visitFlags(fs)
-	if len(want) != 23 {
-		t.Fatalf("start flags = %d, want 23", len(want))
+	if len(want) != 24 {
+		t.Fatalf("start flags = %d, want 24", len(want))
 	}
 	for _, pathMarker := range []struct {
 		path, begin, end string
@@ -74,6 +74,30 @@ func TestValsCLIInventory(t *testing.T) {
 	}
 }
 
+func TestBinaryMetricsCLIRequiresOptIn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "default"},
+		{name: "explicit opt-in", args: []string{"--binary-metrics"}, want: true},
+		{name: "explicit opt-out", args: []string{"--binary-metrics=false"}},
+		{name: "binary path alone", args: []string{"--node-binary=/configured/hl-node"}},
+		{name: "skip overrides alone", args: []string{"--skip-version-check=false", "--skip-update-check=false"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs, options := newStartFlagSet(flag.ContinueOnError, io.Discard)
+			if err := fs.Parse(tc.args); err != nil {
+				t.Fatal(err)
+			}
+			if got := *options.enableBinaryMetrics; got != tc.want {
+				t.Fatalf("binary-metrics = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestValsCLIInventoryMatchesDocs(t *testing.T) {
 	t.Setenv("NODE_HOME", "/inventory/hl")
 	fs, _ := newValsFlagSet(flag.ContinueOnError, io.Discard)
@@ -92,6 +116,7 @@ func TestValsCLIInventoryMatchesDocs(t *testing.T) {
 func TestStartCLIHelpSemanticBoundaries(t *testing.T) {
 	fs, _ := newStartFlagSet(flag.ContinueOnError, io.Discard)
 	checks := map[string][]string{
+		"binary-metrics":    {"executing local", "downloading/executing"},
 		"contract-metrics":  {"canonical recipient-address", "no contract identity"},
 		"per-peer-metrics":  {"16 current explicit child identities", "child_peers"},
 		"validator-rtt":     {"TCP-connect", "not protocol RTT"},

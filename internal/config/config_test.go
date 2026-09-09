@@ -81,6 +81,23 @@ func TestLoadConfigNodeBinaryFlagWins(t *testing.T) {
 	}
 }
 
+func TestLoadConfigBinaryMetricsRequireOptIn(t *testing.T) {
+	t.Setenv("BINARY_HOME", "/configured/bin")
+	t.Setenv("NODE_BINARY", "/configured/bin/hl-node")
+	for _, enabled := range []bool{false, true} {
+		cfg, err := LoadConfig(&Flags{Chain: "testnet", EnableBinaryMetrics: enabled})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.EnableBinaryMetrics != enabled {
+			t.Fatalf("EnableBinaryMetrics = %v, want %v", cfg.EnableBinaryMetrics, enabled)
+		}
+		if cfg.SkipVersionCheck || cfg.SkipUpdateCheck {
+			t.Fatal("binary metric opt-in changed the independent skip flags")
+		}
+	}
+}
+
 func TestLoadConfigRejectsMissingOrUnknownChain(t *testing.T) {
 	t.Setenv("HOME", "/home/operator")
 	for _, flags := range []*Flags{nil, {Chain: ""}, {Chain: "devnet"}} {

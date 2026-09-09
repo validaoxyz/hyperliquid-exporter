@@ -4,7 +4,7 @@ A Prometheus exporter with optional OTLP for the families marked `OTel bridge` i
 
 ## Install
 
-Building from source requires Go 1.25.12 or newer.
+Building from source requires Go 1.25.13 or newer.
 
 ```bash
 git clone https://github.com/validaoxyz/hyperliquid-exporter.git "$HOME/hyperliquid-exporter"

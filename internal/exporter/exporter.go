@@ -79,24 +79,7 @@ func Start(ctx context.Context, cfg config.Config) {
 		logger.InfoComponent("consensus", "Proposal monitor disabled - replica monitor will handle proposer counting")
 	}
 
-	if cfg.SkipVersionCheck {
-		metrics.RegisterSource(metrics.SourceVersion, false)
-		logger.InfoComponent("system", "Version monitor disabled by --skip-version-check")
-	} else if _, err := monitors.NodeBinaryReady(cfg); err != nil {
-		metrics.RegisterSource(metrics.SourceVersion, false)
-		logger.WarningComponent("system", "Skipping version monitor: %v (use --skip-version-check to silence)", err)
-	} else {
-		logger.InfoComponent("system", "Initializing version monitor...")
-		runMonitor("version", func() { monitors.StartVersionMonitor(monitorCtx, cfg, versionErrCh) })
-	}
-
-	if cfg.SkipUpdateCheck {
-		metrics.RegisterSource(metrics.SourceUpdate, false)
-		logger.InfoComponent("system", "Update checker disabled by --skip-update-check")
-	} else {
-		logger.InfoComponent("system", "Initializing update checker...")
-		runMonitor("update_checker", func() { monitors.StartUpdateChecker(monitorCtx, cfg, updateErrCh) })
-	}
+	startBinaryMonitors(monitorCtx, cfg, versionErrCh, updateErrCh)
 
 	if cfg.EnableEVM {
 		logger.InfoComponent("evm", "Initializing EVM monitor (using evm_block_and_receipts)...")

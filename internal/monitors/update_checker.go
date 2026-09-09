@@ -35,6 +35,10 @@ var (
 // conditional request: as long as the CDN object's ETag is unchanged we
 // skip the download entirely.
 func StartUpdateChecker(ctx context.Context, cfg config.Config, errCh chan<- error) {
+	if !cfg.EnableBinaryMetrics || cfg.SkipUpdateCheck {
+		metrics.RegisterSource(metrics.SourceUpdate, false)
+		return
+	}
 	metrics.RegisterSource(metrics.SourceUpdate, true)
 	goSafe("update_checker", func() {
 		tickSoftwareUpdate(ctx, cfg, errCh)

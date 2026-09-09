@@ -1,6 +1,6 @@
 # Upgrading Hyperliquid Exporter
 
-## Unreleased
+## Upgrading to v4.1.0
 
 Binary version and update probes are now disabled by default. Without `--binary-metrics`, the exporter does not execute local node binaries, download upstream binaries, or export `hl_software_version` and `hl_software_up_to_date`.
 

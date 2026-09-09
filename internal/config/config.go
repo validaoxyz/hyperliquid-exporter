@@ -32,6 +32,9 @@ type Config struct {
 	MetricsAddr            string
 	LogLevel               string
 	LogFormat              string
+	// EnableBinaryMetrics opts into executing local binaries and downloading
+	// and executing the upstream visor binary to collect software metrics.
+	EnableBinaryMetrics bool
 	// SkipVersionCheck disables the local hl-node --version probe. Set this
 	// when the exporter runs in a container that doesn't have the node
 	// binary on disk. Tracked in upstream issue #16.
@@ -85,6 +88,7 @@ type Flags struct {
 	MetricsAddr           string
 	LogLevel              string
 	LogFormat             string
+	EnableBinaryMetrics   bool
 	SkipVersionCheck      bool
 	SkipUpdateCheck       bool
 	ProbeInfoEndpoint     bool
@@ -219,6 +223,7 @@ func LoadConfig(flags *Flags) (Config, error) {
 		MetricsAddr:            flags.MetricsAddr,
 		LogLevel:               flags.LogLevel,
 		LogFormat:              flags.LogFormat,
+		EnableBinaryMetrics:    flags.EnableBinaryMetrics,
 		SkipVersionCheck:       flags.SkipVersionCheck,
 		SkipUpdateCheck:        flags.SkipUpdateCheck,
 		ProbeInfoEndpoint:      flags.ProbeInfoEndpoint,

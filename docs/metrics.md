@@ -31,6 +31,12 @@ For tri-state source gauges, `-1` means not attempted or not applicable. A confi
 
 The metrics listener binds `:PORT` by default, which is a wildcard network bind. Treat it as an operator trust boundary. The server uses a 5-second read-header timeout, a 30-second scrape-handler deadline, at most five concurrent scrapes, a 35-second write timeout, and a 60-second idle timeout. The scrape cap does not block `/livez` or `/readyz`.
 
+## Binary software metrics
+
+`hl_software_version` and `hl_software_up_to_date` are absent by default. Enable them with `--binary-metrics`. This permits executing the local `hl-node` and `hl-visor` binaries, plus downloading and executing the upstream `hl-visor` binary, to read their versions.
+
+With binary metrics enabled, `--skip-version-check` disables the local node version probe and `--skip-update-check` disables the visor comparison. The `version` and `update` source-health series report whether each probe is enabled. File-based visor state and process metrics do not require this flag.
+
 ## HyperCore and replica records
 
 Block-time sources can use the legacy single stream or the fast/slow pair. `state_type` appears only for the dual streams. A regressing height/time pair, malformed record, or overflowing apply duration is rejected without advancing the baseline.

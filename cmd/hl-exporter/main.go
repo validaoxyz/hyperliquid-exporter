@@ -34,6 +34,7 @@ type startOptions struct {
 	contractLimit        *int
 	enableReplicaMetrics *bool
 	enableValidatorRTT   *bool
+	enableBinaryMetrics  *bool
 	skipVersionCheck     *bool
 	skipUpdateCheck      *bool
 	metricsPort          *int
@@ -63,6 +64,7 @@ func newStartFlagSet(errorHandling flag.ErrorHandling, output io.Writer) (*flag.
 	o.contractLimit = fs.Int("contract-metrics-limit", 20, "Maximum canonical recipient addresses to retain before using address=other")
 	o.enableReplicaMetrics = fs.Bool("replica-metrics", false, "Enable replica commands transaction metrics")
 	o.enableValidatorRTT = fs.Bool("validator-rtt", false, "Enable outbound TCP-connect diagnostics for eligible validators; not protocol RTT")
+	o.enableBinaryMetrics = fs.Bool("binary-metrics", false, "Enable software metrics by executing local node binaries and downloading/executing the upstream visor binary")
 	o.skipVersionCheck = fs.Bool("skip-version-check", false, "Skip the local hl-node --version probe (use when running in a container without the binary)")
 	o.skipUpdateCheck = fs.Bool("skip-update-check", false, "Skip the periodic upstream binary download for the up-to-date check")
 	o.metricsPort = fs.Int("metrics-port", 8086, "Port to expose Prometheus metrics on")
@@ -132,6 +134,7 @@ func main() {
 		ReplicaDataDir:        "",                         // Always use default
 		ReplicaBufferSize:     8,                          // Always use default 8MB
 		EnableValidatorRTT:    options.enableValidatorRTT, // Use the bool pointer directly
+		EnableBinaryMetrics:   *options.enableBinaryMetrics,
 		SkipVersionCheck:      *options.skipVersionCheck,
 		SkipUpdateCheck:       *options.skipUpdateCheck,
 		ProbeInfoEndpoint:     *options.probeInfoEndpoint,
