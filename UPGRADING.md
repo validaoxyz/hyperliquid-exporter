@@ -1,5 +1,13 @@
 # Upgrading Hyperliquid Exporter
 
+## Unreleased
+
+The exporter no longer downloads or executes node binaries. Both the upstream update check and the local version probe have been removed.
+
+Before upgrading, remove `--node-binary`, `--skip-version-check`, and `--skip-update-check` from service commands. These flags are no longer accepted and will prevent startup. Remove the unused `BINARY_HOME` and `NODE_BINARY` environment settings and node-binary container mounts.
+
+Remove dashboard and alert queries for `hl_software_version` and `hl_software_up_to_date`. Their metrics and the associated `version`/`update` source and `version`/`update_checker` monitor series are gone. File-based visor and hardfork metrics, process monitoring, and the exporter's own `version` command and `hl_exporter_build_info` remain available.
+
 ## Upgrading to v4.0.7
 
 ### Testnet action-type boundary
@@ -65,7 +73,6 @@ The table is checked against the executable FlagSet. Empty values can be resolve
 | `--info-endpoint-url` | string | `""` |
 | `--log-level` | string | `"info"` |
 | `--metrics-port` | int | `8086` |
-| `--node-binary` | string | `""` |
 | `--node-home` | string | `""` |
 | `--otlp` | bool | `false` |
 | `--otlp-endpoint` | string | `""` |
@@ -74,8 +81,6 @@ The table is checked against the executable FlagSet. Empty values can be resolve
 | `--pprof` | bool | `false` |
 | `--probe-info-endpoint` | bool | `false` |
 | `--replica-metrics` | bool | `false` |
-| `--skip-update-check` | bool | `false` |
-| `--skip-version-check` | bool | `false` |
 | `--tcp-service-ports` | string | `"3001,3999,4001,4002,4003,4004"` |
 | `--validator-rtt` | bool | `false` |
 <!-- END CURRENT START FLAG INVENTORY -->

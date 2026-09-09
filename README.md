@@ -39,7 +39,6 @@ The `Default` column is the executable FlagSet default. Empty path/URL values ca
 | `--info-endpoint-url` | string | `""` | Probe URL; empty resolves to `http://127.0.0.1:3001/info`. |
 | `--log-level` | string | `"info"` | `debug`, `info`, `warning`, or `error`. |
 | `--metrics-port` | int | `8086` | Prometheus/health listener port. |
-| `--node-binary` | string | `""` | Node binary override. |
 | `--node-home` | string | `""` | Node home override; otherwise environment/default resolution applies. |
 | `--otlp` | bool | `false` | Enable OTLP export. |
 | `--otlp-endpoint` | string | `""` | OTLP endpoint; required with `--otlp`. |
@@ -48,13 +47,11 @@ The `Default` column is the executable FlagSet default. Empty path/URL values ca
 | `--pprof` | bool | `false` | Expose `/debug/pprof/` on the metrics listener. |
 | `--probe-info-endpoint` | bool | `false` | Actively probe the node's `--serve-info` endpoint. |
 | `--replica-metrics` | bool | `false` | Read validated replica block records, actions, operations, orders, responses, and parser outcomes. |
-| `--skip-update-check` | bool | `false` | Skip the upstream visor update check. |
-| `--skip-version-check` | bool | `false` | Skip the local `hl-node --version` probe. |
 | `--tcp-service-ports` | string | `"3001,3999,4001,4002,4003,4004"` | Bounded service-port vocabulary, 1 to 16 entries. |
 | `--validator-rtt` | bool | `false` | Enable outbound TCP-connect diagnostics for eligible validators; not protocol RTT. |
 <!-- END START FLAG INVENTORY -->
 
-Path precedence is explicit flag, environment, then fallback: node home uses `--node-home`, `NODE_HOME`, or `$HOME/hl`; the node binary uses `--node-binary`, `NODE_BINARY`, or `$BINARY_HOME/hl-node` (`$HOME/hl-node` when `BINARY_HOME` is unset). A local `.env` file can supply missing environment values.
+The node home resolves from `--node-home`, then `NODE_HOME`, then `$HOME/hl`. A local `.env` file can supply missing environment values.
 
 Run `./bin/hl_exporter start -h` for executable help. Go renders flags with one dash in help; one- and two-dash forms are both accepted.
 
@@ -139,7 +136,7 @@ Mount the Hyperliquid home read-only at the path configured for `--node-home`, t
 docker compose up -d
 ```
 
-Container deployments commonly use `--skip-version-check` when the node binary is not mounted and `--skip-update-check` when outbound update checks are disallowed.
+Only the node data directory needs mounting. See [the upgrade notes](UPGRADING.md#unreleased) for removed binary-probe options.
 
 ## Documentation
 
