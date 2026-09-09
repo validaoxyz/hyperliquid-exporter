@@ -127,7 +127,9 @@ func TestBinaryMonitorOptIn(t *testing.T) {
 		}
 		waitForMonitorWorkers()
 
-		deadline := time.Now().Add(5 * time.Second)
+		// Race instrumentation and concurrent package builds can delay fixture
+		// processes. Keep publication bounded within the parent's 30s deadline.
+		deadline := time.Now().Add(15 * time.Second)
 		for {
 			families := gatherBinaryProbeMetrics(t)
 			if (!test.wantVersion || families["hl_software_version"] != nil) && (!test.wantUpdate || families["hl_software_up_to_date"] != nil) {
@@ -141,9 +143,23 @@ func TestBinaryMonitorOptIn(t *testing.T) {
 			default:
 			}
 			if time.Now().After(deadline) {
+				t.Logf("software metrics: version=%v update=%v; HTTP requests=%d",
+					families["hl_software_version"], families["hl_software_up_to_date"], requests.Load())
+				for _, name := range []string{"node", "visor", "downloaded"} {
+					body, err := os.ReadFile(filepath.Join(root, name+".executed"))
+					t.Logf("%s execution marker: %q; read error: %v", name, body, err)
+				}
+				for name, errors := range map[string]chan error{"version": versionErrors, "update": updateErrors} {
+					select {
+					case err := <-errors:
+						t.Logf("%s probe error: %v", name, err)
+					default:
+						t.Logf("%s probe: no queued error", name)
+					}
+				}
 				t.Fatal("enabled probes did not publish their software metrics")
 			}
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 		}
 		cancel()
 		monitors.WaitForWorkers()
