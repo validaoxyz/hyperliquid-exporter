@@ -19,6 +19,7 @@ WORKDIR /app
 COPY --from=builder /app/bin/hl_exporter /bin/hl_exporter
 
 ENV NODE_HOME="/hl/"
+ENV BINARY_HOME="/bin"
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates \

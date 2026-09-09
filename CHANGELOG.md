@@ -2,11 +2,11 @@
 
 ## [Unreleased]
 
-### Removed
+### Changed
 
-- Removed the upstream binary download and execution check, the local binary version probe, and their `hl_software_up_to_date` and `hl_software_version` metrics.
-- Removed `--node-binary`, `--skip-version-check`, `--skip-update-check`, `BINARY_HOME`, and `NODE_BINARY`. Remove these flags from service commands before upgrading; see [UPGRADING.md](UPGRADING.md#unreleased).
-- Removed the node-binary container mount and unused `curl`/`wget` packages from the runtime image.
+- Binary version/update probes and their `hl_software_version` and `hl_software_up_to_date` metrics now require `--binary-metrics`. They are disabled by default. Opting in permits local and downloaded binary execution; existing binary paths and skip flags still apply. See [UPGRADING.md](UPGRADING.md#unreleased).
+- The default Compose configuration mounts only node data. Optional binary metrics use an explicit directory bind containing both `hl-node` and `hl-visor`.
+- Removed unused `curl`/`wget` packages from the runtime image. HTTPS API requests retain CA certificates.
 
 ## [v4.0.7] - 2026-08-27
 

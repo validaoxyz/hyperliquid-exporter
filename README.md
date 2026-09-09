@@ -30,6 +30,7 @@ The `Default` column is the executable FlagSet default. Empty path/URL values ca
 | Flag | Type | Default | Purpose |
 |---|---|---|---|
 | `--alias` | string | `""` | Node alias; required for OTLP. |
+| `--binary-metrics` | bool | `false` | Enable binary version/update probes, including local and downloaded binary execution. |
 | `--chain` | string | `""` | Required: `mainnet` or `testnet`. |
 | `--contract-metrics` | bool | `false` | Enable capped canonical recipient-address diagnostics; no contract inference or enrichment. |
 | `--contract-metrics-limit` | int | `20` | Keep at most N canonical recipient addresses, then use `address="other"`. |
@@ -39,6 +40,7 @@ The `Default` column is the executable FlagSet default. Empty path/URL values ca
 | `--info-endpoint-url` | string | `""` | Probe URL; empty resolves to `http://127.0.0.1:3001/info`. |
 | `--log-level` | string | `"info"` | `debug`, `info`, `warning`, or `error`. |
 | `--metrics-port` | int | `8086` | Prometheus/health listener port. |
+| `--node-binary` | string | `""` | Node binary override for the opted-in version probe. |
 | `--node-home` | string | `""` | Node home override; otherwise environment/default resolution applies. |
 | `--otlp` | bool | `false` | Enable OTLP export. |
 | `--otlp-endpoint` | string | `""` | OTLP endpoint; required with `--otlp`. |
@@ -47,11 +49,15 @@ The `Default` column is the executable FlagSet default. Empty path/URL values ca
 | `--pprof` | bool | `false` | Expose `/debug/pprof/` on the metrics listener. |
 | `--probe-info-endpoint` | bool | `false` | Actively probe the node's `--serve-info` endpoint. |
 | `--replica-metrics` | bool | `false` | Read validated replica block records, actions, operations, orders, responses, and parser outcomes. |
+| `--skip-update-check` | bool | `false` | Skip the upstream visor update check when binary metrics are enabled. |
+| `--skip-version-check` | bool | `false` | Skip the local `hl-node --version` probe when binary metrics are enabled. |
 | `--tcp-service-ports` | string | `"3001,3999,4001,4002,4003,4004"` | Bounded service-port vocabulary, 1 to 16 entries. |
 | `--validator-rtt` | bool | `false` | Enable outbound TCP-connect diagnostics for eligible validators; not protocol RTT. |
 <!-- END START FLAG INVENTORY -->
 
-The node home resolves from `--node-home`, then `NODE_HOME`, then `$HOME/hl`. A local `.env` file can supply missing environment values.
+The node home resolves from `--node-home`, then `NODE_HOME`, then `$HOME/hl`. The optional local version probe resolves its binary from `--node-binary`, then `NODE_BINARY`, then `$BINARY_HOME/hl-node`. `BINARY_HOME` defaults to `$HOME` and also supplies the update check's local `hl-visor` path. A local `.env` file can supply missing environment values.
+
+Binary metrics are disabled by default. `--binary-metrics` enables `hl_software_version` and `hl_software_up_to_date` by running local `hl-node --version` and local/downloaded `hl-visor --version`. Use `--skip-version-check` or `--skip-update-check` to restrict those probes after opting in.
 
 Run `./bin/hl_exporter start -h` for executable help. Go renders flags with one dash in help; one- and two-dash forms are both accepted.
 
@@ -136,7 +142,21 @@ Mount the Hyperliquid home read-only at the path configured for `--node-home`, t
 docker compose up -d
 ```
 
-Only the node data directory needs mounting. See [the upgrade notes](UPGRADING.md#unreleased) for removed binary-probe options.
+The default Compose configuration mounts only node data. To opt into binary metrics, save this override as `compose.binary.yml`. Replace `/path/to/node-binaries` with a directory containing both `hl-node` and `hl-visor`:
+
+```yaml
+services:
+  hl_exporter:
+    command: ["start", "--chain=testnet", "--replica-metrics", "--binary-metrics"]
+    environment:
+      BINARY_HOME: /node-binaries
+    volumes:
+      - /path/to/node-binaries:/node-binaries:ro
+```
+
+```bash
+docker compose -f docker-compose.yml -f compose.binary.yml up -d
+```
 
 ## Documentation
 
