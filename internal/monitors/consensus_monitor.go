@@ -1002,49 +1002,46 @@ func (m *ConsensusMonitor) processHeartbeatAck(ack *HeartbeatAckMessage, source 
 		return fmt.Errorf("invalid heartbeat acknowledgement validator")
 	}
 	sourceKey := wireAddressKey(source)
-	key := heartbeatKey{validator: wireAddressKey(wireValidator), randomID: ack.RandomID, round: ack.Round}
-	ackKey := heartbeatAckKey{heartbeatKey: key, source: sourceKey}
+	validatorKey := wireAddressKey(wireValidator)
 
-	// Look up the original heartbeat and reject a duplicate acknowledgement
-	// without re-observing either latency distribution.
+	// Current acknowledgements name the responder; older records name the
+	// origin. Require a unique outgoing random ID and round before accepting
+	// either identity, even when one candidate matches the older format.
 	m.heartbeatsMutex.Lock()
-	hbInfo, exists := m.heartbeats[key]
-	kind := "unknown"
-	if exists {
-		kind = "peer"
-		if sourceKey == key.validator {
-			kind = "self"
+	var key heartbeatKey
+	var hbInfo heartbeatInfo
+	matches := 0
+	outcome := "orphan"
+	for candidate, info := range m.heartbeats {
+		if candidate.randomID != ack.RandomID {
+			continue
+		}
+		outcome = "mismatch"
+		if candidate.round == ack.Round {
+			matches++
+			key, hbInfo = candidate, info
 		}
 	}
+	if matches != 1 || (validatorKey != key.validator && validatorKey != sourceKey) {
+		m.heartbeatsMutex.Unlock()
+		metrics.HLConsensusHeartbeatJoin.WithLabelValues("unknown", outcome).Inc()
+		return nil
+	}
+
+	kind := "peer"
+	if sourceKey == key.validator {
+		kind = "self"
+	}
+	ackKey := heartbeatAckKey{heartbeatKey: key, source: sourceKey}
 	if _, duplicate := m.heartbeatAcks[ackKey]; duplicate {
 		m.heartbeatsMutex.Unlock()
 		metrics.HLConsensusHeartbeatJoin.WithLabelValues(kind, "mismatch").Inc()
-		return nil
-	}
-	m.heartbeatsMutex.Unlock()
-
-	if !exists {
-		outcome := "orphan"
-		m.heartbeatsMutex.RLock()
-		for candidate := range m.heartbeats {
-			if candidate.randomID == ack.RandomID {
-				outcome = "mismatch"
-				break
-			}
-		}
-		m.heartbeatsMutex.RUnlock()
-		metrics.HLConsensusHeartbeatJoin.WithLabelValues("unknown", outcome).Inc()
 		return nil
 	}
 
 	// calculate delay
 	delay := timestamp.Sub(hbInfo.timestamp)
 	if delay < 0 {
-		metrics.HLConsensusHeartbeatJoin.WithLabelValues(kind, "mismatch").Inc()
-		return nil
-	}
-	m.heartbeatsMutex.Lock()
-	if _, duplicate := m.heartbeatAcks[ackKey]; duplicate {
 		m.heartbeatsMutex.Unlock()
 		metrics.HLConsensusHeartbeatJoin.WithLabelValues(kind, "mismatch").Inc()
 		return nil

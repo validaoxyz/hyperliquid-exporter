@@ -797,6 +797,75 @@ func TestValidatorAPICommitAndFreshnessRecomputeRetainedStatusJoin(t *testing.T)
 	}
 }
 
+func TestHeartbeatAckJoinsRequireUniqueOriginAndValidIdentity(t *testing.T) {
+	const local, peer, unrelated = "0x1111..1111", "0x2222..2222", "0x3333..3333"
+	key := heartbeatKey{validator: local, randomID: 424, round: 99}
+	base := time.Now()
+	for _, tc := range []struct {
+		name, validator, source string
+		otherRound, ackRound    uint64
+		delay                   time.Duration
+		kind, outcome           string
+	}{
+		{"current peer", peer, peer, 0, 99, time.Millisecond, "peer", "matched"},
+		{"legacy peer", local, peer, 0, 99, time.Millisecond, "peer", "matched"},
+		{"self", local, local, 0, 99, time.Millisecond, "self", "matched"},
+		{"unrelated validator", unrelated, peer, 0, 99, time.Millisecond, "unknown", "mismatch"},
+		{"ambiguous legacy origin", local, peer, 99, 99, time.Millisecond, "unknown", "mismatch"},
+		{"ambiguous current responder", peer, peer, 99, 99, time.Millisecond, "unknown", "mismatch"},
+		{"same ID different round", peer, peer, 100, 99, time.Millisecond, "peer", "matched"},
+		{"wrong round", peer, peer, 0, 100, time.Millisecond, "unknown", "mismatch"},
+		{"out of order", peer, peer, 0, 99, -time.Millisecond, "peer", "mismatch"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewConsensusMonitor(&config.Config{})
+			m.heartbeats[key] = heartbeatInfo{timestamp: base}
+			if tc.otherRound != 0 {
+				m.heartbeats[heartbeatKey{validator: unrelated, randomID: key.randomID, round: tc.otherRound}] = heartbeatInfo{timestamp: base}
+			}
+			counter := metrics.HLConsensusHeartbeatJoin.WithLabelValues(tc.kind, tc.outcome)
+			before := validatorMetricValue(t, counter)
+			peerBefore := validatorHistogramCount(t, metrics.HLConsensusHeartbeatPeerAckDelay)
+			selfBefore := validatorHistogramCount(t, metrics.HLConsensusSelfHeartbeatLoopDuration)
+			ack := &HeartbeatAckMessage{Validator: tc.validator, RandomID: key.randomID, Round: tc.ackRound}
+			if err := m.processHeartbeatAck(ack, tc.source, base.Add(tc.delay)); err != nil {
+				t.Fatal(err)
+			}
+			if got := validatorMetricValue(t, counter) - before; got != 1 {
+				t.Fatalf("%s/%s delta = %v, want 1", tc.kind, tc.outcome, got)
+			}
+			wantPeer, wantSelf := uint64(0), uint64(0)
+			if tc.outcome == "matched" {
+				ackKey := heartbeatAckKey{heartbeatKey: key, source: tc.source}
+				if !m.heartbeats[key].matched || !m.heartbeatAcks[ackKey].Equal(base.Add(tc.delay)) {
+					t.Fatal("acknowledgment did not preserve the selected origin key")
+				}
+				if tc.kind == "peer" {
+					wantPeer = 1
+				} else {
+					wantSelf = 1
+				}
+				// The other encoding from the same source remains a duplicate.
+				ack.Validator = local
+				if tc.validator == local {
+					ack.Validator = tc.source
+				}
+				if err := m.processHeartbeatAck(ack, tc.source, base.Add(2*time.Millisecond)); err != nil {
+					t.Fatal(err)
+				}
+			} else if m.heartbeats[key].matched || len(m.heartbeatAcks) != 0 {
+				t.Fatal("rejected join changed heartbeat state")
+			}
+			if got := validatorHistogramCount(t, metrics.HLConsensusHeartbeatPeerAckDelay) - peerBefore; got != wantPeer {
+				t.Fatalf("peer histogram delta = %d, want %d", got, wantPeer)
+			}
+			if got := validatorHistogramCount(t, metrics.HLConsensusSelfHeartbeatLoopDuration) - selfBefore; got != wantSelf {
+				t.Fatalf("self histogram delta = %d, want %d", got, wantSelf)
+			}
+		})
+	}
+}
+
 func TestHeartbeatJoinsSeparatePeerSelfDuplicateMismatchAndExpiry(t *testing.T) {
 	sentCounter, err := otel.Meter("consensus-heartbeat-test").Int64Counter("test_heartbeat_sent")
 	if err != nil {

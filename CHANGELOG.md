@@ -6,6 +6,7 @@
 
 - Accept successful mempool `verify_block` records with a null fourth field while retaining the three-field format.
 - Read consensus wrapper identities from `sender` or `source`. Reject malformed or conflicting identities before processing the message.
+- Join heartbeat acknowledgments that name the responding validator to a unique outgoing heartbeat with the same random ID and round. Preserve origin-naming records and reject ambiguous joins.
 
 ## [v4.1.0] - 2026-09-10
 
