@@ -569,7 +569,7 @@ func TestConsensusHeartbeatAckWrapperIdentity(t *testing.T) {
 		{"sender", `"sender":"0x1337..334f"`, local},
 		{"source", `"source":"0x1337..334f"`, local},
 		{"both normalized", `"source":"0x1337..334f","sender":" 0X1337..334F "`, local},
-		{"full peer sender", `"sender":"0x2222222222222222222222222222222222222222"`, "0x2222..2222"},
+		{"full peer sender", `"sender":"0x2222222222222222222222222222222222222222"`, "0x2222222222222222222222222222222222222222"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := NewConsensusMonitor(&config.Config{})
@@ -591,6 +591,7 @@ func TestConsensusHeartbeatAckWrapperIdentity(t *testing.T) {
 		`"source":"0x1337..334f","sender":null`,
 		`"source":"invalid","sender":"0x1337..334f"`,
 		`"source":"0x133700000000000000000000000000000000334f","sender":"0x1337..334f"`,
+		`"source":"0x1337a..334f","sender":"0x1337b..334f"`,
 	} {
 		t.Run(fields, func(t *testing.T) {
 			m := NewConsensusMonitor(&config.Config{})
@@ -863,6 +864,106 @@ func TestHeartbeatAckJoinsRequireUniqueOriginAndValidIdentity(t *testing.T) {
 				t.Fatalf("self histogram delta = %d, want %d", got, wantSelf)
 			}
 		})
+	}
+}
+
+func TestHeartbeatAckIdentityComparisonPreservesEvidence(t *testing.T) {
+	const local = "0x1111111111111111111111111111111111111111"
+	fullA := fmt.Sprintf("0x2222a%031x2222", 1)
+	fullB := fmt.Sprintf("0x2222a%031x2222", 2)
+	key := heartbeatKey{validator: local, randomID: 424, round: 99}
+	base := time.Now()
+	for _, tc := range []struct {
+		name, validator, source string
+		matched                 bool
+	}{
+		{"different full addresses", fullA, fullB, false},
+		{"different short prefixes", "0x2222a..2222", "0x2222b..2222", false},
+		{"conflicting full and short", "0x2222b..2222", fullA, false},
+		{"consistent full and short", "0x2222a..2222", fullA, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewConsensusMonitor(&config.Config{})
+			m.heartbeats[key] = heartbeatInfo{timestamp: base}
+			before := validatorHistogramCount(t, metrics.HLConsensusHeartbeatPeerAckDelay)
+			ack := &HeartbeatAckMessage{Validator: tc.validator, RandomID: key.randomID, Round: key.round}
+			if err := m.processHeartbeatAck(ack, tc.source, base.Add(time.Millisecond)); err != nil {
+				t.Fatal(err)
+			}
+			want := uint64(0)
+			if tc.matched {
+				want = 1
+			}
+			if got := validatorHistogramCount(t, metrics.HLConsensusHeartbeatPeerAckDelay) - before; got != want || m.heartbeats[key].matched != tc.matched {
+				t.Fatalf("matched = %v, latency count = %d, want %d", m.heartbeats[key].matched, got, want)
+			}
+		})
+	}
+}
+
+func TestHeartbeatOriginsWithSharedFingerprintRemainAmbiguous(t *testing.T) {
+	counter, err := otel.Meter("heartbeat-origin-collision-test").Int64Counter("test_heartbeat_origin_collision_sent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldCounter := metrics.HLConsensusHeartbeatSentCounter
+	metrics.HLConsensusHeartbeatSentCounter = counter
+	t.Cleanup(func() { metrics.HLConsensusHeartbeatSentCounter = oldCounter })
+	for _, origins := range [][2]string{
+		{fmt.Sprintf("0x1111%032x1111", 1), fmt.Sprintf("0x1111%032x1111", 2)},
+		{"0x1111a..1111", "0x1111b..1111"},
+	} {
+		m := NewConsensusMonitor(&config.Config{})
+		base := time.Now()
+		for _, origin := range origins {
+			if err := m.processHeartbeatOut(&HeartbeatMessage{Validator: origin, RandomID: 424, Round: 99}, base); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if len(m.heartbeats) != 2 {
+			t.Fatal("distinct outgoing identities overwrote each other")
+		}
+		before := validatorMetricValue(t, metrics.HLConsensusHeartbeatJoin.WithLabelValues("unknown", "mismatch"))
+		for _, validator := range []string{origins[0], "0x2222..2222"} {
+			if err := m.processHeartbeatAck(&HeartbeatAckMessage{Validator: validator, RandomID: 424, Round: 99}, "0x2222..2222", base.Add(time.Millisecond)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if len(m.heartbeatAcks) != 0 || validatorMetricValue(t, metrics.HLConsensusHeartbeatJoin.WithLabelValues("unknown", "mismatch"))-before != 2 {
+			t.Fatal("ambiguous origins accepted an acknowledgment")
+		}
+	}
+}
+
+func TestHeartbeatAckSourceAliasesCannotDoubleCount(t *testing.T) {
+	fullA := fmt.Sprintf("0x2222a%031x2222", 1)
+	fullB := fmt.Sprintf("0x2222a%031x2222", 2)
+	key := heartbeatKey{validator: "0x1111..1111", randomID: 424, round: 99}
+	for _, tc := range []struct {
+		first, second string
+		want          uint64
+	}{
+		{fullA, "0x2222..2222", 1},
+		{"0x2222..2222", fullA, 1},
+		{"0x2222a..2222", "0x2222..2222", 1},
+		{"0x2222..2222", "0x2222a..2222", 1},
+		{fullA, fullB, 2},
+	} {
+		m := NewConsensusMonitor(&config.Config{})
+		base := time.Now()
+		m.heartbeats[key] = heartbeatInfo{timestamp: base}
+		before := validatorHistogramCount(t, metrics.HLConsensusHeartbeatPeerAckDelay)
+		for i, source := range []string{tc.first, tc.second} {
+			if err := m.processHeartbeatAck(&HeartbeatAckMessage{Validator: source, RandomID: key.randomID, Round: key.round}, source, base.Add(time.Duration(i+1)*time.Millisecond)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := validatorHistogramCount(t, metrics.HLConsensusHeartbeatPeerAckDelay) - before; got != tc.want || uint64(len(m.heartbeatAcks)) != tc.want {
+			t.Fatalf("source alias acknowledgment count = %d, want %d", got, tc.want)
+		}
+		if _, ok := m.heartbeatAcks[heartbeatAckKey{heartbeatKey: key, source: tc.first}]; !ok {
+			t.Fatal("acknowledgment source lost its original normalized identity")
+		}
 	}
 }
 

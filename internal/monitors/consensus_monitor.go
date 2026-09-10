@@ -949,7 +949,7 @@ func (m *ConsensusMonitor) processHeartbeatOut(hb *HeartbeatMessage, timestamp t
 	if !ok {
 		return fmt.Errorf("invalid heartbeat validator")
 	}
-	key := heartbeatKey{validator: wireAddressKey(wireValidator), randomID: hb.RandomID, round: hb.Round}
+	key := heartbeatKey{validator: wireValidator, randomID: hb.RandomID, round: hb.Round}
 
 	formattedValidator := m.formatValidatorAddress(hb.Validator)
 
@@ -1001,9 +1001,6 @@ func (m *ConsensusMonitor) processHeartbeatAck(ack *HeartbeatAckMessage, source 
 	if !ok {
 		return fmt.Errorf("invalid heartbeat acknowledgement validator")
 	}
-	sourceKey := wireAddressKey(source)
-	validatorKey := wireAddressKey(wireValidator)
-
 	// Current acknowledgements name the responder; older records name the
 	// origin. Require a unique outgoing random ID and round before accepting
 	// either identity, even when one candidate matches the older format.
@@ -1022,21 +1019,25 @@ func (m *ConsensusMonitor) processHeartbeatAck(ack *HeartbeatAckMessage, source 
 			key, hbInfo = candidate, info
 		}
 	}
-	if matches != 1 || (validatorKey != key.validator && validatorKey != sourceKey) {
+	// Full identities compare exactly; abbreviated forms retain every supplied
+	// digit. The unique outgoing correlation above permits a consistent alias.
+	if matches != 1 || (!wireAddressesConflict(wireValidator, key.validator) && !wireAddressesConflict(wireValidator, source)) {
 		m.heartbeatsMutex.Unlock()
 		metrics.HLConsensusHeartbeatJoin.WithLabelValues("unknown", outcome).Inc()
 		return nil
 	}
 
 	kind := "peer"
-	if sourceKey == key.validator {
+	if wireAddressesConflict(source, key.validator) {
 		kind = "self"
 	}
-	ackKey := heartbeatAckKey{heartbeatKey: key, source: sourceKey}
-	if _, duplicate := m.heartbeatAcks[ackKey]; duplicate {
-		m.heartbeatsMutex.Unlock()
-		metrics.HLConsensusHeartbeatJoin.WithLabelValues(kind, "mismatch").Inc()
-		return nil
+	ackKey := heartbeatAckKey{heartbeatKey: key, source: source}
+	for seen := range m.heartbeatAcks {
+		if seen.heartbeatKey == key && wireAddressesConflict(seen.source, source) {
+			m.heartbeatsMutex.Unlock()
+			metrics.HLConsensusHeartbeatJoin.WithLabelValues(kind, "mismatch").Inc()
+			return nil
+		}
 	}
 
 	// calculate delay
@@ -1050,7 +1051,7 @@ func (m *ConsensusMonitor) processHeartbeatAck(ack *HeartbeatAckMessage, source 
 	hbInfo.matched = true
 	m.heartbeats[key] = hbInfo
 	m.heartbeatsMutex.Unlock()
-	if sourceKey == key.validator {
+	if kind == "self" {
 		metrics.HLConsensusHeartbeatJoin.WithLabelValues("self", "matched").Inc()
 		metrics.HLConsensusSelfHeartbeatLoopDuration.Observe(delay.Seconds())
 		return nil
