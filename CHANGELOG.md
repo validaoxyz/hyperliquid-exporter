@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v4.1.1] - 2026-09-10
+
 ### Fixed
 
 - Accept successful mempool `verify_block` records with a null fourth field while retaining the three-field format.
