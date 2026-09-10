@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Accept successful mempool `verify_block` records with a null fourth field while retaining the three-field format.
+- Read consensus wrapper identities from `sender` or `source`. Reject malformed or conflicting identities before processing the message.
+
 ## [v4.1.0] - 2026-09-10
 
 ### Changed

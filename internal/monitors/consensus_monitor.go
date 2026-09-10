@@ -448,12 +448,31 @@ func (m *ConsensusMonitor) processConsensusLine(line string) error {
 
 	// first check if this has a nested msg struct (for "in" messages)
 	var wrapper struct {
-		Source string          `json:"source"`
+		Source json.RawMessage `json:"source"`
+		Sender json.RawMessage `json:"sender"`
 		Msg    json.RawMessage `json:"msg"`
 	}
 
+	var source string
 	// try to unmarshal as wrapper first
 	if err := json.Unmarshal(msgData, &wrapper); err == nil && len(wrapper.Msg) > 0 {
+		for _, raw := range []json.RawMessage{wrapper.Source, wrapper.Sender} {
+			if len(raw) == 0 {
+				continue
+			}
+			var identity string
+			if err := unmarshalRequiredJSON(raw, &identity); err != nil {
+				return fmt.Errorf("invalid consensus source/sender")
+			}
+			identity, ok := normalizeWireAddress(identity)
+			if !ok {
+				return fmt.Errorf("invalid consensus source/sender address")
+			}
+			if source != "" && source != identity {
+				return fmt.Errorf("conflicting consensus source and sender")
+			}
+			source = identity
+		}
 		// use the inner msg for processing
 		msgData = wrapper.Msg
 	}
@@ -477,11 +496,9 @@ func (m *ConsensusMonitor) processConsensusLine(line string) error {
 						_ = json.Unmarshal(outer.Vote, &voteMsg)
 					}
 				}
-				// For incoming votes the validator who SENT the vote is the
-				// outer "source"; fall back to that if the payload itself
-				// didn't name them.
-				if voteMsg.Validator == "" && voteMsg.SignerId == "" && wrapper.Source != "" {
-					voteMsg.Validator = wrapper.Source
+				// Incoming votes may name their validator only in the wrapper.
+				if voteMsg.Validator == "" && voteMsg.SignerId == "" && source != "" {
+					voteMsg.Validator = source
 				}
 				return m.processVoteStruct(&voteMsg, parsedTime)
 			}
@@ -518,7 +535,7 @@ func (m *ConsensusMonitor) processConsensusLine(line string) error {
 		if err := json.Unmarshal(msgData, &msg); err == nil && len(msg.HeartbeatAck) > 0 {
 			var ackMsg HeartbeatAckMessage
 			if err := json.Unmarshal(msg.HeartbeatAck, &ackMsg); err == nil {
-				return m.processHeartbeatAck(&ackMsg, wrapper.Source, parsedTime)
+				return m.processHeartbeatAck(&ackMsg, source, parsedTime)
 			}
 		}
 		return fmt.Errorf("invalid HeartbeatAck message")

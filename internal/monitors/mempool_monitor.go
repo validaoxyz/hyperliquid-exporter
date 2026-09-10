@@ -333,7 +333,8 @@ func validateMempoolStatusEvent(inner []json.RawMessage, tag, status string) boo
 	}
 	switch status {
 	case "ok":
-		return len(inner) == statusIndex+1
+		return len(inner) == statusIndex+1 ||
+			(tag == "verify_block" && len(inner) == errorIndex+1 && bytes.Equal(bytes.TrimSpace(inner[errorIndex]), []byte("null")))
 	case "err":
 		return len(inner) == errorIndex+1
 	default:

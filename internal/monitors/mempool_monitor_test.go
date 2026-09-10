@@ -77,6 +77,8 @@ func TestParseMempoolStatusVocabulary(t *testing.T) {
 		complete   bool
 	}{
 		{name: "ok", payload: `["add_tx","h",false,"ok"]`, wantStatus: "ok", complete: true},
+		{name: "verify legacy ok", payload: `["verify_block","h","ok"]`, wantStatus: "ok", complete: true},
+		{name: "verify current ok", payload: `["verify_block","0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","ok",null]`, wantStatus: "ok", complete: true},
 		{name: "err", payload: `["verify_block","h","err",{"BadBlockRound":{}}]`, wantStatus: "err", complete: true},
 		{name: "unknown", payload: `["add_tx","h",false,"future"]`, wantStatus: "other", wantReason: "unknown_status", complete: true},
 		{name: "missing", payload: `["add_tx","h",false]`, wantReason: "missing_status"},
@@ -183,6 +185,14 @@ func TestParseMempoolValidatesEveryRecognizedShape(t *testing.T) {
 		`["add_tx","h",null,"ok"]`,
 		`["add_tx","h",false,"ok",{}]`,
 		`["verify_block","h","ok",{}]`,
+		`["verify_block","h","ok",false]`,
+		`["verify_block","h","ok","null"]`,
+		`["verify_block","h","ok",null,null]`,
+		`["verify_block",null,"ok",null]`,
+		`["verify_block","h","err",null]`,
+		`["verify_block","h","err"]`,
+		`["verify_block","h","err",{"BadBlockRound":{}},null]`,
+		`["add_tx","h",false,"ok",null]`,
 		`["committed"]`,
 		`["committed","block hashes",null,"tx hashes",[]]`,
 		`["register_block unknown tx hashes",null]`,

@@ -559,6 +559,69 @@ func TestStatusSnapshotIdentityAndCardinalityBounds(t *testing.T) {
 	}
 }
 
+func TestConsensusHeartbeatAckWrapperIdentity(t *testing.T) {
+	const local = "0x1337..334f"
+	base := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
+	key := heartbeatKey{validator: local, randomID: 4003763466, round: 863518100}
+	for _, tc := range []struct {
+		name, fields, source string
+	}{
+		{"sender", `"sender":"0x1337..334f"`, local},
+		{"source", `"source":"0x1337..334f"`, local},
+		{"both normalized", `"source":"0x1337..334f","sender":" 0X1337..334F "`, local},
+		{"full peer sender", `"sender":"0x2222222222222222222222222222222222222222"`, "0x2222..2222"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewConsensusMonitor(&config.Config{})
+			m.heartbeats[key] = heartbeatInfo{timestamp: base}
+			line := `["2026-09-10T00:00:00.001000000",["in",{` + tc.fields + `,"msg":{"HeartbeatAck":{"validator":"0x1337..334f","random_id":4003763466,"round":863518100}}}]]`
+			if err := m.processConsensusLine(line); err != nil {
+				t.Fatal(err)
+			}
+			ackKey := heartbeatAckKey{heartbeatKey: key, source: tc.source}
+			if got := m.heartbeatAcks[ackKey]; !got.Equal(base.Add(time.Millisecond)) || !m.heartbeats[key].matched {
+				t.Fatalf("acknowledgement did not join the sent heartbeat: %v", m.heartbeatAcks)
+			}
+		})
+	}
+	for _, fields := range []string{
+		`"sender":null`, `"sender":7`, `"sender":{}`, `"sender":""`, `"sender":"invalid"`,
+		`"source":null`, `"source":false`, `"source":""`,
+		`"source":"0x1337..334f","sender":"0x2222..2222"`,
+		`"source":"0x1337..334f","sender":null`,
+		`"source":"invalid","sender":"0x1337..334f"`,
+		`"source":"0x133700000000000000000000000000000000334f","sender":"0x1337..334f"`,
+	} {
+		t.Run(fields, func(t *testing.T) {
+			m := NewConsensusMonitor(&config.Config{})
+			m.heartbeats[key] = heartbeatInfo{timestamp: base}
+			line := `["2026-09-10T00:00:00.001000000",["in",{` + fields + `,"msg":{"HeartbeatAck":{"validator":"0x1337..334f","random_id":4003763466,"round":863518100}}}]]`
+			if err := m.processConsensusLine(line); err == nil {
+				t.Fatal("accepted malformed or ambiguous wrapper identity")
+			}
+			if len(m.heartbeatAcks) != 0 || m.heartbeats[key].matched {
+				t.Fatal("rejected wrapper changed heartbeat state")
+			}
+		})
+	}
+}
+
+func TestConsensusVoteUsesWrapperIdentity(t *testing.T) {
+	for _, field := range []string{"source", "sender"} {
+		t.Run(field, func(t *testing.T) {
+			m := NewConsensusMonitor(&config.Config{})
+			before := validatorMetricValue(t, metrics.HLConsensusAcceptedVoteObservations)
+			line := `["2026-09-10T00:00:00.000000000",["in",{"` + field + `":"0x1337..334f","msg":{"Vote":{"round":863518100}}}]]`
+			if err := m.processConsensusLine(line); err != nil {
+				t.Fatal(err)
+			}
+			if got := validatorMetricValue(t, metrics.HLConsensusAcceptedVoteObservations) - before; got != 1 {
+				t.Fatalf("accepted vote delta = %v, want 1", got)
+			}
+		})
+	}
+}
+
 func TestHeartbeatJoinKeyIsStableAcrossAddressCachePopulation(t *testing.T) {
 	sentCounter, err := otel.Meter("consensus-heartbeat-cache-order-test").Int64Counter("test_heartbeat_cache_order_sent")
 	if err != nil {
