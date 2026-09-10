@@ -25,8 +25,9 @@ type qcWindowEntry struct {
 
 // heartbeatInfo stores information about sent heartbeats
 type heartbeatInfo struct {
-	timestamp time.Time
-	matched   bool
+	timestamp      time.Time
+	matched        bool
+	resolvedOrigin string
 }
 
 type heartbeatKey struct {
@@ -1021,19 +1022,35 @@ func (m *ConsensusMonitor) processHeartbeatAck(ack *HeartbeatAckMessage, source 
 	}
 	// Full identities compare exactly; abbreviated forms retain every supplied
 	// digit. The unique outgoing correlation above permits a consistent alias.
-	if matches != 1 || (!wireAddressesConflict(wireValidator, key.validator) && !wireAddressesConflict(wireValidator, source)) {
+	origin := hbInfo.resolvedOrigin
+	if origin == "" {
+		origin = key.validator
+	}
+	validatorMatchesOrigin := matches == 1 && wireAddressesConflict(wireValidator, origin)
+	validatorMatchesResponder := wireAddressesConflict(wireValidator, source)
+	if matches != 1 || (!validatorMatchesOrigin && !validatorMatchesResponder) {
 		m.heartbeatsMutex.Unlock()
 		metrics.HLConsensusHeartbeatJoin.WithLabelValues("unknown", outcome).Inc()
 		return nil
 	}
 
+	// A validator excluded from one role supplies evidence for the other.
+	// Keep the fuller compatible spelling; when both formats remain possible,
+	// neither identity can be refined from this field.
+	responder := source
+	if !validatorMatchesOrigin && len(wireValidator) > len(source) {
+		responder = wireValidator
+	}
+	if !validatorMatchesResponder && len(wireValidator) > len(origin) {
+		origin = wireValidator
+	}
 	kind := "peer"
-	if wireAddressesConflict(source, key.validator) {
+	if wireAddressesConflict(responder, origin) {
 		kind = "self"
 	}
-	ackKey := heartbeatAckKey{heartbeatKey: key, source: source}
+	ackKey := heartbeatAckKey{heartbeatKey: key, source: responder}
 	for seen := range m.heartbeatAcks {
-		if seen.heartbeatKey == key && wireAddressesConflict(seen.source, source) {
+		if seen.heartbeatKey == key && wireAddressesConflict(seen.source, responder) {
 			m.heartbeatsMutex.Unlock()
 			metrics.HLConsensusHeartbeatJoin.WithLabelValues(kind, "mismatch").Inc()
 			return nil
@@ -1049,6 +1066,7 @@ func (m *ConsensusMonitor) processHeartbeatAck(ack *HeartbeatAckMessage, source 
 	}
 	m.heartbeatAcks[ackKey] = timestamp
 	hbInfo.matched = true
+	hbInfo.resolvedOrigin = origin
 	m.heartbeats[key] = hbInfo
 	m.heartbeatsMutex.Unlock()
 	if kind == "self" {
@@ -1059,7 +1077,7 @@ func (m *ConsensusMonitor) processHeartbeatAck(ack *HeartbeatAckMessage, source 
 
 	metrics.HLConsensusHeartbeatJoin.WithLabelValues("peer", "matched").Inc()
 	metrics.HLConsensusHeartbeatPeerAckDelay.Observe(delay.Seconds())
-	identity := metrics.ResolveSignerSnapshot([]string{source})[source]
+	identity := metrics.ResolveSignerSnapshot([]string{responder})[responder]
 	if identity.Validator == "unknown" {
 		// This is a process-lifetime CounterVec. Unknown wire identities must
 		// collapse to one bounded row instead of permanently admitting a new

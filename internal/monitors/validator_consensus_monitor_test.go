@@ -967,6 +967,54 @@ func TestHeartbeatAckSourceAliasesCannotDoubleCount(t *testing.T) {
 	}
 }
 
+func TestHeartbeatAckPreservesResolvedResponderEvidence(t *testing.T) {
+	const local, short = "0x1111111111111111111111111111111111111111", "0x2222a..2222"
+	fullA := fmt.Sprintf("0x2222a%031x2222", 1)
+	fullB := fmt.Sprintf("0x2222a%031x2222", 2)
+	fullC := fmt.Sprintf("0x2222a%031x2222", 3)
+	for _, tc := range []struct {
+		name, origin       string
+		acks               [][2]string
+		stored             []string
+		wantPeer, wantSelf uint64
+	}{
+		{"full responder conflicts with full origin", fullA, [][2]string{{fullB, short}}, []string{fullB}, 1, 0},
+		{"full responders stay distinct", local, [][2]string{{fullA, short}, {fullB, fullB}}, []string{fullA, fullB}, 2, 0},
+		{"legacy origin evidence persists", short, [][2]string{{fullA, fullB}, {fullC, fullC}}, []string{fullB, fullC}, 2, 0},
+		{"longer responder prefix retained", local, [][2]string{{short, "0x2222..2222"}}, []string{short}, 1, 0},
+		{"ambiguous format keeps wrapper evidence", fullA, [][2]string{{fullA, short}, {fullB, fullB}}, []string{short}, 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewConsensusMonitor(&config.Config{})
+			key := heartbeatKey{validator: tc.origin, randomID: 424, round: 99}
+			base := time.Now()
+			m.heartbeats[key] = heartbeatInfo{timestamp: base}
+			peerBefore := validatorHistogramCount(t, metrics.HLConsensusHeartbeatPeerAckDelay)
+			selfBefore := validatorHistogramCount(t, metrics.HLConsensusSelfHeartbeatLoopDuration)
+			for i, fields := range tc.acks {
+				ack := &HeartbeatAckMessage{Validator: fields[0], RandomID: key.randomID, Round: key.round}
+				if err := m.processHeartbeatAck(ack, fields[1], base.Add(time.Duration(i+1)*time.Millisecond)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := validatorHistogramCount(t, metrics.HLConsensusHeartbeatPeerAckDelay) - peerBefore; got != tc.wantPeer {
+				t.Fatalf("peer histogram delta = %d, want %d", got, tc.wantPeer)
+			}
+			if got := validatorHistogramCount(t, metrics.HLConsensusSelfHeartbeatLoopDuration) - selfBefore; got != tc.wantSelf {
+				t.Fatalf("self histogram delta = %d, want %d", got, tc.wantSelf)
+			}
+			if len(m.heartbeatAcks) != len(tc.stored) {
+				t.Fatalf("stored acknowledgment count = %d, want %d", len(m.heartbeatAcks), len(tc.stored))
+			}
+			for _, responder := range tc.stored {
+				if _, ok := m.heartbeatAcks[heartbeatAckKey{heartbeatKey: key, source: responder}]; !ok {
+					t.Fatal("acknowledgment did not retain the proven responder identity")
+				}
+			}
+		})
+	}
+}
+
 func TestHeartbeatJoinsSeparatePeerSelfDuplicateMismatchAndExpiry(t *testing.T) {
 	sentCounter, err := otel.Meter("consensus-heartbeat-test").Int64Counter("test_heartbeat_sent")
 	if err != nil {

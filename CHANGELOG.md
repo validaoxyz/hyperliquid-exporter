@@ -8,6 +8,7 @@
 - Read consensus wrapper identities from `sender` or `source`. Reject malformed or conflicting identities before processing the message.
 - Join heartbeat acknowledgments that name the responding validator to a unique outgoing heartbeat with the same random ID and round. Preserve origin-naming records and reject ambiguous joins.
 - Preserve full and abbreviated heartbeat identities when matching origins and responders. Distinct full addresses cannot overwrite each other or match through a shared shortened fingerprint; compatible abbreviated duplicates remain rejected.
+- Retain fuller origin or responder evidence when the acknowledgment identifies only one role, so abbreviated identities do not misclassify peers or merge distinct responders.
 
 ## [v4.1.0] - 2026-09-10
 
