@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [v4.1.3] - 2026-09-26
+
+### Fixed
+
+- Upgrade `google.golang.org/grpc` to v1.83.2 to address [GO-2026-6443](https://pkg.go.dev/vuln/GO-2026-6443), an xDS server panic advisory. The exporter does not call the affected symbols.
+- Update `golang.org/x/net` to v0.58.0 and `golang.org/x/text` to v0.41.0 as required by gRPC v1.83.2.
+
 ## [v4.1.2] - 2026-09-26
 
 ### Fixed
