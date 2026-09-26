@@ -157,6 +157,29 @@ func TestExtractMetricsRejectsZeroActionBundleAndMissingDiscriminant(t *testing.
 	}
 }
 
+func TestExtractMetricsClassifiesValidatorL1StatusAndRetainsUnknownActions(t *testing.T) {
+	body, err := os.ReadFile("testdata/validator_l1_status.constructed.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, block := parseReplicaFixture(t, string(body))
+	defer p.ReturnBlock(block)
+	got, err := p.ExtractMetrics(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCounts := map[string]int{"validatorL1Status": 1, "other": 1}
+	if !reflect.DeepEqual(got.ActionCounts, wantCounts) || !reflect.DeepEqual(got.OperationCounts, wantCounts) {
+		t.Fatalf("action counts = %#v, operation counts = %#v, want %#v", got.ActionCounts, got.OperationCounts, wantCounts)
+	}
+	if got.TotalActions != 2 || got.TotalOperations != 2 {
+		t.Fatalf("totals = actions:%d operations:%d, want 2 each", got.TotalActions, got.TotalOperations)
+	}
+	if !reflect.DeepEqual(got.ParserEvents, map[string]int{"unknown_action": 1}) {
+		t.Fatalf("parser events = %#v, want only the unrelated unknown action", got.ParserEvents)
+	}
+}
+
 func TestParseReplicaResponsesIsOrderIndependentAndCountOnly(t *testing.T) {
 	recordA := `{"user":"0xsecret-account","res":{"status":"ok","response":{"type":"order","data":{"statuses":["success",{"resting":{"oid":"secret"}},{"error":"free text"},{"waitingForTrigger":{}},{"future":{"payload":"x"}}]}}}}`
 	recordB := `{"user":null,"res":{"status":"future-status","response":"unbounded text ignored"}}`

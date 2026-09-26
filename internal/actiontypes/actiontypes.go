@@ -24,7 +24,7 @@ var known = map[string]struct{}{
 	"CValidatorAction": {}, "deployerSendToEvmForFrozenUser": {}, "gossipPriorityBid": {},
 	"hip3LiquidatorTransfer": {}, "l1ValidatorVoteBridgeDeposit": {}, "liquidate": {},
 	"outcomeDeploy": {}, "reassessFees": {}, "stakingLinkDisableTradingUser": {}, "startFeeTrial": {},
-	"userOutcome": {}, "userPortfolioMargin": {}, "validatorL1Stream": {},
+	"userOutcome": {}, "userPortfolioMargin": {}, "validatorL1Status": {}, "validatorL1Stream": {},
 	"validatorL1UpdateReferenceOracle": {}, "validatorL1Vote": {}, "voteL1Hash": {},
 
 	// Previously fixture-backed compatibility vocabulary.
@@ -66,7 +66,7 @@ func Category(action string) string {
 		"VoteEthFinalizedWithdrawalAction", "VoteGlobalAction", "SetGlobalAction",
 		"CSignerAction", "CValidatorAction", "ValidatorSignWithdrawalAction",
 		"NetChildVaultPositionsAction", "validatorL1UpdateReferenceOracle",
-		"validatorL1Vote", "validatorL1Stream", "voteL1Hash",
+		"validatorL1Vote", "validatorL1Status", "validatorL1Stream", "voteL1Hash",
 		"l1ValidatorVoteBridgeDeposit", "gossipPriorityBid":
 		return "governance"
 	case "claimRewards", "reserveRequestWeight":

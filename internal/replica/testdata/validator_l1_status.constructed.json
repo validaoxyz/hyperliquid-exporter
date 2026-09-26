@@ -1,0 +1,20 @@
+{
+  "height": 100,
+  "abci_block": {
+    "time": "2026-09-26T00:00:00Z",
+    "round": 200,
+    "parent_round": 199,
+    "proposer": "constructed-fixture",
+    "signed_action_bundles": [
+      [
+        "constructed-bundle",
+        {
+          "signed_actions": [
+            {"action": {"type": "validatorL1Status", "v": "synthetic-status-value"}},
+            {"action": {"type": "futureAction", "v": "synthetic-unknown-value"}}
+          ]
+        }
+      ]
+    ]
+  }
+}

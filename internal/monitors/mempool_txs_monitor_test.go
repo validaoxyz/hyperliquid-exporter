@@ -3,6 +3,7 @@ package monitors
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -123,6 +124,27 @@ func TestReadMempoolTxsEventsDoesNotConsumePartialLine(t *testing.T) {
 	}
 	if offset != int64(len(line)*2+2) {
 		t.Fatalf("final offset = %d, want %d", offset, len(line)*2+2)
+	}
+}
+
+func TestParseMempoolTxsClassifiesValidatorL1StatusAndRetainsUnknownActions(t *testing.T) {
+	line, err := os.ReadFile("testdata/validator_l1_status.constructed.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, reason, ok := parseMempoolTxsLineDetailed(line)
+	if !ok || reason != "" {
+		t.Fatalf("parse = ok:%v reason:%q", ok, reason)
+	}
+	wantCounts := map[string]int{"validatorL1Status": 1, "other": 1}
+	if !reflect.DeepEqual(stats.actionCounts, wantCounts) || !reflect.DeepEqual(stats.operationCounts, wantCounts) {
+		t.Fatalf("action counts = %#v, operation counts = %#v, want %#v", stats.actionCounts, stats.operationCounts, wantCounts)
+	}
+	if stats.signedActions != 2 || stats.operations != 2 {
+		t.Fatalf("totals = actions:%d operations:%d, want 2 each", stats.signedActions, stats.operations)
+	}
+	if !reflect.DeepEqual(stats.parserEvents, map[string]int{"unknown_action": 1}) {
+		t.Fatalf("parser events = %#v, want only the unrelated unknown action", stats.parserEvents)
 	}
 }
 

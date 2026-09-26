@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [v4.1.2] - 2026-09-26
+
+### Fixed
+
+- Classify `validatorL1Status` actions under their own label and the existing `governance` category instead of `other` in replica and mempool metrics. Unrecognized action types still trigger unknown-action reporting.
+- Upgrade `google.golang.org/grpc` to v1.83.1 to fix [GO-2026-6348](https://pkg.go.dev/vuln/GO-2026-6348), an HTTP/2 memory exhaustion vulnerability.
+
 ## [v4.1.1] - 2026-09-10
 
 ### Fixed
