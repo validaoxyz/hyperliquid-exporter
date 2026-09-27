@@ -43,7 +43,9 @@ jobs:
           go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
       - name: Verify workflows
-        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+        run: |
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 
       - name: Verify alert rules
         run: |

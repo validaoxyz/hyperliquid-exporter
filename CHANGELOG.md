@@ -1,5 +1,8 @@
 # Changelog
 
+<!-- Write release entries for operators. Keep test, scan, review and deployment
+results in CI or internal records. See docs/releasing.md. -->
+
 ## [Unreleased]
 
 ## [v4.1.3] - 2026-09-26
@@ -39,7 +42,6 @@
 ### Added
 
 - Alert on new replica or split-client mempool actions that fall into the closed `other` bucket.
-- Cover the official Testnet `outcomeDeploy` and `trailingStop` types with constructed raw replica and mempool fixtures.
 
 ### Changed
 
@@ -58,7 +60,6 @@ This is the canonical v4 release.
 ### Changed
 
 - Refreshed Go, OpenTelemetry, gRPC, and Prometheus dependencies. Source builds now require Go 1.25.12 or newer.
-- Expanded release checks to cover tests, race checks, vet, vulnerability scanning, generated docs, and alert fixtures.
 - Fixed Docker target architecture selection, pinned base images, and added a Linux arm64 release asset.
 - Published Linux amd64 and arm64 release builds only.
 
