@@ -14,6 +14,7 @@ func TestNormalizeAndCategoryAreBounded(t *testing.T) {
 		{raw: "outcomeDeploy", label: "outcomeDeploy", known: true, category: "deployment"},
 		{raw: "validatorL1UpdateReferenceOracle", label: "validatorL1UpdateReferenceOracle", known: true, category: "governance"},
 		{raw: "validatorL1Status", label: "validatorL1Status", known: true, category: "governance"},
+		{raw: "voteAbciDigest", label: "voteAbciDigest", known: true, category: "governance"},
 		{raw: "noop", label: "noop", known: true, category: "system"},
 		{raw: "random-address-or-payload", label: Other, known: false, category: Other},
 		{raw: "", label: Other, known: false, category: Other},

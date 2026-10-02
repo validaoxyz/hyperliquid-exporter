@@ -17,7 +17,7 @@ var known = map[string]struct{}{
 	"trailingStop": {}, "twapCancel": {}, "twapOrder": {}, "updateIsolatedMargin": {}, "updateLeverage": {},
 	"usdClassTransfer": {}, "usdSend": {}, "userSetAbstraction": {}, "userDexAbstraction": {},
 	"ValidatorSignWithdrawalAction": {}, "vaultTransfer": {},
-	"VoteEthFinalizedWithdrawalAction": {}, "voteAppHash": {}, "withdraw3": {},
+	"VoteEthFinalizedWithdrawalAction": {}, "voteAppHash": {}, "voteAbciDigest": {}, "withdraw3": {},
 
 	// Current/retained replica_cmds vocabulary.
 	"activateOutcomeDeployer": {}, "authorizeAqav2Role": {}, "CSignerAction": {},
@@ -66,7 +66,7 @@ func Category(action string) string {
 		"VoteEthFinalizedWithdrawalAction", "VoteGlobalAction", "SetGlobalAction",
 		"CSignerAction", "CValidatorAction", "ValidatorSignWithdrawalAction",
 		"NetChildVaultPositionsAction", "validatorL1UpdateReferenceOracle",
-		"validatorL1Vote", "validatorL1Status", "validatorL1Stream", "voteL1Hash",
+		"validatorL1Vote", "validatorL1Status", "validatorL1Stream", "voteL1Hash", "voteAbciDigest",
 		"l1ValidatorVoteBridgeDeposit", "gossipPriorityBid":
 		return "governance"
 	case "claimRewards", "reserveRequestWeight":

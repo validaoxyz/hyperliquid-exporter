@@ -7,6 +7,18 @@ import (
 	"testing"
 )
 
+func TestParseMempoolTxsClassifiesVoteAbciDigest(t *testing.T) {
+	line := []byte(`["2026-10-02T08:15:10.000000000",{"tx_hash":"constructed","signed_actions":[{"action":{"type":"voteAbciDigest","height":100,"abciDigest":"constructed","signature":"constructed"}},{"action":{"type":"unrecognizedFutureAction"}}]}]`)
+	got, reason, ok := parseMempoolTxsLineDetailed(line)
+	if !ok || reason != "" {
+		t.Fatalf("parse = %v/%s", ok, reason)
+	}
+	want := map[string]int{"voteAbciDigest": 1, "other": 1}
+	if !reflect.DeepEqual(got.actionCounts, want) || !reflect.DeepEqual(got.operationCounts, want) || got.signedActions != 2 || got.operations != 2 || got.parserEvents["unknown_action"] != 1 {
+		t.Fatalf("voteAbciDigest classification or unknown-action reporting is incorrect: %+v", got)
+	}
+}
+
 func TestParseMempoolTxsLine(t *testing.T) {
 	line := []byte(`["2026-06-01T17:59:25.990970382",{"tx_hash":"0xabc","signed_actions":[{"action":{"type":"order","orders":[{"b":true,"t":{"limit":{"tif":"Alo"}}},{"b":false,"t":{"limit":{"tif":"Ioc"}}}]}},{"action":{"type":"batchModify","modifies":[{"order":{"b":true,"t":{"limit":{"tif":"Gtc"}}}},{"order":{"b":false,"t":{"limit":{"tif":"FrontendMarket"}}}}]}},{"action":{"type":"cancel","cancels":[{"a":1,"o":2},{"a":2,"o":3}]}},{"action":{"type":"futureAction"}}]}]`)
 

@@ -157,6 +157,19 @@ func TestExtractMetricsRejectsZeroActionBundleAndMissingDiscriminant(t *testing.
 	}
 }
 
+func TestExtractMetricsClassifiesVoteAbciDigest(t *testing.T) {
+	p, block := parseReplicaFixture(t, `{"height":100,"abci_block":{"time":"2026-10-02T08:15:10Z","round":200,"proposer":"0x1111..1111","signed_action_bundles":[["bundle",{"signed_actions":[{"action":{"type":"voteAbciDigest","height":100,"abciDigest":"constructed","signature":"constructed"}},{"action":{"type":"unrecognizedFutureAction"}}]}]]}}`)
+	defer p.ReturnBlock(block)
+	got, err := p.ExtractMetrics(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int{"voteAbciDigest": 1, "other": 1}
+	if !reflect.DeepEqual(got.ActionCounts, want) || !reflect.DeepEqual(got.OperationCounts, want) || got.TotalActions != 2 || got.TotalOperations != 2 || got.ParserEvents["unknown_action"] != 1 {
+		t.Fatalf("voteAbciDigest classification or unknown-action reporting is incorrect: %+v", got)
+	}
+}
+
 func TestExtractMetricsClassifiesValidatorL1StatusAndRetainsUnknownActions(t *testing.T) {
 	body, err := os.ReadFile("testdata/validator_l1_status.constructed.json")
 	if err != nil {

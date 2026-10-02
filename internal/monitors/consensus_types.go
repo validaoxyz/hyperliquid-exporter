@@ -2,6 +2,7 @@ package monitors
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -54,6 +55,56 @@ type HeartbeatAckMessage struct {
 	Validator string `json:"validator"`
 	RandomID  uint64 `json:"random_id"`
 	Round     uint64 `json:"round"`
+}
+
+func (h *HeartbeatMessage) UnmarshalJSON(data []byte) error {
+	decoded, err := decodeHeartbeat(data)
+	if err != nil {
+		return err
+	}
+	*h = decoded
+	return nil
+}
+
+func (h *HeartbeatAckMessage) UnmarshalJSON(data []byte) error {
+	decoded, err := decodeHeartbeat(data)
+	if err != nil {
+		return err
+	}
+	*h = HeartbeatAckMessage(decoded)
+	return nil
+}
+
+// Testnet heartbeats use executed_round from October 2026. Both spellings
+// identify the round echoed by acknowledgements; conflicting values cannot join.
+func decodeHeartbeat(data []byte) (HeartbeatMessage, error) {
+	var wire struct {
+		Validator     string          `json:"validator"`
+		RandomID      uint64          `json:"random_id"`
+		Round         json.RawMessage `json:"round"`
+		ExecutedRound json.RawMessage `json:"executed_round"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return HeartbeatMessage{}, err
+	}
+	var round uint64
+	for _, raw := range []json.RawMessage{wire.Round, wire.ExecutedRound} {
+		if len(raw) == 0 {
+			continue
+		}
+		var value uint64
+		if err := unmarshalRequiredJSON(raw, &value); err != nil || value == 0 {
+			return HeartbeatMessage{}, fmt.Errorf("invalid heartbeat round")
+		}
+		if round != 0 && round != value {
+			return HeartbeatMessage{}, fmt.Errorf("conflicting heartbeat rounds")
+		}
+		round = value
+	}
+	if round == 0 {
+		return HeartbeatMessage{}, fmt.Errorf("missing heartbeat round")
+	}
+	return HeartbeatMessage{Validator: wire.Validator, RandomID: wire.RandomID, Round: round}, nil
 }
 
 // parsed status log line
