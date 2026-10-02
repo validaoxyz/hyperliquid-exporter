@@ -8,7 +8,7 @@ results in CI or internal records. See docs/releasing.md. -->
 ### Fixed
 
 - Classify `voteAbciDigest` actions in replica and mempool metrics under their own label and the `governance` category.
-- Read `executed_round` in consensus heartbeats and acknowledgments so updated testnet nodes continue reporting heartbeat delays. Conflicting or malformed round fields remain rejected.
+- Read `executed_round` in consensus heartbeats and acknowledgments so updated testnet nodes continue reporting heartbeat delays. Reject malformed, conflicting or duplicate round fields.
 
 ## [v4.1.3] - 2026-09-26
 

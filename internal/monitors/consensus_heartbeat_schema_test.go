@@ -55,6 +55,11 @@ func TestConsensusHeartbeatRejectsInvalidRoundAliases(t *testing.T) {
 		`,"round":77,"executed_round":78`, `,"round":77,"executed_round":null`,
 		`,"round":77,"executed_round":0`, `,"round":null,"executed_round":77`,
 		`,"round":0,"executed_round":77`, `,"round":"77","executed_round":77`,
+		`,"round":"bad","round":77`, `,"round":"bad","Round":77`,
+		`,"round":77,"round":77`, `,"round":null,"round":77`,
+		`,"executed_round":77,"executed_round":78`,
+		`,"executed_round":77,"Executed_Round":77`,
+		`,"round":77,"executed_round":78,"executed_round":77`,
 	} {
 		for _, kind := range []string{"Heartbeat", "HeartbeatAck"} {
 			t.Run(kind+fields, func(t *testing.T) {

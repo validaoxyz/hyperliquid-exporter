@@ -75,31 +75,44 @@ func (h *HeartbeatAckMessage) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// Testnet heartbeats use executed_round from October 2026. Both spellings
-// identify the round echoed by acknowledgements; conflicting values cannot join.
+type heartbeatRound struct {
+	value   uint64
+	present bool
+}
+
+func (r *heartbeatRound) UnmarshalJSON(data []byte) error {
+	if r.present {
+		return fmt.Errorf("duplicate heartbeat round")
+	}
+	var value uint64
+	if err := unmarshalRequiredJSON(data, &value); err != nil || value == 0 {
+		return fmt.Errorf("invalid heartbeat round")
+	}
+	r.value, r.present = value, true
+	return nil
+}
+
+// Testnet heartbeats use executed_round from October 2026. Validate each
+// occurrence so duplicate keys cannot hide a malformed or conflicting value.
 func decodeHeartbeat(data []byte) (HeartbeatMessage, error) {
 	var wire struct {
-		Validator     string          `json:"validator"`
-		RandomID      uint64          `json:"random_id"`
-		Round         json.RawMessage `json:"round"`
-		ExecutedRound json.RawMessage `json:"executed_round"`
+		Validator     string         `json:"validator"`
+		RandomID      uint64         `json:"random_id"`
+		Round         heartbeatRound `json:"round"`
+		ExecutedRound heartbeatRound `json:"executed_round"`
 	}
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return HeartbeatMessage{}, err
 	}
 	var round uint64
-	for _, raw := range []json.RawMessage{wire.Round, wire.ExecutedRound} {
-		if len(raw) == 0 {
+	for _, field := range []heartbeatRound{wire.Round, wire.ExecutedRound} {
+		if !field.present {
 			continue
 		}
-		var value uint64
-		if err := unmarshalRequiredJSON(raw, &value); err != nil || value == 0 {
-			return HeartbeatMessage{}, fmt.Errorf("invalid heartbeat round")
-		}
-		if round != 0 && round != value {
+		if round != 0 && round != field.value {
 			return HeartbeatMessage{}, fmt.Errorf("conflicting heartbeat rounds")
 		}
-		round = value
+		round = field.value
 	}
 	if round == 0 {
 		return HeartbeatMessage{}, fmt.Errorf("missing heartbeat round")
