@@ -5,6 +5,8 @@ results in CI or internal records. See docs/releasing.md. -->
 
 ## [Unreleased]
 
+## [v4.1.4] - 2026-10-02
+
 ### Fixed
 
 - Classify `voteAbciDigest` actions in replica and mempool metrics under their own label and the `governance` category.
