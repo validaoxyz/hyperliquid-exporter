@@ -325,11 +325,8 @@ func validateMempoolStatusEvent(inner []json.RawMessage, tag, status string) boo
 	if err := unmarshalRequiredJSON(inner[1], &hash); err != nil || hash == "" {
 		return false
 	}
-	if tag == "add_tx" {
-		var replace bool
-		if err := unmarshalRequiredJSON(inner[2], &replace); err != nil {
-			return false
-		}
+	if tag == "add_tx" && !validateMempoolTxOrigin(inner[2]) {
+		return false
 	}
 	switch status {
 	case "ok":
@@ -342,6 +339,32 @@ func validateMempoolStatusEvent(inner []json.RawMessage, tag, status string) boo
 		// payload is opaque, but the current event's required prefix must exist.
 		return len(inner) >= statusIndex+1
 	}
+}
+
+func validateMempoolTxOrigin(raw json.RawMessage) bool {
+	raw = bytes.TrimSpace(raw)
+	if bytes.Equal(raw, []byte("true")) || bytes.Equal(raw, []byte("false")) {
+		return true
+	}
+	var origin string
+	if json.Unmarshal(raw, &origin) == nil {
+		return origin == "Rpc"
+	}
+
+	// Require exactly one Validator field, including rejecting duplicate keys.
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return false
+	}
+	if token, err := decoder.Token(); err != nil || token != "Validator" {
+		return false
+	}
+	var validator string
+	if decoder.Decode(&validator) != nil || !isFullHexAddress(validator) {
+		return false
+	}
+	token, err := decoder.Token()
+	return err == nil && token == json.Delim('}')
 }
 
 func parseMempoolStatus(inner []json.RawMessage, index int) (status, reason string, valid bool) {

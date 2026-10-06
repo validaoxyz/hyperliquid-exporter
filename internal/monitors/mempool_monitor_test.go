@@ -95,6 +95,78 @@ func TestParseMempoolStatusVocabulary(t *testing.T) {
 	}
 }
 
+func TestParseMempoolTxOrigins(t *testing.T) {
+	for name, origin := range map[string]string{
+		"legacy false": `false`,
+		"legacy true":  `true`,
+		"rpc":          `"Rpc"`,
+		"validator":    `{"Validator":"0x2222222222222222222222222222222222222222"}`,
+	} {
+		for _, status := range []string{"ok", "err"} {
+			t.Run(name+"/"+status, func(t *testing.T) {
+				payload := fmt.Sprintf(`["add_tx","0x1111111111111111111111111111111111111111111111111111111111111111",%s,%q`, origin, status)
+				if status == "err" {
+					payload += `,{"AddTxDuplicate":{"tx_hash":"0x1111111111111111111111111111111111111111111111111111111111111111","existing_from_rpc":false}}`
+				}
+				got := parseMempoolObservation(mempoolLine(payload + `]`))
+				if !got.complete || got.parseReason != "" || got.eventType != "add_tx" || got.status != status {
+					t.Fatalf("origin rejected: %+v", got)
+				}
+				if status == "err" && (got.errorOperation != "add_tx" || got.errorKind != "add_tx_duplicate") {
+					t.Fatalf("error classification changed: %+v", got)
+				}
+				counter := metrics.HLMempoolEventsTotal.WithLabelValues("add_tx", status)
+				before := mempoolMetricValue(t, counter)
+				publishMempoolObservation(got)
+				if after := mempoolMetricValue(t, counter); after != before+1 {
+					t.Fatalf("event not published: before=%v after=%v", before, after)
+				}
+			})
+		}
+	}
+}
+
+func TestParseMempoolRejectsMalformedTxOrigins(t *testing.T) {
+	for name, origin := range map[string]string{
+		"null":                `null`,
+		"number":              `1`,
+		"array":               `["Rpc"]`,
+		"empty string":        `""`,
+		"unknown string":      `"FutureOrigin"`,
+		"wrong string case":   `"rpc"`,
+		"validator string":    `"Validator"`,
+		"empty object":        `{}`,
+		"unknown object":      `{"FutureOrigin":"0x2222222222222222222222222222222222222222"}`,
+		"rpc object":          `{"Rpc":null}`,
+		"null validator":      `{"Validator":null}`,
+		"empty validator":     `{"Validator":""}`,
+		"number validator":    `{"Validator":123}`,
+		"array validator":     `{"Validator":[]}`,
+		"object validator":    `{"Validator":{}}`,
+		"short validator":     `{"Validator":"0x2222"}`,
+		"nonhex validator":    `{"Validator":"0x222222222222222222222222222222222222222g"}`,
+		"extra property":      `{"Validator":"0x2222222222222222222222222222222222222222","Rpc":null}`,
+		"duplicate validator": `{"Validator":"0x2222222222222222222222222222222222222222","Validator":"0x2222222222222222222222222222222222222222"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := parseMempoolObservation(mempoolLine(fmt.Sprintf(`["add_tx","h",%s,"ok"]`, origin)))
+			if got.complete || got.parseReason != "invalid_add_tx_payload" {
+				t.Fatalf("malformed origin accepted: %+v", got)
+			}
+			counter := metrics.HLMempoolEventsTotal.WithLabelValues("add_tx", "ok")
+			before := mempoolMetricValue(t, counter)
+			publishMempoolObservation(got)
+			if after := mempoolMetricValue(t, counter); after != before {
+				t.Fatalf("malformed origin published: before=%v after=%v", before, after)
+			}
+		})
+	}
+	got := parseMempoolObservation(mempoolLine(`["add_tx","h","ok"]`))
+	if got.complete || got.parseReason != "missing_status" {
+		t.Fatalf("missing origin accepted: %+v", got)
+	}
+}
+
 func TestParseMempoolPruneDropAndSizePayloads(t *testing.T) {
 	prune := parseMempoolObservation(mempoolLine(`["Pruned rpc request throttle",2,1,[]]`))
 	if !prune.complete || prune.pruneItems == nil || *prune.pruneItems != 1 {
