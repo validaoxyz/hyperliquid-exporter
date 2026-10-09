@@ -252,6 +252,12 @@ func parseConsensusRPCRequest(raw json.RawMessage) ([32]byte, string, bool, bool
 	queryPeers := false
 	content := "other"
 	if _, wrapped := body["content"]; wrapped {
+		if _, mixed := body["after_round"]; mixed {
+			return [32]byte{}, "", false, false, fmt.Errorf("conflicting request forms")
+		}
+		if _, mixed := body["until_block_hash"]; mixed {
+			return [32]byte{}, "", false, false, fmt.Errorf("conflicting request forms")
+		}
 		if unmarshalRequiredJSON(body["query_peers"], &queryPeers) != nil {
 			return [32]byte{}, "", false, false, fmt.Errorf("invalid query_peers")
 		}
@@ -259,14 +265,24 @@ func parseConsensusRPCRequest(raw json.RawMessage) ([32]byte, string, bool, bool
 		if err != nil {
 			return [32]byte{}, "", false, false, fmt.Errorf("invalid request content")
 		}
-		if _, ok := contentObject["BlocksAndTxs"]; ok {
-			content = "blocks_and_txs"
-		}
-		if _, flat := contentObject["after_round"]; flat {
+		_, hasRound := contentObject["after_round"]
+		_, hasHash := contentObject["until_block_hash"]
+		if hasRound || hasHash {
 			if !validFlatConsensusRPCRequest(contentObject) {
 				return [32]byte{}, "", false, false, fmt.Errorf("invalid flat request content")
 			}
 			content = "blocks_and_txs"
+		} else {
+			if len(contentObject) != 1 {
+				return [32]byte{}, "", false, false, fmt.Errorf("invalid request variants")
+			}
+			if blocksRaw, ok := contentObject["BlocksAndTxs"]; ok {
+				blocksBody, err := consensusRPCObject(blocksRaw)
+				if err != nil || !validFlatConsensusRPCRequest(blocksBody) {
+					return [32]byte{}, "", false, false, fmt.Errorf("invalid BlocksAndTxs request")
+				}
+				content = "blocks_and_txs"
+			}
 		}
 	} else {
 		if !validFlatConsensusRPCRequest(body) {
@@ -331,18 +347,20 @@ func parseConsensusRPCResponse(raw json.RawMessage) ([32]byte, string, string, i
 	if err != nil {
 		return [32]byte{}, "", "", 0, fmt.Errorf("invalid response object")
 	}
+	if len(variants) != 1 {
+		return [32]byte{}, "", "", 0, fmt.Errorf("invalid response variants")
+	}
 	okRaw, ok := variants["Ok"]
 	if !ok {
 		return digest, "other", "other", 0, nil
-	}
-	if len(variants) != 1 {
-		return [32]byte{}, "", "", 0, fmt.Errorf("conflicting response variants")
 	}
 	okBody, err := consensusRPCObject(okRaw)
 	if err != nil {
 		return [32]byte{}, "", "", 0, fmt.Errorf("invalid Ok response")
 	}
 	blocksRaw, ok := okBody["BlocksAndTxs"]
+	_, hasN := okBody["n"]
+	_, hasHash := okBody["last_block_hash"]
 	var blocksBody map[string]json.RawMessage
 	if ok {
 		if len(okBody) != 1 {
@@ -352,13 +370,16 @@ func parseConsensusRPCResponse(raw json.RawMessage) ([32]byte, string, string, i
 		if err != nil {
 			return [32]byte{}, "", "", 0, fmt.Errorf("invalid BlocksAndTxs response")
 		}
-	} else if _, hasN := okBody["n"]; hasN {
+	} else if hasN || hasHash {
 		var hash string
 		if len(okBody) != 2 || unmarshalRequiredJSON(okBody["last_block_hash"], &hash) != nil || hash == "" {
 			return [32]byte{}, "", "", 0, fmt.Errorf("invalid flat block response")
 		}
 		blocksBody = okBody
 	} else {
+		if len(okBody) != 1 {
+			return [32]byte{}, "", "", 0, fmt.Errorf("invalid Ok response variants")
+		}
 		return digest, "other", "other", 0, nil
 	}
 	var n int64

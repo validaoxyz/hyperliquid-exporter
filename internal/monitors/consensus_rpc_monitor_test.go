@@ -103,7 +103,7 @@ func TestConsensusRPCRejectsInvalidServedCountsAndQueryPeers(t *testing.T) {
 	if got := tracker.accept(incoming); got != "ok" {
 		t.Fatalf("incoming = %q", got)
 	}
-	queryPeers := `{"content":{"BlocksAndTxs":{}},"query_peers":true}`
+	queryPeers := `{"content":{"BlocksAndTxs":{"after_round":10,"until_block_hash":"h"}},"query_peers":true}`
 	received, err := parseConsensusRPCLine([]byte(rpcLine(`["Received rpc request","session",` + queryPeers + `]`)))
 	if err != nil {
 		t.Fatal(err)
@@ -112,7 +112,7 @@ func TestConsensusRPCRejectsInvalidServedCountsAndQueryPeers(t *testing.T) {
 		t.Fatalf("query_peers=true = %q, want unjoinable", got)
 	}
 
-	nullQueryPeers := `{"content":{"BlocksAndTxs":{}},"query_peers":null}`
+	nullQueryPeers := `{"content":{"BlocksAndTxs":{"after_round":10,"until_block_hash":"h"}},"query_peers":null}`
 	if _, err := parseConsensusRPCLine([]byte(rpcLine(`["Rpc task inbound",` + nullQueryPeers + `]`))); err == nil {
 		t.Fatal("query_peers=null was accepted as false")
 	}
@@ -187,7 +187,19 @@ func TestConsensusRPCDirectLifecyclePublishesOnlyObservedStages(t *testing.T) {
 	response := `{"Ok":{"n":2,"last_block_hash":"last"}}`
 	tracker := newConsensusRPCTracker()
 	blocksBefore := validatorMetricValue(t, metrics.HLConsensusRPCBlocksServed)
-	taskBefore := validatorMetricValue(t, metrics.HLConsensusRPCEvents.WithLabelValues("serve", "task_inbound", "observed", "blocks_and_txs"))
+	stages := []struct {
+		stage, content string
+		want           float64
+	}{
+		{"stream_opened", "other", 2},
+		{"request_received", "blocks_and_txs", 2},
+		{"task_inbound", "blocks_and_txs", 0},
+		{"task_response", "blocks_and_txs", 0},
+	}
+	stageBefore := make([]float64, len(stages))
+	for i, stage := range stages {
+		stageBefore[i] = validatorMetricValue(t, metrics.HLConsensusRPCEvents.WithLabelValues("serve", stage.stage, "observed", stage.content))
+	}
 	terminalBefore := validatorMetricValue(t, metrics.HLConsensusRPCEvents.WithLabelValues("serve", "response_sent", "ok", "blocks_and_txs"))
 	parse := func(payload string) consensusRPCRecord {
 		t.Helper()
@@ -215,6 +227,11 @@ func TestConsensusRPCDirectLifecyclePublishesOnlyObservedStages(t *testing.T) {
 	if got := validatorMetricValue(t, metrics.HLConsensusRPCBlocksServed); got != blocksBefore {
 		t.Fatal("incomplete request counted blocks")
 	}
+	for i, stage := range stages {
+		if got := validatorMetricValue(t, metrics.HLConsensusRPCEvents.WithLabelValues("serve", stage.stage, "observed", stage.content)); got != stageBefore[i] {
+			t.Fatalf("incomplete request published %s", stage.stage)
+		}
+	}
 	mismatched := parse(`["Outbound response","a",{"after_round":904479216,"until_block_hash":"block"},` + response + `]`)
 	if got := tracker.accept(mismatched); got != "unjoinable" {
 		t.Fatalf("mismatched request = %s", got)
@@ -234,8 +251,10 @@ func TestConsensusRPCDirectLifecyclePublishesOnlyObservedStages(t *testing.T) {
 	if got := validatorMetricValue(t, metrics.HLConsensusRPCEvents.WithLabelValues("serve", "response_sent", "ok", "blocks_and_txs")) - terminalBefore; got != 2 {
 		t.Fatalf("responses delta = %v", got)
 	}
-	if got := validatorMetricValue(t, metrics.HLConsensusRPCEvents.WithLabelValues("serve", "task_inbound", "observed", "blocks_and_txs")); got != taskBefore {
-		t.Fatal("unobserved task stage published")
+	for i, stage := range stages {
+		if delta := validatorMetricValue(t, metrics.HLConsensusRPCEvents.WithLabelValues("serve", stage.stage, "observed", stage.content)) - stageBefore[i]; delta != stage.want {
+			t.Fatalf("%s delta = %v, want %v", stage.stage, delta, stage.want)
+		}
 	}
 }
 
@@ -312,5 +331,101 @@ func TestConsensusRPCRequestDigestPreservesLargeRounds(t *testing.T) {
 	}
 	if a == b {
 		t.Fatal("distinct integer rounds share request identity")
+	}
+}
+
+func TestConsensusRPCRejectsIncompleteAndConflictingRequests(t *testing.T) {
+	for name, request := range map[string]string{
+		"flat missing round":            `{"content":{"until_block_hash":"h"},"query_peers":false}`,
+		"flat missing hash":             `{"content":{"after_round":1},"query_peers":false}`,
+		"legacy null body":              `{"content":{"BlocksAndTxs":null},"query_peers":false}`,
+		"legacy missing fields":         `{"content":{"BlocksAndTxs":{}},"query_peers":false}`,
+		"legacy duplicate round":        `{"content":{"BlocksAndTxs":{"after_round":1,"after_round":2,"until_block_hash":"h"}},"query_peers":false}`,
+		"legacy conflicting variants":   `{"content":{"BlocksAndTxs":{"after_round":1,"until_block_hash":"h"},"Status":{}},"query_peers":false}`,
+		"mixed direct and wrapped":      `{"content":{"BlocksAndTxs":{"after_round":1,"until_block_hash":"h"}},"query_peers":false,"after_round":2,"until_block_hash":"other"}`,
+		"mixed direct hash and wrapped": `{"content":{"BlocksAndTxs":{"after_round":1,"until_block_hash":"h"}},"query_peers":false,"until_block_hash":"other"}`,
+		"empty content":                 `{"content":{},"query_peers":false}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseConsensusRPCLine([]byte(rpcLine(`["Received rpc request","a",` + request + `]`))); err == nil {
+				t.Fatal("accepted malformed request")
+			}
+		})
+	}
+}
+
+func TestConsensusRPCRejectsIncompleteAndConflictingResponses(t *testing.T) {
+	for name, response := range map[string]string{
+		"flat missing count":                   `{"Ok":{"last_block_hash":"h"}}`,
+		"conflicting non-ok variants":          `{"Err":"failure","Timeout":null}`,
+		"conflicting ok and err":               `{"Ok":{"n":2,"last_block_hash":"h"},"Err":"failure"}`,
+		"conflicting response forms":           `{"Ok":{"BlocksAndTxs":{"n":2},"n":2,"last_block_hash":"h"}}`,
+		"conflicting unknown content variants": `{"Ok":{"FutureVariant":{},"AnotherVariant":{}}}`,
+		"empty response":                       `{}`,
+		"empty ok body":                        `{"Ok":{}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, _, _, err := parseConsensusRPCResponse(json.RawMessage(response)); err == nil {
+				t.Fatal("accepted malformed response")
+			}
+		})
+	}
+}
+
+func TestConsensusRPCUnknownTaggedVariantsRemainBounded(t *testing.T) {
+	request := json.RawMessage(`{"content":{"FutureVariant":{"opaque":"private"}},"query_peers":false,"metadata":"retained"}`)
+	_, content, queryPeers, direct, err := parseConsensusRPCRequest(request)
+	if err != nil || content != "other" || queryPeers || direct {
+		t.Fatalf("unknown request: content=%s queryPeers=%v direct=%v err=%v", content, queryPeers, direct, err)
+	}
+	for _, raw := range []string{`{"FutureVariant":{"opaque":"private"}}`, `{"Ok":{"FutureVariant":{"opaque":"private"}}}`} {
+		_, outcome, content, n, err := parseConsensusRPCResponse(json.RawMessage(raw))
+		if err != nil || outcome != "other" || content != "other" || n != 0 {
+			t.Fatalf("unknown response: outcome=%s content=%s n=%d err=%v", outcome, content, n, err)
+		}
+	}
+}
+
+func TestConsensusRPCDirectErrorAndExpiredLifecycles(t *testing.T) {
+	request := `{"after_round":1,"until_block_hash":"h"}`
+	parse := func(payload string) consensusRPCRecord {
+		t.Helper()
+		record, err := parseConsensusRPCLine([]byte(rpcLine(payload)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+	for _, expired := range []bool{false, true} {
+		t.Run(fmt.Sprintf("expired=%v", expired), func(t *testing.T) {
+			tracker := newConsensusRPCTracker()
+			for _, payload := range []string{`["Incoming tcp stream","a","203.0.113.1:1"]`, `["Received rpc request","a",` + request + `]`} {
+				if got := tracker.accept(parse(payload)); got != "ok" {
+					t.Fatal(got)
+				}
+			}
+			terminal := parse(`["Outbound response","a",` + request + `,{"Err":"failure"}]`)
+			beforeBlocks := validatorMetricValue(t, metrics.HLConsensusRPCBlocksServed)
+			counter := metrics.HLConsensusRPCEvents.WithLabelValues("serve", "response_sent", "other", "blocks_and_txs")
+			beforeResponses := validatorMetricValue(t, counter)
+			want := "ok"
+			wantResponses := float64(1)
+			if expired {
+				terminal.sourceTime = terminal.sourceTime.Add(tracker.ttl + time.Second)
+				want, wantResponses = "unjoinable", 0
+			}
+			if got := tracker.accept(terminal); got != want {
+				t.Fatalf("terminal = %s, want %s", got, want)
+			}
+			if delta := validatorMetricValue(t, counter) - beforeResponses; delta != wantResponses {
+				t.Fatalf("response delta = %v, want %v", delta, wantResponses)
+			}
+			if validatorMetricValue(t, metrics.HLConsensusRPCBlocksServed) != beforeBlocks {
+				t.Fatal("error response counted blocks")
+			}
+			if len(tracker.bySession) != 0 || len(tracker.byRequest) != 0 {
+				t.Fatal("finished or expired direct state retained")
+			}
+		})
 	}
 }
