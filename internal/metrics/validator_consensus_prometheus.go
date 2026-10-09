@@ -28,7 +28,7 @@ var (
 	}, []string{"direction", "stage", "outcome", "content"})
 	HLConsensusRPCBlocksServed = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "hl_consensus_rpc_blocks_served_total",
-		Help: "Blocks explicitly reported sent by complete query_peers=false Outbound response Ok.BlocksAndTxs results since exporter start.",
+		Help: "Blocks explicitly reported sent by complete inbound RPC lifecycles since exporter start; wrapped requests require query_peers=false.",
 	})
 	HLConsensusRPCParse = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "hl_consensus_rpc_parse_total",

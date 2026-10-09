@@ -1,10 +1,12 @@
 package monitors
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,6 +26,7 @@ type consensusRPCRecord struct {
 	outcome     string
 	blocks      int64
 	queryPeers  bool
+	direct      bool
 	hasSession  bool
 	hasRequest  bool
 	hasResponse bool
@@ -39,6 +42,7 @@ type consensusRPCLifecycle struct {
 	request      [32]byte
 	content      string
 	received     bool
+	direct       bool
 	taskInbound  bool
 	taskResponse bool
 	response     [32]byte
@@ -150,11 +154,14 @@ func parseConsensusRPCLine(line []byte) (consensusRPCRecord, error) {
 		if len(payload) <= index {
 			return fmt.Errorf("missing request")
 		}
-		digest, content, queryPeers, err := parseConsensusRPCRequest(payload[index])
+		digest, content, queryPeers, direct, err := parseConsensusRPCRequest(payload[index])
 		if err != nil {
 			return err
 		}
-		record.request, record.content, record.queryPeers = digest, content, queryPeers
+		if direct && tag != "Received rpc request" && tag != "Outbound response" {
+			return fmt.Errorf("direct request at unsupported stage")
+		}
+		record.request, record.content, record.queryPeers, record.direct = digest, content, queryPeers, direct
 		record.hasRequest = true
 		return nil
 	}
@@ -236,33 +243,82 @@ func parseConsensusRPCLine(line []byte) (consensusRPCRecord, error) {
 	return record, nil
 }
 
-func parseConsensusRPCRequest(raw json.RawMessage) ([32]byte, string, bool, error) {
-	var body map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &body); err != nil || body == nil {
-		return [32]byte{}, "", false, fmt.Errorf("invalid request object")
+func parseConsensusRPCRequest(raw json.RawMessage) ([32]byte, string, bool, bool, error) {
+	body, err := consensusRPCObject(raw)
+	if err != nil {
+		return [32]byte{}, "", false, false, fmt.Errorf("invalid request object: %w", err)
 	}
-	var queryPeers bool
-	queryRaw, ok := body["query_peers"]
-	if !ok || unmarshalRequiredJSON(queryRaw, &queryPeers) != nil {
-		return [32]byte{}, "", false, fmt.Errorf("invalid query_peers")
-	}
-	contentRaw, ok := body["content"]
-	if !ok {
-		return [32]byte{}, "", false, fmt.Errorf("missing request content")
-	}
+	direct := false
+	queryPeers := false
 	content := "other"
-	var contentObject map[string]json.RawMessage
-	if err := json.Unmarshal(contentRaw, &contentObject); err != nil || contentObject == nil {
-		return [32]byte{}, "", false, fmt.Errorf("invalid request content")
-	}
-	if _, ok := contentObject["BlocksAndTxs"]; ok {
-		content = "blocks_and_txs"
+	if _, wrapped := body["content"]; wrapped {
+		if unmarshalRequiredJSON(body["query_peers"], &queryPeers) != nil {
+			return [32]byte{}, "", false, false, fmt.Errorf("invalid query_peers")
+		}
+		contentObject, err := consensusRPCObject(body["content"])
+		if err != nil {
+			return [32]byte{}, "", false, false, fmt.Errorf("invalid request content")
+		}
+		if _, ok := contentObject["BlocksAndTxs"]; ok {
+			content = "blocks_and_txs"
+		}
+		if _, flat := contentObject["after_round"]; flat {
+			if !validFlatConsensusRPCRequest(contentObject) {
+				return [32]byte{}, "", false, false, fmt.Errorf("invalid flat request content")
+			}
+			content = "blocks_and_txs"
+		}
+	} else {
+		if !validFlatConsensusRPCRequest(body) {
+			return [32]byte{}, "", false, false, fmt.Errorf("invalid direct request")
+		}
+		direct, content = true, "blocks_and_txs"
 	}
 	canonical, err := canonicalJSON(raw)
 	if err != nil {
-		return [32]byte{}, "", false, err
+		return [32]byte{}, "", false, false, err
 	}
-	return sha256.Sum256(canonical), content, queryPeers, nil
+	return sha256.Sum256(canonical), content, queryPeers, direct, nil
+}
+
+func validFlatConsensusRPCRequest(body map[string]json.RawMessage) bool {
+	var round uint64
+	var hash string
+	return len(body) == 2 && unmarshalRequiredJSON(body["after_round"], &round) == nil &&
+		unmarshalRequiredJSON(body["until_block_hash"], &hash) == nil && hash != ""
+}
+
+func consensusRPCObject(raw json.RawMessage) (map[string]json.RawMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return nil, fmt.Errorf("expected object")
+	}
+	body := make(map[string]json.RawMessage)
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, ok := token.(string)
+		if !ok {
+			return nil, fmt.Errorf("invalid object key")
+		}
+		if _, exists := body[key]; exists {
+			return nil, fmt.Errorf("duplicate object key")
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, err
+		}
+		body[key] = value
+	}
+	if token, err := decoder.Token(); err != nil || token != json.Delim('}') {
+		return nil, fmt.Errorf("unclosed object")
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, fmt.Errorf("trailing object data")
+	}
+	return body, nil
 }
 
 func parseConsensusRPCResponse(raw json.RawMessage) ([32]byte, string, string, int64, error) {
@@ -271,25 +327,39 @@ func parseConsensusRPCResponse(raw json.RawMessage) ([32]byte, string, string, i
 		return [32]byte{}, "", "", 0, err
 	}
 	digest := sha256.Sum256(canonical)
-	var variants map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &variants); err != nil || variants == nil {
+	variants, err := consensusRPCObject(raw)
+	if err != nil {
 		return [32]byte{}, "", "", 0, fmt.Errorf("invalid response object")
 	}
 	okRaw, ok := variants["Ok"]
 	if !ok {
 		return digest, "other", "other", 0, nil
 	}
-	var okBody map[string]json.RawMessage
-	if err := json.Unmarshal(okRaw, &okBody); err != nil || okBody == nil {
+	if len(variants) != 1 {
+		return [32]byte{}, "", "", 0, fmt.Errorf("conflicting response variants")
+	}
+	okBody, err := consensusRPCObject(okRaw)
+	if err != nil {
 		return [32]byte{}, "", "", 0, fmt.Errorf("invalid Ok response")
 	}
 	blocksRaw, ok := okBody["BlocksAndTxs"]
-	if !ok {
-		return digest, "other", "other", 0, nil
-	}
 	var blocksBody map[string]json.RawMessage
-	if err := json.Unmarshal(blocksRaw, &blocksBody); err != nil || blocksBody == nil {
-		return [32]byte{}, "", "", 0, fmt.Errorf("invalid BlocksAndTxs response")
+	if ok {
+		if len(okBody) != 1 {
+			return [32]byte{}, "", "", 0, fmt.Errorf("conflicting block response forms")
+		}
+		blocksBody, err = consensusRPCObject(blocksRaw)
+		if err != nil {
+			return [32]byte{}, "", "", 0, fmt.Errorf("invalid BlocksAndTxs response")
+		}
+	} else if _, hasN := okBody["n"]; hasN {
+		var hash string
+		if len(okBody) != 2 || unmarshalRequiredJSON(okBody["last_block_hash"], &hash) != nil || hash == "" {
+			return [32]byte{}, "", "", 0, fmt.Errorf("invalid flat block response")
+		}
+		blocksBody = okBody
+	} else {
+		return digest, "other", "other", 0, nil
 	}
 	var n int64
 	if rawN, present := blocksBody["n"]; !present || unmarshalRequiredJSON(rawN, &n) != nil || n < 1 || n > maxConsensusRPCServedBlocks {
@@ -300,7 +370,9 @@ func parseConsensusRPCResponse(raw json.RawMessage) ([32]byte, string, string, i
 
 func canonicalJSON(raw []byte) ([]byte, error) {
 	var value interface{}
-	if err := json.Unmarshal(raw, &value); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
 		return nil, err
 	}
 	return json.Marshal(value)
@@ -323,11 +395,14 @@ func (t *consensusRPCTracker) accept(record consensusRPCRecord) string {
 		if life == nil || life.received || record.queryPeers {
 			return "unjoinable"
 		}
-		if existing, collision := t.byRequest[record.request]; collision && existing != record.session {
+		if existing, collision := t.byRequest[record.request]; !record.direct && collision && existing != record.session {
 			return "unjoinable"
 		}
 		life.request, life.content, life.received, life.updatedAt = record.request, record.content, true, now
-		t.byRequest[record.request] = record.session
+		life.direct = record.direct
+		if !record.direct {
+			t.byRequest[record.request] = record.session
+		}
 		return "ok"
 	case "Rpc task inbound":
 		life := t.lifecycleForRequest(record.request)
@@ -345,8 +420,8 @@ func (t *consensusRPCTracker) accept(record consensusRPCRecord) string {
 		return "ok"
 	case "Outbound response":
 		life := t.bySession[record.session]
-		if life == nil || !life.received || !life.taskInbound || !life.taskResponse ||
-			life.request != record.request || life.response != record.response || record.queryPeers {
+		if life == nil || !life.received || life.direct != record.direct || life.request != record.request || record.queryPeers ||
+			(!life.direct && (!life.taskInbound || !life.taskResponse || life.response != record.response)) {
 			return "unjoinable"
 		}
 		completionKey := sha256.Sum256(append(record.session[:], record.response[:]...))
@@ -364,17 +439,21 @@ func (t *consensusRPCTracker) accept(record consensusRPCRecord) string {
 			delete(t.completed, oldestKey)
 		}
 		t.completed[completionKey] = now
-		// Emit stage counters only after the complete five-record lifecycle
-		// joins. An abandoned or replayed prefix must not look like served work.
+		// Publish only after the full observed lifecycle joins. Direct requests
+		// have no task stages; wrapped requests still require both task records.
 		metrics.HLConsensusRPCEvents.WithLabelValues("serve", "stream_opened", "observed", "other").Inc()
 		metrics.HLConsensusRPCEvents.WithLabelValues("serve", "request_received", "observed", life.content).Inc()
-		metrics.HLConsensusRPCEvents.WithLabelValues("serve", "task_inbound", "observed", life.content).Inc()
-		metrics.HLConsensusRPCEvents.WithLabelValues("serve", "task_response", "observed", life.content).Inc()
+		if !life.direct {
+			metrics.HLConsensusRPCEvents.WithLabelValues("serve", "task_inbound", "observed", life.content).Inc()
+			metrics.HLConsensusRPCEvents.WithLabelValues("serve", "task_response", "observed", life.content).Inc()
+		}
 		metrics.HLConsensusRPCEvents.WithLabelValues("serve", "response_sent", record.outcome, record.content).Inc()
 		if record.outcome == "ok" && record.content == "blocks_and_txs" {
 			metrics.HLConsensusRPCBlocksServed.Add(float64(record.blocks))
 		}
-		delete(t.byRequest, life.request)
+		if !life.direct {
+			delete(t.byRequest, life.request)
+		}
 		delete(t.bySession, life.session)
 		return "ok"
 	default:
@@ -395,7 +474,9 @@ func (t *consensusRPCTracker) expire(now time.Time) {
 	cutoff := now.Add(-t.ttl)
 	for session, life := range t.bySession {
 		if life.updatedAt.Before(cutoff) {
-			delete(t.byRequest, life.request)
+			if !life.direct {
+				delete(t.byRequest, life.request)
+			}
 			delete(t.bySession, session)
 		}
 	}

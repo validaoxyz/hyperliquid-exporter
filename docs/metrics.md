@@ -83,7 +83,7 @@ Consensus event semantics are source-limited:
 - `RoundCatchUp` direction remains upstream-opaque;
 - accumulator counters add each accepted window's `delta`; `n` is the source-window observation count;
 - registered and sent RPC accumulator values are outbound local work, not served requests;
-- `hl_consensus_rpc_blocks_served_total` counts only the explicitly proven complete outbound-response branch.
+- `hl_consensus_rpc_blocks_served_total` counts blocks explicitly reported by complete inbound RPC lifecycles. Direct requests require the incoming stream, received request and matching outbound response; wrapped requests also require both task stages and `query_peers=false`.
 
 Validator latency EMA is the upstream measured field used by the sampled node build. It is not an exporter-measured protocol RTT. A complete all-zero EMA snapshot is treated as initialization; mixed snapshots preserve genuine zeros.
 
@@ -183,7 +183,7 @@ Run `go generate ./internal/metrics` after changing a declaration. `go test ./in
 | `hl_consensus_round_qc_total` | Counter | Prometheus | - | base | Accepted RoundQc source-window delta accumulated since exporter start; no relationship to committed blocks is inferred. | `prometheus_instruments.go` |
 | `hl_consensus_round_tc_total` | Counter | Prometheus | - | base | Accepted RoundTc source-window delta accumulated since exporter start; no cause or network-health conclusion is inferred. | `prometheus_instruments.go` |
 | `hl_consensus_rounds_per_block` | Gauge | OTel bridge | - | base | Most recent positive difference between consecutive accepted consensus Block round values; a single observed value, not an average | `instruments.go` |
-| `hl_consensus_rpc_blocks_served_total` | Counter | Prometheus | - | base | Blocks explicitly reported sent by complete query_peers=false Outbound response Ok.BlocksAndTxs results since exporter start. | `validator_consensus_prometheus.go` |
+| `hl_consensus_rpc_blocks_served_total` | Counter | Prometheus | - | base | Blocks explicitly reported sent by complete inbound RPC lifecycles since exporter start; wrapped requests require query_peers=false. | `validator_consensus_prometheus.go` |
 | `hl_consensus_rpc_events_total` | Counter | Prometheus | `content`, `direction`, `outcome`, `stage` | base | Consensus RPC lifecycle events since exporter start, classified only into fixed direction, stage, outcome, and content vocabularies. | `validator_consensus_prometheus.go` |
 | `hl_consensus_rpc_parse_total` | Counter | Prometheus | `result` | base | Consensus RPC source records since exporter start by bounded parser result. | `validator_consensus_prometheus.go` |
 | `hl_consensus_rpc_requests_registered_total` | Counter | Prometheus | - | base | Accepted RpcRequestsRegistered delta for outbound local accumulator work since exporter start; not a served-request count. | `prometheus_instruments.go` |
