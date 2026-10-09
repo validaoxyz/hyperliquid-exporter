@@ -5,6 +5,14 @@ results in CI or internal records. See docs/releasing.md. -->
 
 ## [Unreleased]
 
+## [v4.1.5] - 2026-10-09
+
+### Fixed
+
+- Read current consensus RPC requests and block responses so schema alerts and served-block metrics work with updated nodes.
+- Accept `Rpc` and `Validator` mempool transaction origins alongside the earlier boolean format.
+- Build with Go 1.26.9 and update `golang.org/x/net` to v0.60.0 for the October security fixes, including the HTTP/2 server crash described in [GO-2026-6617](https://pkg.go.dev/vuln/GO-2026-6617).
+
 ## [v4.1.4] - 2026-10-02
 
 ### Fixed
