@@ -226,3 +226,33 @@ func TestParseVisorTime(t *testing.T) {
 		})
 	}
 }
+
+func TestLatestHourlyFileNestedReadErrorDoesNotFallBack(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission fixture requires a non-root process")
+	}
+	root := t.TempDir()
+	older, newer := filepath.Join(root, "20261008"), filepath.Join(root, "20261009")
+	for _, dir := range []string{older, newer} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(older, "23"), []byte("older\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(newer, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(newer, 0o700)
+	if path, err := latestHourlyFile(root); path != "" || !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("unreadable newest date: path=%q err=%v, want permission error without older fallback", path, err)
+	}
+	if err := os.Chmod(newer, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A readable empty date remains a valid reason to select the preceding date.
+	if path, err := latestHourlyFile(root); err != nil || path != filepath.Join(older, "23") {
+		t.Fatalf("readable empty newest date: path=%q err=%v", path, err)
+	}
+}

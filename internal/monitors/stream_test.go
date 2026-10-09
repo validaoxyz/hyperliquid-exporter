@@ -660,3 +660,106 @@ func TestTailStreamReportsBoundedFailureStage(t *testing.T) {
 		t.Fatal("tail did not cancel after open failure")
 	}
 }
+
+func TestTailStreamHourlyReadErrorPreservesCursor(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission fixture requires a non-root process")
+	}
+	root := t.TempDir()
+	older, newer := filepath.Join(root, "20261008"), filepath.Join(root, "20261009")
+	for _, dir := range []string{older, newer} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(older, "23"), []byte("historical\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current := filepath.Join(newer, "11")
+	writer, err := os.OpenFile(current, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	defer os.Chmod(newer, 0o700)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(streamTestTimeout):
+			t.Error("tailer did not stop")
+		}
+	}()
+	lines := make(chan string, 16)
+	resolutions := make(chan error, 64)
+	switches := make(chan string, 16)
+	go func() {
+		defer close(done)
+		tailStream(ctx, tailStreamOpts{
+			resolve:     func() (string, error) { path, err := latestHourlyFile(root); resolutions <- err; return path, err },
+			rescanEvery: 20 * time.Millisecond, eofSleep: time.Millisecond,
+			onLine:   func(line string) { lines <- strings.TrimSpace(line) },
+			onSwitch: func(path string) { switches <- path },
+		})
+	}()
+	if path := waitStreamValue(t, switches); path != current {
+		t.Fatalf("startup path=%q", path)
+	}
+	appendRecord := func(value string) {
+		t.Helper()
+		if _, err := writer.WriteString(value + "\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendRecord("before")
+	if line := waitStreamValue(t, lines); line != "before" {
+		t.Fatalf("first line=%q", line)
+	}
+	if err := os.Chmod(newer, 0); err != nil {
+		t.Fatal(err)
+	}
+	waitResolution := func(wantError bool) {
+		t.Helper()
+		timeout := time.After(streamTestTimeout)
+		for {
+			select {
+			case err := <-resolutions:
+				if wantError && errors.Is(err, os.ErrPermission) || !wantError && err == nil {
+					return
+				}
+			case line := <-lines:
+				t.Fatalf("unexpected replay while waiting for discovery: %q", line)
+			case <-timeout:
+				t.Fatalf("timed out waiting for discovery error=%v", wantError)
+			}
+		}
+	}
+	waitResolution(true)
+	// The already-open writer and reader still work while directory discovery fails.
+	appendRecord("during")
+	if line := waitStreamValue(t, lines); line != "during" {
+		t.Fatalf("line during failure=%q", line)
+	}
+	if err := os.Chmod(newer, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	waitResolution(false)
+	appendRecord("after")
+	if line := waitStreamValue(t, lines); line != "after" {
+		t.Fatalf("line after recovery=%q", line)
+	}
+	cancel()
+	<-done
+	select {
+	case line := <-lines:
+		t.Fatalf("unexpected extra line=%q", line)
+	default:
+	}
+	select {
+	case path := <-switches:
+		t.Fatalf("discovery failure switched to %q", path)
+	default:
+	}
+}

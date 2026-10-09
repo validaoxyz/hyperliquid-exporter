@@ -307,7 +307,10 @@ func latestHourlyFile(root string) (string, error) {
 	for i := len(dateNames) - 1; i >= 0; i-- {
 		datePath := filepath.Join(root, dateNames[i])
 		hourEntries, err := os.ReadDir(datePath)
-		if err != nil || len(hourEntries) == 0 {
+		if err != nil {
+			return "", err
+		}
+		if len(hourEntries) == 0 {
 			continue
 		}
 		hourNames := make([]string, 0, len(hourEntries))
