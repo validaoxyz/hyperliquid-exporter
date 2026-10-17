@@ -5,6 +5,12 @@ results in CI or internal records. See docs/releasing.md. -->
 
 ## [Unreleased]
 
+## [v4.1.7] - 2026-10-17
+
+### Fixed
+
+- Restore mempool size and oldest-uncommitted age metrics for nodes that report `certified_hashes` alongside `uncommitted_txs`.
+
 ## [v4.1.6] - 2026-10-17
 
 ### Fixed

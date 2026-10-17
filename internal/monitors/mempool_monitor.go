@@ -545,14 +545,19 @@ func parseMempoolSizeSnapshot(inner []json.RawMessage, sourceTime time.Time) (ma
 		snapshot[key] = value
 	}
 	_, legacy := snapshot["uncommitted_txs"]
+	expectedComponents := 6
 	if legacy {
-		for _, key := range []string{"proposable_txs", "unproposable_txs", "certified_hashes"} {
+		expectedComponents = 4
+		for _, key := range []string{"proposable_txs", "unproposable_txs"} {
 			if _, exists := snapshot[key]; exists {
 				return nil, 0, false
 			}
 		}
+		if _, exists := snapshot["certified_hashes"]; exists {
+			expectedComponents++
+		}
 	}
-	if (legacy && len(snapshot) != 4) || (!legacy && len(snapshot) != 6) {
+	if len(snapshot) != expectedComponents {
 		return nil, 0, false
 	}
 

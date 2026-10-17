@@ -240,6 +240,32 @@ func TestParseMempoolSizeCountsAreExactIntegers(t *testing.T) {
 	}
 }
 
+func TestParseMempoolLegacyCertifiedSnapshot(t *testing.T) {
+	// Observed mainnet shape; transaction hashes are replaced with placeholders.
+	line := []byte(`["2026-10-17T09:10:52.808116456",["Size stats",[["committed_tx_hashes",100000],["uncommitted_txs",4],["blocks",3],["certified_hashes",100000],["rpc_requests",0]],[["h1","2026-10-17T09:10:52.697403226"],["h2","2026-10-17T09:10:52.765175302"],["h3","2026-10-17T09:10:52.766332284"],["h4","2026-10-17T09:10:52.807708738"]]]]`)
+	got := parseMempoolObservation(line)
+	if !got.complete || got.parseReason != "" || len(got.sizeSnapshot) != 5 {
+		t.Fatalf("legacy snapshot with certified hashes rejected: %+v", got)
+	}
+	if got.sizeSnapshot["uncommitted_txs"] != 4 || got.sizeSnapshot["certified_hashes"] != 100000 || got.oldestAge == nil || *got.oldestAge != 0.11071323 {
+		t.Fatalf("legacy measurements changed: %+v", got)
+	}
+	for name, payload := range map[string]string{
+		"count mismatch":       `["Size stats",[["committed_tx_hashes",100],["uncommitted_txs",1],["blocks",3],["certified_hashes",80],["rpc_requests",4]],[]]`,
+		"negative certified":   `["Size stats",[["committed_tx_hashes",100],["uncommitted_txs",0],["blocks",3],["certified_hashes",-1],["rpc_requests",4]],[]]`,
+		"fractional certified": `["Size stats",[["committed_tx_hashes",100],["uncommitted_txs",0],["blocks",3],["certified_hashes",1.5],["rpc_requests",4]],[]]`,
+		"null certified":       `["Size stats",[["committed_tx_hashes",100],["uncommitted_txs",0],["blocks",3],["certified_hashes",null],["rpc_requests",4]],[]]`,
+		"duplicate certified":  `["Size stats",[["committed_tx_hashes",100],["uncommitted_txs",0],["blocks",3],["certified_hashes",80],["certified_hashes",80],["rpc_requests",4]],[]]`,
+		"missing blocks":       `["Size stats",[["committed_tx_hashes",100],["uncommitted_txs",0],["certified_hashes",80],["rpc_requests",4]],[]]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if invalid := parseMempoolObservation(mempoolLine(payload)); invalid.complete || invalid.parseReason != "invalid_size_snapshot" {
+				t.Fatalf("malformed legacy snapshot accepted: %+v", invalid)
+			}
+		})
+	}
+}
+
 func TestParseMempoolSplitSizeSnapshot(t *testing.T) {
 	for name, payload := range map[string]string{
 		"populated": `["Size stats",[["committed_tx_hashes",100],["proposable_txs",2],["unproposable_txs",1],["blocks",3],["certified_hashes",80],["rpc_requests",4]],[["h1","2026-08-08T03:16:11.000000000"],["h2","2026-08-08T03:16:16.000000000"]]]`,
@@ -286,8 +312,9 @@ func TestPublishMempoolSizeSchemaTransitions(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(metrics.HLMempoolSize, metrics.HLMempoolOldestUncommittedAgeSeconds)
 	legacy := parseMempoolObservation(mempoolLine(`["Size stats",[["committed_tx_hashes",100],["uncommitted_txs",1],["blocks",3],["rpc_requests",4]],[["h1","2026-08-08T03:16:11.000000000"]]]`))
+	legacyCertified := parseMempoolObservation(mempoolLine(`["Size stats",[["committed_tx_hashes",100],["uncommitted_txs",1],["blocks",3],["certified_hashes",80],["rpc_requests",4]],[["h1","2026-08-08T03:16:11.000000000"]]]`))
 	split := parseMempoolObservation(mempoolLine(`["Size stats",[["committed_tx_hashes",200],["proposable_txs",2],["unproposable_txs",1],["blocks",5],["certified_hashes",180],["rpc_requests",6]],[]]`))
-	for _, obs := range []mempoolObservation{legacy, split, legacy} {
+	for _, obs := range []mempoolObservation{legacy, legacyCertified, split, legacyCertified, legacy} {
 		if !obs.complete {
 			t.Fatalf("invalid transition fixture: %+v", obs)
 		}
@@ -306,6 +333,9 @@ func TestPublishMempoolSizeSchemaTransitions(t *testing.T) {
 				}
 			case "hl_mempool_oldest_uncommitted_age_seconds":
 				agePresent = len(family.Metric) > 0
+				if agePresent && obs.oldestAge != nil && family.Metric[0].Gauge.GetValue() != *obs.oldestAge {
+					t.Fatalf("oldest age = %v, want %v", family.Metric[0].Gauge.GetValue(), *obs.oldestAge)
+				}
 			}
 		}
 		if len(got) != len(obs.sizeSnapshot) || agePresent != (obs.oldestAge != nil) {

@@ -127,7 +127,7 @@ RocksDB gauges publish one complete parsed stats block per database and retain t
 
 Mempool and split-client mempool streams publish only complete newline-delimited records. Current snapshots commit atomically. Parser, structured-error, prune, drop, and source-age families use bounded enums and counts only; hashes, accounts, payload text, and cross-stream dwell joins are intentionally absent.
 
-`committed_tx_hashes` is a bounded post-commit dedup cache, not mempool depth or capacity. Legacy `Size stats` records report `uncommitted_txs`; newer records report `proposable_txs`, `unproposable_txs`, and `certified_hashes` separately. The exporter publishes those fields as reported, without deriving an uncommitted total. Labels absent from the latest complete schema are removed.
+`committed_tx_hashes` is a bounded post-commit dedup cache, not mempool depth or capacity. Legacy `Size stats` records report `uncommitted_txs` and may also report `certified_hashes`; newer records report `proposable_txs`, `unproposable_txs`, and `certified_hashes` separately. The exporter publishes those fields as reported, without deriving an uncommitted total. Labels absent from the latest complete schema are removed.
 
 Oldest-uncommitted age comes only from a complete valid legacy snapshot whose timestamp list matches `uncommitted_txs`. It is absent for the newer schema, whose list membership is not established, and remains qualified by independent size-source health.
 
