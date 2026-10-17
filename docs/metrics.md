@@ -127,7 +127,9 @@ RocksDB gauges publish one complete parsed stats block per database and retain t
 
 Mempool and split-client mempool streams publish only complete newline-delimited records. Current snapshots commit atomically. Parser, structured-error, prune, drop, and source-age families use bounded enums and counts only; hashes, accounts, payload text, and cross-stream dwell joins are intentionally absent.
 
-`committed_tx_hashes` is a bounded post-commit dedup cache, not mempool depth or capacity. Oldest-uncommitted age comes only from a complete valid `Size stats` snapshot and remains qualified by independent size-source health.
+`committed_tx_hashes` is a bounded post-commit dedup cache, not mempool depth or capacity. Legacy `Size stats` records report `uncommitted_txs`; newer records report `proposable_txs`, `unproposable_txs`, and `certified_hashes` separately. The exporter publishes those fields as reported, without deriving an uncommitted total. Labels absent from the latest complete schema are removed.
+
+Oldest-uncommitted age comes only from a complete valid legacy snapshot whose timestamp list matches `uncommitted_txs`. It is absent for the newer schema, whose list membership is not established, and remains qualified by independent size-source health.
 
 ## Query and cardinality rules
 
@@ -304,11 +306,11 @@ Run `go generate ./internal/metrics` after changing a declaration. `go test ./in
 | `hl_latency_l1_task_work_fraction` | Gauge | Prometheus | `step` | base | Raw upstream work_fraction value for each L1 phase's latest sampling window; it is not constrained to the interval 0..1. | `prometheus_instruments.go` |
 | `hl_mempool_dropped_items_total` | Counter | Prometheus | `kind` | base | Items in validated mempool drop batches since exporter start (kind=blocks or transactions). | `mempool_prometheus.go` |
 | `hl_mempool_events_total` | Counter | Prometheus | `event_type`, `status` | base | Valid mempool records observed since exporter start. add_tx and verify_block status is one of ok, err, other; other event types use not_applicable. Unknown tags use event_type="other". | `prometheus_instruments.go` |
-| `hl_mempool_oldest_uncommitted_age_seconds` | Gauge | Prometheus | - | base | Age of the oldest current uncommitted transaction at the latest complete Size stats snapshot; absent before the first valid snapshot. | `mempool_prometheus.go` |
+| `hl_mempool_oldest_uncommitted_age_seconds` | Gauge | Prometheus | - | base | Age of the oldest current uncommitted transaction at the latest complete legacy Size stats snapshot; absent before the first valid snapshot and when the current node schema does not report uncommitted_txs. | `mempool_prometheus.go` |
 | `hl_mempool_parser_events_total` | Counter | Prometheus | `reason` | base | Mempool records requiring bounded parser/taxonomy handling; reasons are fixed and never contain payload text. | `mempool_prometheus.go` |
 | `hl_mempool_rpc_prune_events_total` | Counter | Prometheus | - | base | Valid Pruned rpc request throttle records observed since exporter start. | `mempool_prometheus.go` |
 | `hl_mempool_rpc_requests_pruned_total` | Counter | Prometheus | - | base | RPC-request entries pruned since exporter start, summed from the validated third payload element. | `mempool_prometheus.go` |
-| `hl_mempool_size` | Gauge | Prometheus | `component` | base | Mempool component sizes from the 'Size stats' event payload. components: committed_tx_hashes, uncommitted_txs, blocks, rpc_requests. | `prometheus_instruments.go` |
+| `hl_mempool_size` | Gauge | Prometheus | `component` | base | Mempool component sizes reported by the latest complete 'Size stats' snapshot. Components depend on node schema: committed_tx_hashes, uncommitted_txs, proposable_txs, unproposable_txs, blocks, certified_hashes, rpc_requests. Components absent from that schema are omitted. | `prometheus_instruments.go` |
 | `hl_mempool_structured_errors_total` | Counter | Prometheus | `error_kind`, `operation` | base | Structured add/verify failures by fixed operation and allowlisted top-level error kind; nested payloads are ignored. | `mempool_prometheus.go` |
 | `hl_mempool_txs_bytes_total` | Counter | Prometheus | - | base | Bytes read from complete JSONL records in data/mempool_txs. | `prometheus_instruments.go` |
 | `hl_mempool_txs_latest_time` | Gauge | Prometheus | - | base | Source Unix timestamp from the latest valid split-client mempool transaction record; absent before first observation. | `prometheus_instruments.go` |

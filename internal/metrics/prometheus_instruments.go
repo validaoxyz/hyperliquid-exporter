@@ -758,7 +758,7 @@ var (
 
 	HLMempoolSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_mempool_size",
-		Help: "Mempool component sizes from the 'Size stats' event payload. components: committed_tx_hashes, uncommitted_txs, blocks, rpc_requests.",
+		Help: "Mempool component sizes reported by the latest complete 'Size stats' snapshot. Components depend on node schema: committed_tx_hashes, uncommitted_txs, proposable_txs, unproposable_txs, blocks, certified_hashes, rpc_requests. Components absent from that schema are omitted.",
 	}, []string{"component"})
 )
 

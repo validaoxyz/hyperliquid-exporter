@@ -5,6 +5,12 @@ results in CI or internal records. See docs/releasing.md. -->
 
 ## [Unreleased]
 
+## [v4.1.6] - 2026-10-17
+
+### Fixed
+
+- Read bare-address mempool transaction origins and the current `Size stats` format. Report `proposable_txs`, `unproposable_txs`, and `certified_hashes` directly; omit legacy uncommitted count and age metrics when the node no longer reports them.
+
 ## [v4.1.5] - 2026-10-09
 
 ### Fixed

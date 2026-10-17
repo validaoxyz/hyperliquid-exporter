@@ -31,7 +31,10 @@ var mempoolEventAllowlist = map[string]string{
 var mempoolSizeComponents = map[string]struct{}{
 	"committed_tx_hashes": {},
 	"uncommitted_txs":     {},
+	"proposable_txs":      {},
+	"unproposable_txs":    {},
 	"blocks":              {},
+	"certified_hashes":    {},
 	"rpc_requests":        {},
 }
 
@@ -282,7 +285,9 @@ func parseMempoolObservation(line []byte) mempoolObservation {
 			return obs
 		}
 		obs.sizeSnapshot = snapshot
-		obs.oldestAge = &oldest
+		if _, legacy := snapshot["uncommitted_txs"]; legacy {
+			obs.oldestAge = &oldest
+		}
 	case "committed":
 		if !validateMempoolCommitted(inner) {
 			obs.parseReason = "invalid_committed_payload"
@@ -348,7 +353,7 @@ func validateMempoolTxOrigin(raw json.RawMessage) bool {
 	}
 	var origin string
 	if json.Unmarshal(raw, &origin) == nil {
-		return origin == "Rpc"
+		return origin == "Rpc" || isFullHexAddress(origin)
 	}
 
 	// Require exactly one Validator field, including rejecting duplicate keys.
@@ -539,7 +544,15 @@ func parseMempoolSizeSnapshot(inner []json.RawMessage, sourceTime time.Time) (ma
 		}
 		snapshot[key] = value
 	}
-	if len(snapshot) != len(mempoolSizeComponents) {
+	_, legacy := snapshot["uncommitted_txs"]
+	if legacy {
+		for _, key := range []string{"proposable_txs", "unproposable_txs", "certified_hashes"} {
+			if _, exists := snapshot[key]; exists {
+				return nil, 0, false
+			}
+		}
+	}
+	if (legacy && len(snapshot) != 4) || (!legacy && len(snapshot) != 6) {
 		return nil, 0, false
 	}
 
@@ -547,8 +560,9 @@ func parseMempoolSizeSnapshot(inner []json.RawMessage, sourceTime time.Time) (ma
 	if !rawJSONArray(inner[2]) || json.Unmarshal(inner[2], &current) != nil || len(current) > maxMempoolBatchItems {
 		return nil, 0, false
 	}
-	uncommitted := snapshot["uncommitted_txs"]
-	if uncommitted != int64(len(current)) {
+	// Only the legacy schema establishes that this list enumerates all
+	// uncommitted transactions. The split schema reports its counts separately.
+	if legacy && snapshot["uncommitted_txs"] != int64(len(current)) {
 		return nil, 0, false
 	}
 	oldest := 0.0
@@ -604,10 +618,19 @@ func publishMempoolObservationUnlocked(obs mempoolObservation) {
 		metrics.HLMempoolDroppedItemsTotal.WithLabelValues(obs.droppedKind).Add(float64(obs.dropped))
 	}
 	if obs.sizeSnapshot != nil {
+		for component := range mempoolSizeComponents {
+			if _, exists := obs.sizeSnapshot[component]; !exists {
+				metrics.HLMempoolSize.DeleteLabelValues(component)
+			}
+		}
 		for component, value := range obs.sizeSnapshot {
 			metrics.HLMempoolSize.WithLabelValues(component).Set(float64(value))
 		}
-		metrics.HLMempoolOldestUncommittedAgeSeconds.WithLabelValues().Set(*obs.oldestAge)
+		if obs.oldestAge == nil {
+			metrics.HLMempoolOldestUncommittedAgeSeconds.DeleteLabelValues()
+		} else {
+			metrics.HLMempoolOldestUncommittedAgeSeconds.WithLabelValues().Set(*obs.oldestAge)
+		}
 	}
 }
 

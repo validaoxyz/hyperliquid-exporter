@@ -28,7 +28,7 @@ var (
 	}, []string{"kind"})
 	HLMempoolOldestUncommittedAgeSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hl_mempool_oldest_uncommitted_age_seconds",
-		Help: "Age of the oldest current uncommitted transaction at the latest complete Size stats snapshot; absent before the first valid snapshot.",
+		Help: "Age of the oldest current uncommitted transaction at the latest complete legacy Size stats snapshot; absent before the first valid snapshot and when the current node schema does not report uncommitted_txs.",
 	}, []string{})
 	HLMempoolTxsParserEventsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "hl_mempool_txs_parser_events_total",

@@ -101,6 +101,7 @@ func TestParseMempoolTxOrigins(t *testing.T) {
 		"legacy true":  `true`,
 		"rpc":          `"Rpc"`,
 		"validator":    `{"Validator":"0x2222222222222222222222222222222222222222"}`,
+		"address":      `"0x2222222222222222222222222222222222222222"`,
 	} {
 		for _, status := range []string{"ok", "err"} {
 			t.Run(name+"/"+status, func(t *testing.T) {
@@ -135,6 +136,9 @@ func TestParseMempoolRejectsMalformedTxOrigins(t *testing.T) {
 		"unknown string":      `"FutureOrigin"`,
 		"wrong string case":   `"rpc"`,
 		"validator string":    `"Validator"`,
+		"short address":       `"0x2222"`,
+		"unprefixed address":  `"2222222222222222222222222222222222222222"`,
+		"nonhex address":      `"0x222222222222222222222222222222222222222g"`,
 		"empty object":        `{}`,
 		"unknown object":      `{"FutureOrigin":"0x2222222222222222222222222222222222222222"}`,
 		"rpc object":          `{"Rpc":null}`,
@@ -233,6 +237,85 @@ func TestParseMempoolSizeCountsAreExactIntegers(t *testing.T) {
 				t.Fatalf("non-integer/overflow count accepted: %+v", got)
 			}
 		})
+	}
+}
+
+func TestParseMempoolSplitSizeSnapshot(t *testing.T) {
+	for name, payload := range map[string]string{
+		"populated": `["Size stats",[["committed_tx_hashes",100],["proposable_txs",2],["unproposable_txs",1],["blocks",3],["certified_hashes",80],["rpc_requests",4]],[["h1","2026-08-08T03:16:11.000000000"],["h2","2026-08-08T03:16:16.000000000"]]]`,
+		"empty":     `["Size stats",[["committed_tx_hashes",100],["proposable_txs",0],["unproposable_txs",0],["blocks",3],["certified_hashes",80],["rpc_requests",4]],[]]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := parseMempoolObservation(mempoolLine(payload))
+			if !got.complete || got.parseReason != "" || len(got.sizeSnapshot) != 6 {
+				t.Fatalf("split size snapshot rejected: %+v", got)
+			}
+			if _, exists := got.sizeSnapshot["uncommitted_txs"]; exists || got.oldestAge != nil {
+				t.Fatalf("split snapshot invented legacy measurements: %+v", got)
+			}
+			if got.sizeSnapshot["certified_hashes"] != 80 || got.sizeSnapshot["rpc_requests"] != 4 {
+				t.Fatalf("reported counts changed: %#v", got.sizeSnapshot)
+			}
+		})
+	}
+}
+
+func TestParseMempoolRejectsMalformedSplitSizeSnapshot(t *testing.T) {
+	for name, payload := range map[string]string{
+		"missing component":     `["Size stats",[["committed_tx_hashes",100],["proposable_txs",0],["unproposable_txs",0],["blocks",3],["rpc_requests",4]],[]]`,
+		"mixed schemas":         `["Size stats",[["committed_tx_hashes",100],["uncommitted_txs",0],["proposable_txs",0],["unproposable_txs",0],["blocks",3],["certified_hashes",80],["rpc_requests",4]],[]]`,
+		"partial hybrid":        `["Size stats",[["committed_tx_hashes",100],["uncommitted_txs",0],["blocks",3],["rpc_requests",4],["proposable_txs",0]],[]]`,
+		"duplicate component":   `["Size stats",[["committed_tx_hashes",100],["proposable_txs",0],["proposable_txs",0],["unproposable_txs",0],["blocks",3],["certified_hashes",80],["rpc_requests",4]],[]]`,
+		"negative component":    `["Size stats",[["committed_tx_hashes",100],["proposable_txs",0],["unproposable_txs",-1],["blocks",3],["certified_hashes",80],["rpc_requests",4]],[]]`,
+		"fractional component":  `["Size stats",[["committed_tx_hashes",100],["proposable_txs",0],["unproposable_txs",0],["blocks",3],["certified_hashes",1.5],["rpc_requests",4]],[]]`,
+		"null component":        `["Size stats",[["committed_tx_hashes",100],["proposable_txs",null],["unproposable_txs",0],["blocks",3],["certified_hashes",80],["rpc_requests",4]],[]]`,
+		"missing list":          `["Size stats",[["committed_tx_hashes",100],["proposable_txs",0],["unproposable_txs",0],["blocks",3],["certified_hashes",80],["rpc_requests",4]],null]`,
+		"malformed list entry":  `["Size stats",[["committed_tx_hashes",100],["proposable_txs",1],["unproposable_txs",0],["blocks",3],["certified_hashes",80],["rpc_requests",4]],[["h1"]]]`,
+		"future list timestamp": `["Size stats",[["committed_tx_hashes",100],["proposable_txs",1],["unproposable_txs",0],["blocks",3],["certified_hashes",80],["rpc_requests",4]],[["h1","2026-08-08T03:16:22.000000000"]]]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := parseMempoolObservation(mempoolLine(payload))
+			if got.complete || got.sizeSnapshot != nil || got.parseReason != "invalid_size_snapshot" {
+				t.Fatalf("malformed split size snapshot accepted: %+v", got)
+			}
+		})
+	}
+}
+
+func TestPublishMempoolSizeSchemaTransitions(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(metrics.HLMempoolSize, metrics.HLMempoolOldestUncommittedAgeSeconds)
+	legacy := parseMempoolObservation(mempoolLine(`["Size stats",[["committed_tx_hashes",100],["uncommitted_txs",1],["blocks",3],["rpc_requests",4]],[["h1","2026-08-08T03:16:11.000000000"]]]`))
+	split := parseMempoolObservation(mempoolLine(`["Size stats",[["committed_tx_hashes",200],["proposable_txs",2],["unproposable_txs",1],["blocks",5],["certified_hashes",180],["rpc_requests",6]],[]]`))
+	for _, obs := range []mempoolObservation{legacy, split, legacy} {
+		if !obs.complete {
+			t.Fatalf("invalid transition fixture: %+v", obs)
+		}
+		publishMempoolObservation(obs)
+		families, err := registry.Gather()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := make(map[string]float64)
+		agePresent := false
+		for _, family := range families {
+			switch family.GetName() {
+			case "hl_mempool_size":
+				for _, metric := range family.Metric {
+					got[metric.Label[0].GetValue()] = metric.Gauge.GetValue()
+				}
+			case "hl_mempool_oldest_uncommitted_age_seconds":
+				agePresent = len(family.Metric) > 0
+			}
+		}
+		if len(got) != len(obs.sizeSnapshot) || agePresent != (obs.oldestAge != nil) {
+			t.Fatalf("stale schema metrics: counts=%v age_present=%v observation=%+v", got, agePresent, obs)
+		}
+		for component, value := range obs.sizeSnapshot {
+			if got[component] != float64(value) {
+				t.Fatalf("component %s = %v, want %v", component, got[component], value)
+			}
+		}
 	}
 }
 
