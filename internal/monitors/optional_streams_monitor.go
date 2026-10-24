@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,7 +14,12 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
-const optionalStreamsPollInterval = 60 * time.Second
+const (
+	optionalStreamsPollInterval = 60 * time.Second
+	optionalStreamRecordLimit   = int64(64 << 20)
+	optionalStreamScanChunk     = 64 << 10
+	optionalStreamScanLimit     = optionalStreamRecordLimit + optionalStreamScanChunk
+)
 
 // optionalStreamDirs is the allowlist of opt-in hl-node data streams whose
 // freshness we track. Operators enable these with node flags
@@ -99,13 +103,13 @@ func tickOptionalStreams(dataRoot string, states map[string]*optionalStreamState
 			}
 			continue
 		}
-		info, err := os.Stat(path)
+		valid, info, err := optionalStreamHasCompleteRecord(path)
 		if err != nil {
 			// The hourly root was present and discovery just returned this
 			// path. A missing path here can be a rotation race, so retain the
 			// last complete sample. A stable deletion is confirmed on the next
 			// successful empty discovery pass above.
-			metrics.MarkSourceError(stream.source, metrics.SourceFailureStat)
+			metrics.MarkSourceError(stream.source, metrics.SourceFailureRead)
 			setOptionalStreamAge(stream.name, state.lastValid, now)
 			continue
 		}
@@ -113,12 +117,6 @@ func tickOptionalStreams(dataRoot string, states map[string]*optionalStreamState
 			metrics.HLNodeStreamAgeSeconds.DeleteLabelValues(stream.name)
 			state.lastValid = time.Time{}
 			metrics.MarkSourceAvailable(stream.source)
-			continue
-		}
-		valid, err := optionalStreamHasCompleteRecord(path)
-		if err != nil {
-			metrics.MarkSourceError(stream.source, metrics.SourceFailureRead)
-			setOptionalStreamAge(stream.name, state.lastValid, now)
 			continue
 		}
 		if !valid {
@@ -149,39 +147,78 @@ func setOptionalStreamAge(stream string, lastValid, now time.Time) {
 	metrics.HLNodeStreamAgeSeconds.WithLabelValues(stream).Set(age.Seconds())
 }
 
-func optionalStreamHasCompleteRecord(path string) (bool, error) {
+func optionalStreamHasCompleteRecord(path string) (bool, os.FileInfo, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
+		return false, nil, err
+	}
+	valid, err := validateOptionalStreamRecord(f, info.Size())
+	return valid, info, err
+}
+
+// Validate only a complete record from the captured descriptor size. Appends
+// cannot extend this read, and a replacement path cannot change its source.
+func validateOptionalStreamRecord(r io.ReaderAt, size int64) (bool, error) {
+	start, end, complete, err := optionalStreamRecordBounds(r, size)
+	if err != nil || !complete {
 		return false, err
 	}
-	const tailBytes = int64(256 << 10)
-	start := info.Size() - tailBytes
-	if start < 0 {
-		start = 0
-	}
-	if _, err := f.Seek(start, io.SeekStart); err != nil {
+	data := make([]byte, int(end-start))
+	if _, err := r.ReadAt(data, start); err != nil {
 		return false, err
-	}
-	data, err := io.ReadAll(f)
-	if err != nil {
-		return false, err
-	}
-	if len(data) == 0 || data[len(data)-1] != '\n' {
-		return false, nil
 	}
 	data = bytes.TrimSpace(data)
-	if len(data) == 0 {
-		return false, nil
+	return len(data) > 0 && (data[0] == '{' || data[0] == '[') && json.Valid(data), nil
+}
+
+// A record is at most 64 MiB between newline separators, including its own
+// whitespace. The scan allows one extra chunk for a separator or blank suffix.
+// Exceeding either bound is a schema failure, never a successful suffix parse.
+func optionalStreamRecordBounds(r io.ReaderAt, size int64) (int64, int64, bool, error) {
+	if size <= 0 {
+		return 0, 0, false, nil
 	}
-	startLine := bytes.LastIndexByte(data, '\n') + 1
-	line := bytes.TrimSpace(data[startLine:])
-	if len(line) == 0 || (line[0] != '{' && line[0] != '[') || !json.Valid(line) {
-		return false, fmt.Errorf("invalid final JSON record")
+	var final [1]byte
+	if _, err := r.ReadAt(final[:], size-1); err != nil {
+		return 0, 0, false, err
 	}
-	return true, nil
+	if final[0] != '\n' {
+		return 0, 0, false, nil
+	}
+	buffer := make([]byte, optionalStreamScanChunk)
+	position, scanned, end := size-1, int64(0), int64(-1)
+	lineEnd := position
+	for position > 0 && scanned < optionalStreamScanLimit {
+		length := min(int64(len(buffer)), position, optionalStreamScanLimit-scanned)
+		position -= length
+		if _, err := r.ReadAt(buffer[:length], position); err != nil {
+			return 0, 0, false, err
+		}
+		scanned += length
+		for index := length - 1; index >= 0; index-- {
+			c := buffer[index]
+			if end < 0 {
+				if c == '\n' {
+					lineEnd = position + index
+					continue
+				}
+				if c == ' ' || c == '\t' || c == '\r' {
+					continue
+				}
+				end = lineEnd
+			} else if c == '\n' {
+				start := position + index + 1
+				return start, end, end-start <= optionalStreamRecordLimit, nil
+			}
+		}
+	}
+	if position == 0 && end > 0 && end <= optionalStreamRecordLimit {
+		return 0, end, true, nil
+	}
+	return 0, 0, false, nil
 }

@@ -113,6 +113,8 @@ The legacy tmp totals include expected empty shell receipts. Use the receipt/mat
 
 Public-IP age is wall-clock age since the observed file mtime. It has no universal heartbeat or refresh cadence. Optional stream age describes a fixed source's last accepted record; it does not prove a downstream consumer stalled.
 
+Optional streams validate the complete final nonblank JSON record from one open file and its captured size. Records may contain at most 64 MiB between newline separators, including whitespace within that line. A terminal newline is required. The backward search reads at most 64 MiB plus 64 KiB, including any blank suffix, before reading the selected record. Incomplete, invalid, oversized, or out-of-window records set `schema_ok=0` and retain the last valid age. An oversized record is unsupported by this validator; that outcome does not prove its JSON is malformed. Actual file read failures set `read_ok=0`. Successful validation uses the same descriptor's captured modification time for stream age.
+
 RocksDB gauges publish one complete parsed stats block per database and retain the last good snapshot through read/schema failures. They do not implement a general warning, corruption, or disk-full taxonomy.
 
 ## Runs, replay, snapshots, and persisted state
