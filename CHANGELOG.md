@@ -5,6 +5,13 @@ results in CI or internal records. See docs/releasing.md. -->
 
 ## [Unreleased]
 
+## [v4.1.9] - 2026-10-24
+
+### Fixed
+
+- Read short gossip disconnect records and null direct consensus RPC responses. Null responses add no served blocks.
+- Validate complete optional stream records up to 64 MiB, including large funding records. Keep reads bounded and preserve the last valid age when a record is incomplete, invalid or too large.
+
 ## [v4.1.8] - 2026-10-24
 
 ### Fixed
