@@ -10,6 +10,7 @@ results in CI or internal records. See docs/releasing.md. -->
 ### Fixed
 
 - Read current gossip connection records and unwrapped consensus RPC block responses so updated nodes report connection events and served blocks without schema alerts.
+- Build with Go 1.26.10 to address [GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809), which rejects compromised intermediate certificates during TLS verification.
 
 ## [v4.1.7] - 2026-10-17
 
