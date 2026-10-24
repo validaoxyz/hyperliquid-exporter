@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -221,7 +222,7 @@ func validKnownGossipPayload(tag string, inner []json.RawMessage) bool {
 		if len(inner) == 4 {
 			var value float64
 			return validGossipIPFlagPayload(inner[:3], false) &&
-				unmarshalRequiredJSON(inner[3], &value) == nil && value >= 0
+				unmarshalRequiredJSON(inner[3], &value) == nil && !math.Signbit(value)
 		}
 		fallthrough
 	case "finished checks", "sending abci_state":
@@ -303,8 +304,8 @@ func validGossipStringArrayPayload(inner []json.RawMessage) bool {
 }
 
 func rawExactIPObject(raw json.RawMessage) bool {
-	var object map[string]json.RawMessage
-	if json.Unmarshal(raw, &object) != nil || len(object) != 1 {
+	object, err := consensusRPCObject(raw)
+	if err != nil || len(object) != 1 {
 		return false
 	}
 	var ip string

@@ -133,6 +133,8 @@ func TestGossipConnectionRejectsMalformedOctober2026Shapes(t *testing.T) {
 		"short checks":            `["performing checks on stream","peer"]`,
 		"null suffix":             `["successfully sent abci_state",{"Ip":"203.0.113.1"},true,null]`,
 		"negative suffix":         `["successfully sent abci_state",{"Ip":"203.0.113.1"},true,-1]`,
+		"negative zero suffix":    `["successfully sent abci_state",{"Ip":"203.0.113.1"},true,-0]`,
+		"negative underflow":      `["successfully sent abci_state",{"Ip":"203.0.113.1"},true,-1e-400]`,
 		"string suffix":           `["successfully sent abci_state",{"Ip":"203.0.113.1"},true,"0.1"]`,
 		"boolean suffix":          `["successfully sent abci_state",{"Ip":"203.0.113.1"},true,false]`,
 		"overflowing suffix":      `["successfully sent abci_state",{"Ip":"203.0.113.1"},true,1e400]`,
@@ -149,6 +151,27 @@ func TestGossipConnectionRejectsMalformedOctober2026Shapes(t *testing.T) {
 				t.Fatalf("invalid shape accepted: %+v", result)
 			}
 		})
+	}
+}
+
+func TestGossipConnectionRejectsDuplicatePeerFields(t *testing.T) {
+	for _, peer := range []string{
+		`{"Ip":"203.0.113.1","Ip":"203.0.113.2"}`,
+		`{"Ip":null,"Ip":"203.0.113.1"}`,
+		`{"Ip":"203.0.113.1","Ip":null}`,
+		`{"Ip":"203.0.113.1","Ip":"203.0.113.1"}`,
+	} {
+		for _, payload := range []string{
+			`["successfully sent abci_state",` + peer + `,true,0.1]`,
+			`["successfully sent abci_state",` + peer + `,true]`,
+			`["got tcp greeting",` + peer + `]`,
+			`["sending evm kvs",` + peer + `]`,
+		} {
+			result := parseGossipConnectionRecord([]byte(`["2026-10-24T06:00:00",` + payload + `]`))
+			if result.reason != "payload" {
+				t.Fatalf("duplicate peer fields accepted: %s", payload)
+			}
+		}
 	}
 }
 
