@@ -66,6 +66,11 @@ func TestParseGossipConnectionLine_KnownEvents(t *testing.T) {
 			"dropping_connection_after_sending_abci_state",
 		},
 		{
+			"dropping connection current testnet",
+			`["2026-10-24T09:56:00.242447528",["dropping connection",{"Ip":"203.0.113.1"},"max connection age reached"]]`,
+			"dropping_connection",
+		},
+		{
 			"error checking connection historical",
 			`["2026-05-25T06:59:53.6",["error checking connection",{"err":"x"}]]`,
 			"error_checking_connection",
@@ -89,7 +94,7 @@ func TestParseGossipConnectionLine_KnownEvents(t *testing.T) {
 	}
 }
 
-// Shapes observed in Testnet gossip_connections/hourly/20261024/6.
+// Shapes observed in Testnet gossip_connections/hourly/20261024.
 // Endpoints, timestamps and numeric values are synthetic.
 func TestGossipConnectionOctober2026Shapes(t *testing.T) {
 	for name, payload := range map[string]string{
@@ -98,6 +103,7 @@ func TestGossipConnectionOctober2026Shapes(t *testing.T) {
 		"numeric suffix":    `["successfully sent abci_state",{"Ip":"203.0.113.1"},true,0.000005]`,
 		"zero suffix":       `["successfully sent abci_state",{"Ip":"203.0.113.1"},false,0]`,
 		"legacy completion": `["successfully sent abci_state",{"Ip":"203.0.113.1"},true]`,
+		"short disconnect":  `["dropping connection",{"Ip":"203.0.113.1"},"max connection age reached"]`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			metrics.RegisterSource(metrics.SourceGossipConnections, true)
@@ -144,6 +150,19 @@ func TestGossipConnectionRejectsMalformedOctober2026Shapes(t *testing.T) {
 		"extra completion field":  `["successfully sent abci_state",{"Ip":"203.0.113.1"},true,0.1,0]`,
 		"suffix on sending state": `["sending abci_state",{"Ip":"203.0.113.1"},true,0.1]`,
 		"suffix on checks":        `["finished checks",{"Ip":"203.0.113.1"},true,0.1]`,
+		"drop missing reason":     `["dropping connection",{"Ip":"203.0.113.1"}]`,
+		"drop null reason":        `["dropping connection",{"Ip":"203.0.113.1"},null]`,
+		"drop empty reason":       `["dropping connection",{"Ip":"203.0.113.1"},""]`,
+		"drop blank reason":       `["dropping connection",{"Ip":"203.0.113.1"}," \t"]`,
+		"drop boolean reason":     `["dropping connection",{"Ip":"203.0.113.1"},true]`,
+		"drop numeric reason":     `["dropping connection",{"Ip":"203.0.113.1"},1]`,
+		"drop string peer":        `["dropping connection","203.0.113.1","closed"]`,
+		"drop empty peer":         `["dropping connection",{},"closed"]`,
+		"drop null peer":          `["dropping connection",null,"closed"]`,
+		"drop null IP":            `["dropping connection",{"Ip":null},"closed"]`,
+		"drop blank IP":           `["dropping connection",{"Ip":" \t"},"closed"]`,
+		"drop extra peer field":   `["dropping connection",{"Ip":"203.0.113.1","extra":1},"closed"]`,
+		"drop extra field":        `["dropping connection",{"Ip":"203.0.113.1"},"closed",0]`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			result := parseGossipConnectionRecord([]byte(`["2026-10-24T06:00:00",` + payload + `]`))
@@ -166,6 +185,7 @@ func TestGossipConnectionRejectsDuplicatePeerFields(t *testing.T) {
 			`["successfully sent abci_state",` + peer + `,true]`,
 			`["got tcp greeting",` + peer + `]`,
 			`["sending evm kvs",` + peer + `]`,
+			`["dropping connection",` + peer + `,"closed"]`,
 		} {
 			result := parseGossipConnectionRecord([]byte(`["2026-10-24T06:00:00",` + payload + `]`))
 			if result.reason != "payload" {

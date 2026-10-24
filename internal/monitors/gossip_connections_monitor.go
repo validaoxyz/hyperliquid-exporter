@@ -239,6 +239,11 @@ func validKnownGossipPayload(tag string, inner []json.RawMessage) bool {
 		// projections carry the same bounded event identity.
 		return validGossipIPFlagPayload(inner, true)
 	case "dropping connection":
+		if len(inner) == 3 {
+			var reason string
+			return rawExactIPObject(inner[1]) &&
+				unmarshalRequiredJSON(inner[2], &reason) == nil && strings.TrimSpace(reason) != ""
+		}
 		return len(inner) == 5
 	case "got tcp greeting":
 		if len(inner) == 2 {

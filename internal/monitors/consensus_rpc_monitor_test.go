@@ -185,25 +185,44 @@ func rpcLine(payload string) string {
 func TestConsensusRPCDirectLifecyclePublishesOnlyObservedStages(t *testing.T) {
 	// The unwrapped form was observed in Testnet consensus_rpc/hourly/20261024/6.
 	// Session identifiers, endpoints, hashes and quantities here are synthetic.
-	for name, response := range map[string]string{
-		"wrapped":   `{"Ok":{"n":2,"last_block_hash":"last"}}`,
-		"unwrapped": `{"n":2,"last_block_hash":"last"}`,
+	for name, response := range map[string]struct {
+		body, outcome string
+		blocks        float64
+	}{
+		"wrapped":   {`{"Ok":{"n":2,"last_block_hash":"last"}}`, "ok", 2},
+		"unwrapped": {`{"n":2,"last_block_hash":"last"}`, "ok", 2},
+		"null":      {`null`, "other", 0},
 	} {
 		t.Run(name, func(t *testing.T) {
-			testConsensusRPCDirectLifecycle(t, response)
+			testConsensusRPCDirectLifecycle(t, response.body, response.outcome, response.blocks)
 		})
 	}
 }
 
 func TestConsensusRPCUnwrappedResponseRequiresDirectOutboundStage(t *testing.T) {
-	response := `{"n":2,"last_block_hash":"last"}`
-	for _, payload := range []string{
-		`["Rpc task response",` + rpcTestRequest + `,` + response + `]`,
-		`["Outbound response","session",` + rpcTestRequest + `,` + response + `]`,
-	} {
-		if _, err := parseConsensusRPCLine([]byte(rpcLine(payload))); err == nil {
-			t.Fatal("unwrapped response accepted outside the direct outbound stage")
+	for _, response := range []string{`{"n":2,"last_block_hash":"last"}`, `null`} {
+		for _, payload := range []string{
+			`["Rpc task response",` + rpcTestRequest + `,` + response + `]`,
+			`["Outbound response","session",` + rpcTestRequest + `,` + response + `]`,
+		} {
+			if _, err := parseConsensusRPCLine([]byte(rpcLine(payload))); err == nil {
+				t.Fatalf("response %s accepted outside the direct outbound stage", response)
+			}
 		}
+	}
+}
+
+func TestConsensusRPCDirectNullResponseDigest(t *testing.T) {
+	var previous [32]byte
+	for i, response := range []string{`null`, " \t null \n "} {
+		digest, outcome, content, blocks, err := parseConsensusRPCResponse([]byte(response), true)
+		if err != nil || outcome != "other" || content != "other" || blocks != 0 {
+			t.Fatalf("null response: outcome=%s content=%s blocks=%d err=%v", outcome, content, blocks, err)
+		}
+		if digest == ([32]byte{}) || (i > 0 && digest != previous) {
+			t.Fatal("null response has no stable canonical digest")
+		}
+		previous = digest
 	}
 }
 
@@ -226,6 +245,11 @@ func TestConsensusRPCRejectsMalformedUnwrappedResponses(t *testing.T) {
 		"mixed Ok":         `{"n":2,"last_block_hash":"last","Ok":{"n":2,"last_block_hash":"last"}}`,
 		"mixed Err":        `{"n":2,"last_block_hash":"last","Err":"failure"}`,
 		"mixed blocks":     `{"n":2,"last_block_hash":"last","BlocksAndTxs":{"n":2}}`,
+		"string null":      `"null"`,
+		"boolean":          `false`,
+		"number":           `0`,
+		"array":            `[]`,
+		"wrapped null":     `{"Ok":null}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := parseConsensusRPCLine([]byte(rpcLine(`["Outbound response","session",` + request + `,` + response + `]`))); err == nil {
@@ -235,7 +259,7 @@ func TestConsensusRPCRejectsMalformedUnwrappedResponses(t *testing.T) {
 	}
 }
 
-func testConsensusRPCDirectLifecycle(t *testing.T, response string) {
+func testConsensusRPCDirectLifecycle(t *testing.T, response, outcome string, blocks float64) {
 	t.Helper()
 	request := `{"after_round":904479215,"until_block_hash":"block"}`
 	tracker := newConsensusRPCTracker()
@@ -253,7 +277,8 @@ func testConsensusRPCDirectLifecycle(t *testing.T, response string) {
 	for i, stage := range stages {
 		stageBefore[i] = validatorMetricValue(t, metrics.HLConsensusRPCEvents.WithLabelValues("serve", stage.stage, "observed", stage.content))
 	}
-	terminalBefore := validatorMetricValue(t, metrics.HLConsensusRPCEvents.WithLabelValues("serve", "response_sent", "ok", "blocks_and_txs"))
+	terminalCounter := metrics.HLConsensusRPCEvents.WithLabelValues("serve", "response_sent", outcome, "blocks_and_txs")
+	terminalBefore := validatorMetricValue(t, terminalCounter)
 	parse := func(payload string) consensusRPCRecord {
 		t.Helper()
 		record, err := parseConsensusRPCLine([]byte(rpcLine(payload)))
@@ -298,10 +323,10 @@ func testConsensusRPCDirectLifecycle(t *testing.T, response string) {
 			t.Fatalf("replay = %s", got)
 		}
 	}
-	if got := validatorMetricValue(t, metrics.HLConsensusRPCBlocksServed) - blocksBefore; got != 4 {
+	if got := validatorMetricValue(t, metrics.HLConsensusRPCBlocksServed) - blocksBefore; got != 2*blocks {
 		t.Fatalf("blocks delta = %v", got)
 	}
-	if got := validatorMetricValue(t, metrics.HLConsensusRPCEvents.WithLabelValues("serve", "response_sent", "ok", "blocks_and_txs")) - terminalBefore; got != 2 {
+	if got := validatorMetricValue(t, terminalCounter) - terminalBefore; got != 2 {
 		t.Fatalf("responses delta = %v", got)
 	}
 	for i, stage := range stages {

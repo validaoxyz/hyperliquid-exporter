@@ -343,6 +343,9 @@ func parseConsensusRPCResponse(raw json.RawMessage, allowUnwrapped bool) ([32]by
 		return [32]byte{}, "", "", 0, err
 	}
 	digest := sha256.Sum256(canonical)
+	if allowUnwrapped && bytes.Equal(canonical, []byte("null")) {
+		return digest, "other", "other", 0, nil
+	}
 	variants, err := consensusRPCObject(raw)
 	if err != nil {
 		return [32]byte{}, "", "", 0, fmt.Errorf("invalid response object")
