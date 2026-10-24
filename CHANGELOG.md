@@ -5,6 +5,10 @@ results in CI or internal records. See docs/releasing.md. -->
 
 ## [Unreleased]
 
+### Fixed
+
+- Read current gossip connection records and unwrapped consensus RPC block responses so updated nodes report connection events and served blocks without schema alerts.
+
 ## [v4.1.7] - 2026-10-17
 
 ### Fixed

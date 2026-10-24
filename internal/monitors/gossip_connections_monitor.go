@@ -197,7 +197,14 @@ func parseGossipConnectionRecord(line []byte) gossipConnectionParseResult {
 
 func validKnownGossipPayload(tag string, inner []json.RawMessage) bool {
 	switch tag {
-	case "handle_stream_connection", "performing checks on stream":
+	case "handle_stream_connection":
+		// Testnet also emits the endpoint without a stream field.
+		if len(inner) == 2 {
+			var endpoint string
+			return unmarshalRequiredJSON(inner[1], &endpoint) == nil && strings.TrimSpace(endpoint) != ""
+		}
+		fallthrough
+	case "performing checks on stream":
 		if len(inner) != 3 {
 			return false
 		}
@@ -208,7 +215,16 @@ func validKnownGossipPayload(tag string, inner []json.RawMessage) bool {
 		// array, while retained generations use the IP-object/bool form. The
 		// payload is validation-only and never becomes metric identity.
 		return validGossipIPFlagPayload(inner, false) || validGossipStringArrayPayload(inner)
-	case "finished checks", "sending abci_state", "successfully sent abci_state":
+	case "successfully sent abci_state":
+		// The current Testnet record adds a nonnegative numeric field. It is
+		// validation-only; its units are not established by the log schema.
+		if len(inner) == 4 {
+			var value float64
+			return validGossipIPFlagPayload(inner[:3], false) &&
+				unmarshalRequiredJSON(inner[3], &value) == nil && value >= 0
+		}
+		fallthrough
+	case "finished checks", "sending abci_state":
 		return validGossipIPFlagPayload(inner, false)
 	case "dropping connection after sending abci state":
 		// Current mainnet can use a short string in the third field while

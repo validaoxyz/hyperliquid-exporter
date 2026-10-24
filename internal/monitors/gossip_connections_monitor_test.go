@@ -89,6 +89,69 @@ func TestParseGossipConnectionLine_KnownEvents(t *testing.T) {
 	}
 }
 
+// Shapes observed in Testnet gossip_connections/hourly/20261024/6.
+// Endpoints, timestamps and numeric values are synthetic.
+func TestGossipConnectionOctober2026Shapes(t *testing.T) {
+	for name, payload := range map[string]string{
+		"short stream":      `["handle_stream_connection","203.0.113.1:4000"]`,
+		"legacy stream":     `["handle_stream_connection","203.0.113.1:4000","gossip"]`,
+		"numeric suffix":    `["successfully sent abci_state",{"Ip":"203.0.113.1"},true,0.000005]`,
+		"zero suffix":       `["successfully sent abci_state",{"Ip":"203.0.113.1"},false,0]`,
+		"legacy completion": `["successfully sent abci_state",{"Ip":"203.0.113.1"},true]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			metrics.RegisterSource(metrics.SourceGossipConnections, true)
+			resolveOK := false
+			publishGossipConnectionLine(&resolveOK, gossipConnectionParseResult{reason: "payload"}, time.Unix(1, 0))
+			metrics.PublishMonitorHealthSnapshot()
+			assertGossipConnectionSourceState(t, 1, 1, 0)
+
+			result := parseGossipConnectionRecord([]byte(`["2026-10-24T06:00:00",` + payload + `]`))
+			if result.reason != "" || !result.known {
+				t.Fatalf("valid shape rejected: %+v", result)
+			}
+			counter := metrics.HLP2PGossipEventsTotal.WithLabelValues(result.event)
+			before := validatorMetricValue(t, counter)
+			publishGossipConnectionLine(&resolveOK, result, time.Unix(2, 0))
+			metrics.PublishMonitorHealthSnapshot()
+			assertGossipConnectionSourceState(t, 1, 1, 1)
+			if delta := validatorMetricValue(t, counter) - before; delta != 1 {
+				t.Fatalf("event delta=%v, want 1", delta)
+			}
+		})
+	}
+}
+
+func TestGossipConnectionRejectsMalformedOctober2026Shapes(t *testing.T) {
+	for name, payload := range map[string]string{
+		"missing endpoint":        `["handle_stream_connection"]`,
+		"null endpoint":           `["handle_stream_connection",null]`,
+		"empty endpoint":          `["handle_stream_connection",""]`,
+		"blank endpoint":          `["handle_stream_connection"," "]`,
+		"numeric endpoint":        `["handle_stream_connection",1]`,
+		"extra stream field":      `["handle_stream_connection","peer","gossip",0]`,
+		"short checks":            `["performing checks on stream","peer"]`,
+		"null suffix":             `["successfully sent abci_state",{"Ip":"203.0.113.1"},true,null]`,
+		"negative suffix":         `["successfully sent abci_state",{"Ip":"203.0.113.1"},true,-1]`,
+		"string suffix":           `["successfully sent abci_state",{"Ip":"203.0.113.1"},true,"0.1"]`,
+		"boolean suffix":          `["successfully sent abci_state",{"Ip":"203.0.113.1"},true,false]`,
+		"overflowing suffix":      `["successfully sent abci_state",{"Ip":"203.0.113.1"},true,1e400]`,
+		"missing flag":            `["successfully sent abci_state",{"Ip":"203.0.113.1"},0.1]`,
+		"null flag":               `["successfully sent abci_state",{"Ip":"203.0.113.1"},null,0.1]`,
+		"extra peer field":        `["successfully sent abci_state",{"Ip":"203.0.113.1","extra":1},true,0.1]`,
+		"extra completion field":  `["successfully sent abci_state",{"Ip":"203.0.113.1"},true,0.1,0]`,
+		"suffix on sending state": `["sending abci_state",{"Ip":"203.0.113.1"},true,0.1]`,
+		"suffix on checks":        `["finished checks",{"Ip":"203.0.113.1"},true,0.1]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			result := parseGossipConnectionRecord([]byte(`["2026-10-24T06:00:00",` + payload + `]`))
+			if result.reason != "payload" {
+				t.Fatalf("invalid shape accepted: %+v", result)
+			}
+		})
+	}
+}
+
 func TestGossipRecordFailurePreservesReadableSourceState(t *testing.T) {
 	metrics.RegisterSource(metrics.SourceGossipConnections, true)
 	resolveOK := true

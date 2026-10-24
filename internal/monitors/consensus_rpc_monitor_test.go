@@ -80,7 +80,7 @@ func TestConsensusRPCCompleteLifecyclePublishesStagesAndServedQuantityOnce(t *te
 func TestConsensusRPCAcceptsPositiveBoundedServedCounts(t *testing.T) {
 	for _, n := range []string{"1", "100", "102", fmt.Sprintf("%d", maxConsensusRPCServedBlocks)} {
 		response := fmt.Sprintf(`{"Ok":{"BlocksAndTxs":{"n":%s}}}`, n)
-		if _, outcome, content, _, err := parseConsensusRPCResponse(json.RawMessage(response)); err != nil || outcome != "ok" || content != "blocks_and_txs" {
+		if _, outcome, content, _, err := parseConsensusRPCResponse(json.RawMessage(response), false); err != nil || outcome != "ok" || content != "blocks_and_txs" {
 			t.Fatalf("served n=%s rejected: outcome=%q content=%q err=%v", n, outcome, content, err)
 		}
 	}
@@ -137,7 +137,7 @@ func TestConsensusRPCUnknownTagsAndVariantsStayBoundedAndOpaque(t *testing.T) {
 			t.Fatalf("sensitive payload escaped into label: %q", sensitive)
 		}
 	}
-	_, outcome, content, blocks, err := parseConsensusRPCResponse(json.RawMessage(`{"FutureVariant":{"opaque":"secret"}}`))
+	_, outcome, content, blocks, err := parseConsensusRPCResponse(json.RawMessage(`{"FutureVariant":{"opaque":"secret"}}`), false)
 	if err != nil || outcome != "other" || content != "other" || blocks != 0 {
 		t.Fatalf("unknown response variant = outcome=%q content=%q blocks=%d err=%v", outcome, content, blocks, err)
 	}
@@ -183,8 +183,61 @@ func rpcLine(payload string) string {
 }
 
 func TestConsensusRPCDirectLifecyclePublishesOnlyObservedStages(t *testing.T) {
+	// The unwrapped form was observed in Testnet consensus_rpc/hourly/20261024/6.
+	// Session identifiers, endpoints, hashes and quantities here are synthetic.
+	for name, response := range map[string]string{
+		"wrapped":   `{"Ok":{"n":2,"last_block_hash":"last"}}`,
+		"unwrapped": `{"n":2,"last_block_hash":"last"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			testConsensusRPCDirectLifecycle(t, response)
+		})
+	}
+}
+
+func TestConsensusRPCUnwrappedResponseRequiresDirectOutboundStage(t *testing.T) {
+	response := `{"n":2,"last_block_hash":"last"}`
+	for _, payload := range []string{
+		`["Rpc task response",` + rpcTestRequest + `,` + response + `]`,
+		`["Outbound response","session",` + rpcTestRequest + `,` + response + `]`,
+	} {
+		if _, err := parseConsensusRPCLine([]byte(rpcLine(payload))); err == nil {
+			t.Fatal("unwrapped response accepted outside the direct outbound stage")
+		}
+	}
+}
+
+func TestConsensusRPCRejectsMalformedUnwrappedResponses(t *testing.T) {
+	request := `{"after_round":10,"until_block_hash":"block"}`
+	for name, response := range map[string]string{
+		"missing count":    `{"last_block_hash":"last"}`,
+		"missing hash":     `{"n":2}`,
+		"null count":       `{"n":null,"last_block_hash":"last"}`,
+		"null hash":        `{"n":2,"last_block_hash":null}`,
+		"empty hash":       `{"n":2,"last_block_hash":""}`,
+		"zero count":       `{"n":0,"last_block_hash":"last"}`,
+		"negative count":   `{"n":-1,"last_block_hash":"last"}`,
+		"fractional count": `{"n":2.5,"last_block_hash":"last"}`,
+		"string count":     `{"n":"2","last_block_hash":"last"}`,
+		"large count":      fmt.Sprintf(`{"n":%d,"last_block_hash":"last"}`, maxConsensusRPCServedBlocks+1),
+		"duplicate count":  `{"n":2,"n":3,"last_block_hash":"last"}`,
+		"duplicate hash":   `{"n":2,"last_block_hash":"last","last_block_hash":"other"}`,
+		"extra field":      `{"n":2,"last_block_hash":"last","extra":1}`,
+		"mixed Ok":         `{"n":2,"last_block_hash":"last","Ok":{"n":2,"last_block_hash":"last"}}`,
+		"mixed Err":        `{"n":2,"last_block_hash":"last","Err":"failure"}`,
+		"mixed blocks":     `{"n":2,"last_block_hash":"last","BlocksAndTxs":{"n":2}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseConsensusRPCLine([]byte(rpcLine(`["Outbound response","session",` + request + `,` + response + `]`))); err == nil {
+				t.Fatal("accepted malformed unwrapped response")
+			}
+		})
+	}
+}
+
+func testConsensusRPCDirectLifecycle(t *testing.T, response string) {
+	t.Helper()
 	request := `{"after_round":904479215,"until_block_hash":"block"}`
-	response := `{"Ok":{"n":2,"last_block_hash":"last"}}`
 	tracker := newConsensusRPCTracker()
 	blocksBefore := validatorMetricValue(t, metrics.HLConsensusRPCBlocksServed)
 	stages := []struct {
@@ -311,7 +364,7 @@ func TestConsensusRPCRejectsMalformedDirectForms(t *testing.T) {
 		`{"Ok":{"n":0,"last_block_hash":"h"}}`, `{"Ok":{"n":2,"last_block_hash":"h","extra":1}}`,
 		`{"Ok":{"n":2,"n":3,"last_block_hash":"h"}}`,
 	} {
-		if _, _, _, _, err := parseConsensusRPCResponse(json.RawMessage(response)); err == nil {
+		if _, _, _, _, err := parseConsensusRPCResponse(json.RawMessage(response), false); err == nil {
 			t.Fatalf("accepted malformed response %s", response)
 		}
 	}
@@ -365,7 +418,7 @@ func TestConsensusRPCRejectsIncompleteAndConflictingResponses(t *testing.T) {
 		"empty ok body":                        `{"Ok":{}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, _, _, _, err := parseConsensusRPCResponse(json.RawMessage(response)); err == nil {
+			if _, _, _, _, err := parseConsensusRPCResponse(json.RawMessage(response), false); err == nil {
 				t.Fatal("accepted malformed response")
 			}
 		})
@@ -379,7 +432,7 @@ func TestConsensusRPCUnknownTaggedVariantsRemainBounded(t *testing.T) {
 		t.Fatalf("unknown request: content=%s queryPeers=%v direct=%v err=%v", content, queryPeers, direct, err)
 	}
 	for _, raw := range []string{`{"FutureVariant":{"opaque":"private"}}`, `{"Ok":{"FutureVariant":{"opaque":"private"}}}`} {
-		_, outcome, content, n, err := parseConsensusRPCResponse(json.RawMessage(raw))
+		_, outcome, content, n, err := parseConsensusRPCResponse(json.RawMessage(raw), false)
 		if err != nil || outcome != "other" || content != "other" || n != 0 {
 			t.Fatalf("unknown response: outcome=%s content=%s n=%d err=%v", outcome, content, n, err)
 		}

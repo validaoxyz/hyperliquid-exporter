@@ -169,7 +169,7 @@ func parseConsensusRPCLine(line []byte) (consensusRPCRecord, error) {
 		if len(payload) <= index {
 			return fmt.Errorf("missing response")
 		}
-		digest, outcome, content, blocks, err := parseConsensusRPCResponse(payload[index])
+		digest, outcome, content, blocks, err := parseConsensusRPCResponse(payload[index], record.direct && tag == "Outbound response")
 		if err != nil {
 			return err
 		}
@@ -337,7 +337,7 @@ func consensusRPCObject(raw json.RawMessage) (map[string]json.RawMessage, error)
 	return body, nil
 }
 
-func parseConsensusRPCResponse(raw json.RawMessage) ([32]byte, string, string, int64, error) {
+func parseConsensusRPCResponse(raw json.RawMessage, allowUnwrapped bool) ([32]byte, string, string, int64, error) {
 	canonical, err := canonicalJSON(raw)
 	if err != nil {
 		return [32]byte{}, "", "", 0, err
@@ -346,6 +346,16 @@ func parseConsensusRPCResponse(raw json.RawMessage) ([32]byte, string, string, i
 	variants, err := consensusRPCObject(raw)
 	if err != nil {
 		return [32]byte{}, "", "", 0, fmt.Errorf("invalid response object")
+	}
+	_, unwrappedCount := variants["n"]
+	_, unwrappedHash := variants["last_block_hash"]
+	if unwrappedCount || unwrappedHash {
+		if !allowUnwrapped {
+			return [32]byte{}, "", "", 0, fmt.Errorf("unwrapped response at unsupported stage")
+		}
+		// Current direct outbound records omit Ok. Reuse the exact flat-body
+		// validation below, while retaining the original response digest.
+		variants = map[string]json.RawMessage{"Ok": raw}
 	}
 	if len(variants) != 1 {
 		return [32]byte{}, "", "", 0, fmt.Errorf("invalid response variants")
