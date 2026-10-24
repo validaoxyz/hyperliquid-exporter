@@ -21,3 +21,10 @@ cat /tmp/release-notes.md
 
 Review that body for its audience as well as accuracy. When correcting a published release,
 keep its body consistent with the changelog.
+
+The release workflow disables Python bytecode and requires a clean checkout immediately before
+building binaries. Staged changes, unstaged changes and untracked files fail that check. Use
+`PYTHONDONTWRITEBYTECODE=1` for local release preparation too.
+
+For byte-for-byte release checks, use a fresh standalone clone and set `GOENV=off` to exclude
+persisted local Go settings. Match the workflow's Go version, environment and build flags.

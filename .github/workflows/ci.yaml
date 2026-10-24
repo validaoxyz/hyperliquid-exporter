@@ -2,6 +2,7 @@ name: CI
 
 env:
   GOTOOLCHAIN: local
+  PYTHONDONTWRITEBYTECODE: "1"
 
 on:
   push:

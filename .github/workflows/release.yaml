@@ -2,6 +2,7 @@ name: Build and Release
 
 env:
   GOTOOLCHAIN: local
+  PYTHONDONTWRITEBYTECODE: "1"
 
 on:
   push:
@@ -56,6 +57,9 @@ jobs:
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
             -v "$PWD:/repo:ro" --workdir /repo --entrypoint /bin/promtool "$image" \
             test rules ./alerts/tests/*.test.yml
+
+      - name: Require clean source before building
+        run: bash .github/scripts/check_clean_source.sh
 
       - name: Build binaries
         run: |
