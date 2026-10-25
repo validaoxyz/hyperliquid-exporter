@@ -212,10 +212,17 @@ func validKnownGossipPayload(tag string, inner []json.RawMessage) bool {
 		var endpoint, stream string
 		return unmarshalRequiredJSON(inner[1], &endpoint) == nil && unmarshalRequiredJSON(inner[2], &stream) == nil
 	case "closing gossip stream because no quorum yet":
-		// The post-2026-08-09 testnet build emits a nonempty string plus an
-		// array, while retained generations use the IP-object/bool form. The
-		// payload is validation-only and never becomes metric identity.
-		return validGossipIPFlagPayload(inner, false) || validGossipStringArrayPayload(inner)
+		// Keep the IP-object/bool and nonempty-string/array forms. Current
+		// Mainnet also emits an unsigned integer after the IP object. The
+		// payload stays validation-only, without inferred units or labels.
+		if validGossipIPFlagPayload(inner, false) || validGossipStringArrayPayload(inner) {
+			return true
+		}
+		if len(inner) != 3 || !rawExactIPObject(inner[1]) {
+			return false
+		}
+		var value uint64
+		return unmarshalRequiredJSON(inner[2], &value) == nil
 	case "successfully sent abci_state":
 		// The current Testnet record adds a nonnegative numeric field. It is
 		// validation-only; its units are not established by the log schema.

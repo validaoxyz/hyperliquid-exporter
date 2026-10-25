@@ -195,6 +195,94 @@ func TestGossipConnectionRejectsDuplicatePeerFields(t *testing.T) {
 	}
 }
 
+// The integer payload shape was observed on Mainnet on 2026-10-25.
+// The endpoint and timestamp are sanitized; boundary values are synthetic.
+func TestGossipConnectionNoQuorumUnsignedInteger(t *testing.T) {
+	for name, payload := range map[string]string{
+		"observed integer":    `["closing gossip stream because no quorum yet",{"Ip":"192.0.2.1"},1]`,
+		"zero":                `["closing gossip stream because no quorum yet",{"Ip":"192.0.2.1"},0]`,
+		"maximum uint64":      `["closing gossip stream because no quorum yet",{"Ip":"192.0.2.1"},18446744073709551615]`,
+		"legacy true":         `["closing gossip stream because no quorum yet",{"Ip":"192.0.2.1"},true]`,
+		"legacy false":        `["closing gossip stream because no quorum yet",{"Ip":"192.0.2.1"},false]`,
+		"legacy string array": `["closing gossip stream because no quorum yet","waiting",[]]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			result := parseGossipConnectionRecord([]byte(`["2026-10-25T20:00:00",` + payload + `]`))
+			if result.reason != "" || !result.known || result.event != "closing_gossip_stream_no_quorum_yet" {
+				t.Fatalf("valid no-quorum shape rejected or misclassified: %+v", result)
+			}
+		})
+	}
+}
+
+func TestGossipConnectionNoQuorumRejectsMalformedIntegerPayloads(t *testing.T) {
+	for name, payload := range map[string]string{
+		"negative":           `["closing gossip stream because no quorum yet",{"Ip":"192.0.2.1"},-1]`,
+		"negative zero":      `["closing gossip stream because no quorum yet",{"Ip":"192.0.2.1"},-0]`,
+		"float":              `["closing gossip stream because no quorum yet",{"Ip":"192.0.2.1"},1.0]`,
+		"fraction":           `["closing gossip stream because no quorum yet",{"Ip":"192.0.2.1"},0.5]`,
+		"exponent":           `["closing gossip stream because no quorum yet",{"Ip":"192.0.2.1"},1e0]`,
+		"overflow":           `["closing gossip stream because no quorum yet",{"Ip":"192.0.2.1"},18446744073709551616]`,
+		"null":               `["closing gossip stream because no quorum yet",{"Ip":"192.0.2.1"},null]`,
+		"numeric string":     `["closing gossip stream because no quorum yet",{"Ip":"192.0.2.1"},"1"]`,
+		"array":              `["closing gossip stream because no quorum yet",{"Ip":"192.0.2.1"},[]]`,
+		"object":             `["closing gossip stream because no quorum yet",{"Ip":"192.0.2.1"},{}]`,
+		"missing value":      `["closing gossip stream because no quorum yet",{"Ip":"192.0.2.1"}]`,
+		"extra value":        `["closing gossip stream because no quorum yet",{"Ip":"192.0.2.1"},1,0]`,
+		"null peer":          `["closing gossip stream because no quorum yet",null,1]`,
+		"empty peer":         `["closing gossip stream because no quorum yet",{},1]`,
+		"string peer":        `["closing gossip stream because no quorum yet","192.0.2.1",1]`,
+		"null IP":            `["closing gossip stream because no quorum yet",{"Ip":null},1]`,
+		"empty IP":           `["closing gossip stream because no quorum yet",{"Ip":""},1]`,
+		"blank IP":           `["closing gossip stream because no quorum yet",{"Ip":" \t"},1]`,
+		"numeric IP":         `["closing gossip stream because no quorum yet",{"Ip":1},1]`,
+		"extra peer field":   `["closing gossip stream because no quorum yet",{"Ip":"192.0.2.1","extra":1},1]`,
+		"duplicate IP":       `["closing gossip stream because no quorum yet",{"Ip":"192.0.2.1","Ip":"192.0.2.2"},1]`,
+		"same duplicate IP":  `["closing gossip stream because no quorum yet",{"Ip":"192.0.2.1","Ip":"192.0.2.1"},1]`,
+		"null then IP":       `["closing gossip stream because no quorum yet",{"Ip":null,"Ip":"192.0.2.1"},1]`,
+		"IP then null":       `["closing gossip stream because no quorum yet",{"Ip":"192.0.2.1","Ip":null},1]`,
+		"other event checks": `["finished checks",{"Ip":"192.0.2.1"},1]`,
+		"other event state":  `["sending abci_state",{"Ip":"192.0.2.1"},1]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			result := parseGossipConnectionRecord([]byte(`["2026-10-25T20:00:00",` + payload + `]`))
+			if result.reason != "payload" {
+				t.Fatalf("invalid integer payload accepted: %+v", result)
+			}
+		})
+	}
+}
+
+func TestGossipConnectionNoQuorumIntegerRepairsSchemaHealth(t *testing.T) {
+	metrics.RegisterSource(metrics.SourceGossipConnections, true)
+	resolveOK := false
+	publishGossipConnectionLine(&resolveOK, gossipConnectionParseResult{reason: "payload"}, time.Unix(1, 0))
+	metrics.PublishMonitorHealthSnapshot()
+	assertGossipConnectionSourceState(t, 1, 1, 0)
+
+	eventCounter := metrics.HLP2PGossipEventsTotal.WithLabelValues("closing_gossip_stream_no_quorum_yet")
+	schemaCounter := metrics.HLExporterSourceErrorsTotal.WithLabelValues(string(metrics.SourceGossipConnections), string(metrics.SourceFailureSchema))
+	beforeEvents := validatorMetricValue(t, eventCounter)
+	beforeErrors := validatorMetricValue(t, schemaCounter)
+	beforeUnknown := validatorMetricValue(t, metrics.HLP2PGossipUnknownEventsTotal)
+	result := parseGossipConnectionRecord([]byte(`["2026-10-25T20:00:00",["closing gossip stream because no quorum yet",{"Ip":"192.0.2.1"},1]]`))
+	publishGossipConnectionLine(&resolveOK, result, time.Unix(2, 0))
+	metrics.PublishMonitorHealthSnapshot()
+	assertGossipConnectionSourceState(t, 1, 1, 1)
+	if delta := validatorMetricValue(t, eventCounter) - beforeEvents; delta != 1 {
+		t.Fatalf("event delta=%v, want 1", delta)
+	}
+	if got := validatorMetricValue(t, schemaCounter); got != beforeErrors {
+		t.Fatalf("valid integer record added schema errors: before=%v after=%v", beforeErrors, got)
+	}
+	if got := validatorMetricValue(t, metrics.HLP2PGossipUnknownEventsTotal); got != beforeUnknown {
+		t.Fatalf("known integer event entered the unknown bucket: before=%v after=%v", beforeUnknown, got)
+	}
+	if got := hostMetricValue(t, metrics.HLExporterSourceTimestampSeconds.WithLabelValues(string(metrics.SourceGossipConnections))); got != float64(result.sourceTime.Unix()) {
+		t.Fatalf("source timestamp=%v, want %v", got, result.sourceTime.Unix())
+	}
+}
+
 func TestGossipRecordFailurePreservesReadableSourceState(t *testing.T) {
 	metrics.RegisterSource(metrics.SourceGossipConnections, true)
 	resolveOK := true
