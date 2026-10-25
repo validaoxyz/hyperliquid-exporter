@@ -26,5 +26,15 @@ The release workflow disables Python bytecode and requires a clean checkout imme
 building binaries. Staged changes, unstaged changes and untracked files fail that check. Use
 `PYTHONDONTWRITEBYTECODE=1` for local release preparation too.
 
-For byte-for-byte release checks, use a fresh standalone clone and set `GOENV=off` to exclude
-persisted local Go settings. Match the workflow's Go version, environment and build flags.
+For byte-for-byte release checks, use a fresh standalone clone with the same history depth and
+tags as the workflow checkout. The current workflow uses depth one. A full clone can change
+Go's embedded module version because it contains historical tags, even at the same commit.
+
+```sh
+git clone --depth 1 --single-branch --branch vX.Y.Z \
+  https://github.com/validaoxyz/hyperliquid-exporter.git /path/to/fresh-clone
+```
+
+Set `GOENV=off` to exclude persisted local Go settings. Match the workflow's Go version,
+environment and build flags, and write comparison binaries outside the source checkout.
+Compare the raw binaries; archive timestamps can differ.
