@@ -5,6 +5,8 @@ results in CI or internal records. See docs/releasing.md. -->
 
 ## [Unreleased]
 
+## [v4.1.10] - 2026-10-26
+
 ### Fixed
 
 - Read no-quorum gossip connection records with an integer field so current Mainnet nodes report those events without schema errors.
