@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -225,6 +226,40 @@ func TestParseReplicaResponsesIsOrderIndependentAndCountOnly(t *testing.T) {
 	wantOutcomes := map[string]int{"success": 1, "resting": 1, "error": 1, "waiting_for_trigger": 1, "other": 1}
 	if !reflect.DeepEqual(one.Outcomes, wantOutcomes) {
 		t.Fatalf("outcomes = %#v, want %#v", one.Outcomes, wantOutcomes)
+	}
+}
+
+func TestParseReplicaHashResponsesAreUnavailable(t *testing.T) {
+	for _, digest := range []string{strings.Repeat("a1", 32), strings.Repeat("AF", 32)} {
+		for _, requests := range []int{0, 2} {
+			got := parseReplicaResponses(json.RawMessage(`{"Hash":"0x`+digest+`"}`), requests)
+			if got.Coverage != "unavailable" || got.MalformedContainers != 0 || got.MalformedRecords != 0 || got.Records != 0 || len(got.ActionStatuses) != 0 || len(got.Outcomes) != 0 || got.CountRelation != countRelation(requests, 0) {
+				t.Fatalf("hash-only response fabricated outcomes or malformed coverage: %+v", got)
+			}
+		}
+	}
+}
+
+func TestParseReplicaHashResponsesRejectMalformedContainers(t *testing.T) {
+	valid := `"0x` + strings.Repeat("ab", 32) + `"`
+	for name, raw := range map[string]string{
+		"null":          `{"Hash":null}`,
+		"number":        `{"Hash":123}`,
+		"array":         `{"Hash":[]}`,
+		"empty":         `{"Hash":""}`,
+		"short":         `{"Hash":"0xab"}`,
+		"long":          `{"Hash":"0x` + strings.Repeat("ab", 33) + `"}`,
+		"bare":          `{"Hash":"` + strings.Repeat("ab", 32) + `"}`,
+		"nonhex":        `{"Hash":"0x` + strings.Repeat("zz", 32) + `"}`,
+		"wrong tag":     `{"hash":` + valid + `}`,
+		"mixed wrapper": `{"Hash":` + valid + `,"Full":[]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := parseReplicaResponses(json.RawMessage(raw), 2)
+			if got.Coverage != "malformed" || got.MalformedContainers != 1 || got.MalformedRecords != 0 || got.Records != 0 || len(got.ActionStatuses) != 0 || len(got.Outcomes) != 0 {
+				t.Fatalf("malformed hash container accepted: %+v", got)
+			}
+		})
 	}
 }
 

@@ -2,6 +2,7 @@ package replica
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -279,6 +280,16 @@ func parseReplicaResponses(raw json.RawMessage, requestActions int) ResponseMetr
 		out.MalformedContainers = 1
 		out.CountRelation = countRelation(requestActions, 0)
 		return out
+	}
+	// Hash-only records contain no response outcomes to count.
+	if digest, ok := wrapper["Hash"]; ok {
+		var value string
+		if json.Unmarshal(digest, &value) == nil && len(value) == 66 && value[:2] == "0x" {
+			if _, err := hex.DecodeString(value[2:]); err == nil {
+				out.CountRelation = countRelation(requestActions, 0)
+				return out
+			}
+		}
 	}
 	full, ok := wrapper["Full"]
 	if !ok || bytes.Equal(bytes.TrimSpace(full), []byte("null")) {

@@ -8,6 +8,7 @@ results in CI or internal records. See docs/releasing.md. -->
 ### Fixed
 
 - Classify `cDeposit2` staking deposits under their own action label and the `transfer` category in replica and mempool metrics.
+- Treat hash-only replica responses as unavailable response coverage instead of malformed containers. They add no response outcomes.
 
 ## [v4.1.11] - 2026-10-26
 
