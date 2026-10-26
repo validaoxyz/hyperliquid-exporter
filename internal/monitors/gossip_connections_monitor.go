@@ -1,6 +1,7 @@
 package monitors
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -334,8 +335,9 @@ func rawExactIPObject(raw json.RawMessage) bool {
 }
 
 func rawJSONObject(raw json.RawMessage) bool {
-	var object map[string]json.RawMessage
-	return json.Unmarshal(raw, &object) == nil && object != nil
+	trimmed := bytes.TrimSpace(raw)
+	// Validate the original bytes because TrimSpace also removes non-JSON whitespace.
+	return len(trimmed) > 0 && trimmed[0] == '{' && json.Valid(raw)
 }
 
 func parseGossipConnectionLine(line []byte) (string, bool) {
