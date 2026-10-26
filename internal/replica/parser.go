@@ -389,6 +389,20 @@ func parseReplicaResponseRecord(raw json.RawMessage, out *ResponseMetrics) bool 
 			out.ActionStatuses[statusLabel]++
 			return true
 		}
+		// createSubAccount returns an address string, not execution outcomes.
+		var createSubAccountResponse struct {
+			Type string  `json:"type"`
+			Data *string `json:"data"`
+		}
+		if status == "ok" && json.Unmarshal(result.Response, &createSubAccountResponse) == nil && createSubAccountResponse.Type == "createSubAccount" && createSubAccountResponse.Data != nil {
+			address := *createSubAccountResponse.Data
+			if len(address) == 42 && address[:2] == "0x" {
+				if _, err := hex.DecodeString(address[2:]); err == nil {
+					out.ActionStatuses[statusLabel]++
+					return true
+				}
+			}
+		}
 		// String responses are valid error/default responses with no nested
 		// execution-status array.
 		var responseText string
