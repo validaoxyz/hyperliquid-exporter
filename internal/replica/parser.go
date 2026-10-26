@@ -436,12 +436,13 @@ func parseReplicaResponseRecord(raw json.RawMessage, out *ResponseMetrics) bool 
 }
 
 func normalizeReplicaOutcome(raw json.RawMessage) (string, bool) {
-	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 		return "", false
 	}
-	var scalar string
-	if err := json.Unmarshal(raw, &scalar); err == nil {
-		if scalar == "" {
+	if trimmed[0] == '"' {
+		var scalar string
+		if err := json.Unmarshal(raw, &scalar); err != nil || scalar == "" {
 			return "", false
 		}
 		if scalar == "success" {
