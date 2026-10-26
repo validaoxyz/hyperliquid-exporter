@@ -207,6 +207,37 @@ func TestExtractMetricsClassifiesValidatorL1StatusAndRetainsUnknownActions(t *te
 	}
 }
 
+func TestParseReplicaSetGlobalEmptyData(t *testing.T) {
+	for name, response := range map[string]string{
+		"empty array": `{"type":"setGlobal","data":[]}`,
+		"whitespace":  `{"data":[ ],"type":"setGlobal"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw := json.RawMessage(`{"Full":[["constructed",[{"res":{"status":"ok","response":` + response + `}}]]]}`)
+			got := parseReplicaResponses(raw, 1)
+			if got.Coverage != "available" || got.Records != 1 || got.CountRelation != "equal" || got.MalformedRecords != 0 || got.MalformedContainers != 0 || !reflect.DeepEqual(got.ActionStatuses, map[string]int{"ok": 1}) || len(got.Outcomes) != 0 {
+				t.Fatalf("empty setGlobal response must count only its action status: %+v", got)
+			}
+		})
+	}
+	for name, record := range map[string]string{
+		"different type": `{"status":"ok","response":{"type":"future","data":[]}}`,
+		"missing type":   `{"status":"ok","response":{"data":[]}}`,
+		"nonempty array": `{"status":"ok","response":{"type":"setGlobal","data":[{}]}}`,
+		"null item":      `{"status":"ok","response":{"type":"setGlobal","data":[null]}}`,
+		"wrong data":     `{"status":"ok","response":{"type":"setGlobal","data":true}}`,
+		"error status":   `{"status":"err","response":{"type":"setGlobal","data":[]}}`,
+		"unknown status": `{"status":"future","response":{"type":"setGlobal","data":[]}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := parseReplicaResponses(json.RawMessage(`{"Full":[["constructed",[{"res":`+record+`}]]]}`), 1)
+			if got.Coverage != "malformed" || got.Records != 1 || got.MalformedRecords != 1 || got.MalformedContainers != 0 || len(got.ActionStatuses) != 0 || len(got.Outcomes) != 0 {
+				t.Fatalf("unsupported data array must not publish a partial status: %+v", got)
+			}
+		})
+	}
+}
+
 func TestParseReplicaResponsesIsOrderIndependentAndCountOnly(t *testing.T) {
 	recordA := `{"user":"0xsecret-account","res":{"status":"ok","response":{"type":"order","data":{"statuses":["success",{"resting":{"oid":"secret"}},{"error":"free text"},{"waitingForTrigger":{}},{"future":{"payload":"x"}}]}}}}`
 	recordB := `{"user":null,"res":{"status":"future-status","response":"unbounded text ignored"}}`

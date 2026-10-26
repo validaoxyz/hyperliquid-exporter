@@ -365,6 +365,15 @@ func parseReplicaResponseRecord(raw json.RawMessage, out *ResponseMetrics) bool 
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(result.Response, &responseObject); err != nil {
+		// Successful setGlobal responses carry an empty array with no execution outcomes.
+		var emptyDataResponse struct {
+			Type string            `json:"type"`
+			Data []json.RawMessage `json:"data"`
+		}
+		if status == "ok" && json.Unmarshal(result.Response, &emptyDataResponse) == nil && emptyDataResponse.Type == "setGlobal" && emptyDataResponse.Data != nil && len(emptyDataResponse.Data) == 0 {
+			out.ActionStatuses[statusLabel]++
+			return true
+		}
 		// String responses are valid error/default responses with no nested
 		// execution-status array.
 		var responseText string
