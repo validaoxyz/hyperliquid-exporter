@@ -5,6 +5,13 @@ results in CI or internal records. See docs/releasing.md. -->
 
 ## [Unreleased]
 
+## [v4.1.17] - 2026-10-27
+
+### Fixed
+
+- Classify `govPropose` and `govVote` under their own action labels and the existing `governance` category in replica and mempool metrics.
+- Count successful `token` and `spot` replica responses with unsigned integer identifiers and `governanceProposal` responses with 32-byte hex identifiers without reporting malformed records or adding execution outcomes.
+
 ## [v4.1.16] - 2026-10-26
 
 ### Changed
