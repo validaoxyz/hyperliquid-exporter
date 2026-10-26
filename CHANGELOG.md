@@ -5,6 +5,12 @@ results in CI or internal records. See docs/releasing.md. -->
 
 ## [Unreleased]
 
+## [v4.1.14] - 2026-10-26
+
+### Fixed
+
+- Count successful `validatorVote` replica responses with boolean data without reporting them as malformed or adding execution outcomes.
+
 ## [v4.1.13] - 2026-10-26
 
 ### Fixed
