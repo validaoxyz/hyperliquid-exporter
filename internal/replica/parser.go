@@ -365,12 +365,18 @@ func parseReplicaResponseRecord(raw json.RawMessage, out *ResponseMetrics) bool 
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(result.Response, &responseObject); err != nil {
-		// Successful setGlobal responses carry an empty array with no execution outcomes.
-		var emptyDataResponse struct {
+		// setGlobal data contains opaque strings, not execution outcomes.
+		var setGlobalResponse struct {
 			Type string            `json:"type"`
 			Data []json.RawMessage `json:"data"`
 		}
-		if status == "ok" && json.Unmarshal(result.Response, &emptyDataResponse) == nil && emptyDataResponse.Type == "setGlobal" && emptyDataResponse.Data != nil && len(emptyDataResponse.Data) == 0 {
+		if status == "ok" && json.Unmarshal(result.Response, &setGlobalResponse) == nil && setGlobalResponse.Type == "setGlobal" && setGlobalResponse.Data != nil {
+			for _, item := range setGlobalResponse.Data {
+				var value string
+				if bytes.Equal(bytes.TrimSpace(item), []byte("null")) || json.Unmarshal(item, &value) != nil {
+					return false
+				}
+			}
 			out.ActionStatuses[statusLabel]++
 			return true
 		}

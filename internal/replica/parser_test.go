@@ -207,16 +207,19 @@ func TestExtractMetricsClassifiesValidatorL1StatusAndRetainsUnknownActions(t *te
 	}
 }
 
-func TestParseReplicaSetGlobalEmptyData(t *testing.T) {
+func TestParseReplicaSetGlobalData(t *testing.T) {
 	for name, response := range map[string]string{
-		"empty array": `{"type":"setGlobal","data":[]}`,
-		"whitespace":  `{"data":[ ],"type":"setGlobal"}`,
+		"empty array":  `{"type":"setGlobal","data":[]}`,
+		"whitespace":   `{"data":[ ],"type":"setGlobal"}`,
+		"one string":   `{"type":"setGlobal","data":["opaque value"]}`,
+		"two strings":  `{"type":"setGlobal","data":["first opaque value","second opaque value"]}`,
+		"empty string": `{"type":"setGlobal","data":[""]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			raw := json.RawMessage(`{"Full":[["constructed",[{"res":{"status":"ok","response":` + response + `}}]]]}`)
 			got := parseReplicaResponses(raw, 1)
 			if got.Coverage != "available" || got.Records != 1 || got.CountRelation != "equal" || got.MalformedRecords != 0 || got.MalformedContainers != 0 || !reflect.DeepEqual(got.ActionStatuses, map[string]int{"ok": 1}) || len(got.Outcomes) != 0 {
-				t.Fatalf("empty setGlobal response must count only its action status: %+v", got)
+				t.Fatalf("setGlobal response must count only its action status: %+v", got)
 			}
 		})
 	}
@@ -225,6 +228,10 @@ func TestParseReplicaSetGlobalEmptyData(t *testing.T) {
 		"missing type":   `{"status":"ok","response":{"data":[]}}`,
 		"nonempty array": `{"status":"ok","response":{"type":"setGlobal","data":[{}]}}`,
 		"null item":      `{"status":"ok","response":{"type":"setGlobal","data":[null]}}`,
+		"number item":    `{"status":"ok","response":{"type":"setGlobal","data":[1]}}`,
+		"boolean item":   `{"status":"ok","response":{"type":"setGlobal","data":[true]}}`,
+		"nested array":   `{"status":"ok","response":{"type":"setGlobal","data":[[]]}}`,
+		"mixed array":    `{"status":"ok","response":{"type":"setGlobal","data":["opaque value",null]}}`,
 		"wrong data":     `{"status":"ok","response":{"type":"setGlobal","data":true}}`,
 		"error status":   `{"status":"err","response":{"type":"setGlobal","data":[]}}`,
 		"unknown status": `{"status":"future","response":{"type":"setGlobal","data":[]}}`,

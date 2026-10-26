@@ -9,7 +9,7 @@ results in CI or internal records. See docs/releasing.md. -->
 
 ### Fixed
 
-- Count successful `setGlobal` replica responses with empty data arrays without reporting them as malformed or adding execution outcomes.
+- Count successful `setGlobal` replica responses with array data without reporting them as malformed or adding execution outcomes.
 
 ## [v4.1.12] - 2026-10-26
 
