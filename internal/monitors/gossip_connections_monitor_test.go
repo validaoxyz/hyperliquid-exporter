@@ -9,6 +9,130 @@ import (
 	"github.com/validaoxyz/hyperliquid-exporter/internal/metrics"
 )
 
+// Mainnet emitted these variants on 2026-10-26. Endpoints are synthetic.
+func TestGossipConnectionOctober26ObservedVariants(t *testing.T) {
+	for name, tc := range map[string]struct {
+		payload string
+		event   string
+	}{
+		"peer limit integer": {
+			`["rejecting gossip stream because max peers reached",{"Ip":"192.0.2.1"},8]`,
+			"rejecting_gossip_stream_max_peers_reached",
+		},
+		"drop after state object only": {
+			`["dropping connection after sending abci state",{"Ip":"192.0.2.1"}]`,
+			"dropping_connection_after_sending_abci_state",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			result := parseGossipConnectionRecord([]byte(`["2026-10-26T05:00:00",` + tc.payload + `]`))
+			if result.reason != "" || !result.known || result.event != tc.event {
+				t.Fatalf("observed shape rejected or misclassified: %+v", result)
+			}
+		})
+	}
+}
+
+func TestGossipConnectionOctober26VariantsPreserveOtherSupportedShapes(t *testing.T) {
+	for name, payload := range map[string]string{
+		"peer limit zero":           `["rejecting gossip stream because max peers reached",{"Ip":"192.0.2.1"},0]`,
+		"peer limit maximum uint64": `["rejecting gossip stream because max peers reached",{"Ip":"192.0.2.1"},18446744073709551615]`,
+		"peer limit legacy object":  `["rejecting gossip stream because max peers reached",{}]`,
+		"peer limit legacy array":   `["rejecting gossip stream because max peers reached","peer limit",[]]`,
+		"drop legacy true":          `["dropping connection after sending abci state",{"Ip":"192.0.2.1"},true]`,
+		"drop legacy false":         `["dropping connection after sending abci state",{"Ip":"192.0.2.1"},false]`,
+		"drop legacy detail":        `["dropping connection after sending abci state",{"Ip":"192.0.2.1"},"closed"]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			result := parseGossipConnectionRecord([]byte(`["2026-10-26T05:00:00",` + payload + `]`))
+			if result.reason != "" || !result.known {
+				t.Fatalf("supported shape rejected: %+v", result)
+			}
+		})
+	}
+}
+
+func TestGossipConnectionOctober26VariantsRejectMalformedPayloads(t *testing.T) {
+	for name, payload := range map[string]string{
+		"peer limit negative":         `["rejecting gossip stream because max peers reached",{"Ip":"192.0.2.1"},-1]`,
+		"peer limit negative zero":    `["rejecting gossip stream because max peers reached",{"Ip":"192.0.2.1"},-0]`,
+		"peer limit float":            `["rejecting gossip stream because max peers reached",{"Ip":"192.0.2.1"},8.0]`,
+		"peer limit exponent":         `["rejecting gossip stream because max peers reached",{"Ip":"192.0.2.1"},8e0]`,
+		"peer limit overflow":         `["rejecting gossip stream because max peers reached",{"Ip":"192.0.2.1"},18446744073709551616]`,
+		"peer limit null":             `["rejecting gossip stream because max peers reached",{"Ip":"192.0.2.1"},null]`,
+		"peer limit string":           `["rejecting gossip stream because max peers reached",{"Ip":"192.0.2.1"},"8"]`,
+		"peer limit boolean":          `["rejecting gossip stream because max peers reached",{"Ip":"192.0.2.1"},true]`,
+		"peer limit array":            `["rejecting gossip stream because max peers reached",{"Ip":"192.0.2.1"},[]]`,
+		"peer limit object":           `["rejecting gossip stream because max peers reached",{"Ip":"192.0.2.1"},{}]`,
+		"peer limit null peer":        `["rejecting gossip stream because max peers reached",null,8]`,
+		"peer limit empty peer":       `["rejecting gossip stream because max peers reached",{},8]`,
+		"peer limit empty IP":         `["rejecting gossip stream because max peers reached",{"Ip":""},8]`,
+		"peer limit blank IP":         `["rejecting gossip stream because max peers reached",{"Ip":" \t"},8]`,
+		"peer limit null IP":          `["rejecting gossip stream because max peers reached",{"Ip":null},8]`,
+		"peer limit numeric IP":       `["rejecting gossip stream because max peers reached",{"Ip":1},8]`,
+		"peer limit extra peer":       `["rejecting gossip stream because max peers reached",{"Ip":"192.0.2.1","extra":0},8]`,
+		"peer limit duplicate IP":     `["rejecting gossip stream because max peers reached",{"Ip":"192.0.2.1","Ip":"192.0.2.1"},8]`,
+		"peer limit extra field":      `["rejecting gossip stream because max peers reached",{"Ip":"192.0.2.1"},8,0]`,
+		"drop missing peer":           `["dropping connection after sending abci state"]`,
+		"drop null peer":              `["dropping connection after sending abci state",null]`,
+		"drop empty peer":             `["dropping connection after sending abci state",{}]`,
+		"drop string peer":            `["dropping connection after sending abci state","192.0.2.1"]`,
+		"drop null IP":                `["dropping connection after sending abci state",{"Ip":null}]`,
+		"drop empty IP":               `["dropping connection after sending abci state",{"Ip":""}]`,
+		"drop blank IP":               `["dropping connection after sending abci state",{"Ip":" \t"}]`,
+		"drop extra peer":             `["dropping connection after sending abci state",{"Ip":"192.0.2.1","extra":0}]`,
+		"drop duplicate IP":           `["dropping connection after sending abci state",{"Ip":"192.0.2.1","Ip":"192.0.2.1"}]`,
+		"drop null suffix":            `["dropping connection after sending abci state",{"Ip":"192.0.2.1"},null]`,
+		"drop numeric suffix":         `["dropping connection after sending abci state",{"Ip":"192.0.2.1"},8]`,
+		"object only finished checks": `["finished checks",{"Ip":"192.0.2.1"}]`,
+		"integer sending state":       `["sending abci_state",{"Ip":"192.0.2.1"},8]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			result := parseGossipConnectionRecord([]byte(`["2026-10-26T05:00:00",` + payload + `]`))
+			if result.reason != "payload" {
+				t.Fatalf("malformed shape accepted: %+v", result)
+			}
+		})
+	}
+}
+
+func TestGossipConnectionOctober26VariantsPublishKnownEvents(t *testing.T) {
+	for _, payload := range []string{
+		`["rejecting gossip stream because max peers reached",{"Ip":"192.0.2.1"},8]`,
+		`["dropping connection after sending abci state",{"Ip":"192.0.2.1"}]`,
+	} {
+		metrics.RegisterSource(metrics.SourceGossipConnections, true)
+		resolveOK := false
+		publishGossipConnectionLine(&resolveOK, gossipConnectionParseResult{reason: "payload"}, time.Unix(1, 0))
+		metrics.PublishMonitorHealthSnapshot()
+		assertGossipConnectionSourceState(t, 1, 1, 0)
+
+		result := parseGossipConnectionRecord([]byte(`["2026-10-26T05:00:00",` + payload + `]`))
+		if result.reason != "" || !result.known {
+			t.Fatalf("observed shape rejected: %+v", result)
+		}
+		events := metrics.HLP2PGossipEventsTotal.WithLabelValues(result.event)
+		errors := metrics.HLExporterSourceErrorsTotal.WithLabelValues(string(metrics.SourceGossipConnections), string(metrics.SourceFailureSchema))
+		beforeEvents, beforeErrors := validatorMetricValue(t, events), validatorMetricValue(t, errors)
+		beforeUnknown := validatorMetricValue(t, metrics.HLP2PGossipUnknownEventsTotal)
+		publishGossipConnectionLine(&resolveOK, result, time.Unix(2, 0))
+		metrics.PublishMonitorHealthSnapshot()
+		assertGossipConnectionSourceState(t, 1, 1, 1)
+		if delta := validatorMetricValue(t, events) - beforeEvents; delta != 1 {
+			t.Fatalf("event delta=%v, want 1", delta)
+		}
+		if got := validatorMetricValue(t, errors); got != beforeErrors {
+			t.Fatalf("valid event added schema errors: %v -> %v", beforeErrors, got)
+		}
+		if got := validatorMetricValue(t, metrics.HLP2PGossipUnknownEventsTotal); got != beforeUnknown {
+			t.Fatalf("known event entered unknown bucket: %v -> %v", beforeUnknown, got)
+		}
+		if got := hostMetricValue(t, metrics.HLExporterSourceTimestampSeconds.WithLabelValues(string(metrics.SourceGossipConnections))); got != float64(result.sourceTime.Unix()) {
+			t.Fatalf("source timestamp=%v, want %v", got, result.sourceTime.Unix())
+		}
+	}
+}
+
 func TestParseGossipConnectionLine_KnownEvents(t *testing.T) {
 	cases := []struct {
 		name string

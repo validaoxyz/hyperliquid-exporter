@@ -218,11 +218,7 @@ func validKnownGossipPayload(tag string, inner []json.RawMessage) bool {
 		if validGossipIPFlagPayload(inner, false) || validGossipStringArrayPayload(inner) {
 			return true
 		}
-		if len(inner) != 3 || !rawExactIPObject(inner[1]) {
-			return false
-		}
-		var value uint64
-		return unmarshalRequiredJSON(inner[2], &value) == nil
+		return validGossipIPUnsignedIntegerPayload(inner)
 	case "successfully sent abci_state":
 		// The current Testnet record adds a nonnegative numeric field. It is
 		// validation-only; its units are not established by the log schema.
@@ -235,9 +231,10 @@ func validKnownGossipPayload(tag string, inner []json.RawMessage) bool {
 	case "finished checks", "sending abci_state":
 		return validGossipIPFlagPayload(inner, false)
 	case "dropping connection after sending abci state":
-		// Current mainnet can use a short string in the third field while
-		// retained generations use a bool. The payload is validation-only;
-		// neither value becomes a metric label.
+		// Current Mainnet also emits the IP object without a trailing detail.
+		if len(inner) == 2 {
+			return rawExactIPObject(inner[1])
+		}
 		return validGossipIPBoolOrStringPayload(inner)
 	case "sending evm kvs", "marking node_ip as verified",
 		"closing gossip stream because peer is already connected":
@@ -262,6 +259,10 @@ func validKnownGossipPayload(tag string, inner []json.RawMessage) bool {
 		var flag bool
 		return unmarshalRequiredJSON(inner[2], &flag) == nil
 	case "rejecting gossip stream because max peers reached":
+		// The unsigned integer is validation-only; its units are not inferred.
+		if validGossipIPUnsignedIntegerPayload(inner) {
+			return true
+		}
 		if len(inner) == 2 {
 			return rawJSONObject(inner[1])
 		}
@@ -282,6 +283,14 @@ func validKnownGossipPayload(tag string, inner []json.RawMessage) bool {
 	default:
 		return len(inner) == 2 && rawJSONObject(inner[1])
 	}
+}
+
+func validGossipIPUnsignedIntegerPayload(inner []json.RawMessage) bool {
+	if len(inner) != 3 || !rawExactIPObject(inner[1]) {
+		return false
+	}
+	var value uint64
+	return unmarshalRequiredJSON(inner[2], &value) == nil
 }
 
 func validGossipIPFlagPayload(inner []json.RawMessage, allowObjectOnly bool) bool {

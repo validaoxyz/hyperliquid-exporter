@@ -5,6 +5,10 @@ results in CI or internal records. See docs/releasing.md. -->
 
 ## [Unreleased]
 
+### Fixed
+
+- Read updated gossip peer limit and disconnect records so current Mainnet nodes report those events without schema errors.
+
 ## [v4.1.10] - 2026-10-26
 
 ### Fixed
