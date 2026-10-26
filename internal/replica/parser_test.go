@@ -245,6 +245,88 @@ func TestParseReplicaSetGlobalData(t *testing.T) {
 	}
 }
 
+func TestParseReplicaValidatorVoteBooleanData(t *testing.T) {
+	for name, response := range map[string]string{
+		"true":                    `{"type":"validatorVote","data":true}`,
+		"false":                   `{"type":"validatorVote","data":false}`,
+		"whitespace":              `{"data": false, "type": "validatorVote"}`,
+		"case insensitive keys":   `{"TYPE":"validatorVote","DATA":true}`,
+		"repeated boolean":        `{"type":"validatorVote","data":true,"data":false}`,
+		"null before boolean":     `{"type":"validatorVote","data":null,"data":false}`,
+		"last type wins":          `{"type":"other","type":"validatorVote","data":true}`,
+		"null preserves type":     `{"type":"validatorVote","type":null,"data":true}`,
+		"unrelated field ignored": `{"type":"validatorVote","data":true,"detail":"opaque"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw := json.RawMessage(`{"Full":[["constructed",[{"res":{"status":"ok","response":` + response + `}}]]]}`)
+			got := parseReplicaResponses(raw, 1)
+			if got.Coverage != "available" || got.Records != 1 || got.CountRelation != "equal" || got.MalformedRecords != 0 || got.MalformedContainers != 0 || !reflect.DeepEqual(got.ActionStatuses, map[string]int{"ok": 1}) || len(got.Outcomes) != 0 {
+				t.Fatalf("validatorVote boolean data must count only its envelope status: %+v", got)
+			}
+		})
+	}
+}
+
+func TestParseReplicaValidatorVoteBooleanDataRejectsUnsupportedShapes(t *testing.T) {
+	for name, record := range map[string]string{
+		"different type":          `{"status":"ok","response":{"type":"future","data":true}}`,
+		"setGlobal type":          `{"status":"ok","response":{"type":"setGlobal","data":true}}`,
+		"case sensitive type":     `{"status":"ok","response":{"type":"ValidatorVote","data":true}}`,
+		"missing type":            `{"status":"ok","response":{"data":true}}`,
+		"null type":               `{"status":"ok","response":{"type":null,"data":true}}`,
+		"nonstring type":          `{"status":"ok","response":{"type":true,"data":true}}`,
+		"error status":            `{"status":"err","response":{"type":"validatorVote","data":true}}`,
+		"other status":            `{"status":"future","response":{"type":"validatorVote","data":false}}`,
+		"missing status":          `{"response":{"type":"validatorVote","data":true}}`,
+		"null status":             `{"status":null,"response":{"type":"validatorVote","data":true}}`,
+		"number data":             `{"status":"ok","response":{"type":"validatorVote","data":1}}`,
+		"string data":             `{"status":"ok","response":{"type":"validatorVote","data":"true"}}`,
+		"empty array":             `{"status":"ok","response":{"type":"validatorVote","data":[]}}`,
+		"boolean array":           `{"status":"ok","response":{"type":"validatorVote","data":[true]}}`,
+		"null statuses":           `{"status":"ok","response":{"type":"validatorVote","data":{"statuses":null}}}`,
+		"invalid nested status":   `{"status":"ok","response":{"type":"validatorVote","data":{"statuses":["success",null]}}}`,
+		"boolean then null":       `{"status":"ok","response":{"type":"validatorVote","data":true,"data":null}}`,
+		"boolean then string":     `{"status":"ok","response":{"type":"validatorVote","data":true,"data":"opaque"}}`,
+		"string then boolean":     `{"status":"ok","response":{"type":"validatorVote","data":"opaque","data":true}}`,
+		"object then boolean":     `{"status":"ok","response":{"type":"validatorVote","data":{},"data":true}}`,
+		"boolean then object":     `{"status":"ok","response":{"type":"validatorVote","data":true,"data":{}}}`,
+		"invalid type then valid": `{"status":"ok","response":{"type":1,"type":"validatorVote","data":true}}`,
+		"valid type then invalid": `{"status":"ok","response":{"type":"validatorVote","type":1,"data":true}}`,
+		"last type is different":  `{"status":"ok","response":{"type":"validatorVote","type":"future","data":true}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw := json.RawMessage(`{"Full":[["constructed",[{"res":` + record + `}]]]}`)
+			got := parseReplicaResponses(raw, 1)
+			if got.Coverage != "malformed" || got.Records != 1 || got.CountRelation != "equal" || got.MalformedRecords != 1 || got.MalformedContainers != 0 || len(got.ActionStatuses) != 0 || len(got.Outcomes) != 0 {
+				t.Fatalf("unsupported validatorVote fallback must not publish partial status or outcomes: %+v", got)
+			}
+		})
+	}
+}
+
+func TestParseReplicaValidatorVotePreservesGenericObjectPath(t *testing.T) {
+	for name, response := range map[string]string{
+		"missing data":   `{"type":"validatorVote"}`,
+		"null data":      `{"type":"validatorVote","data":null}`,
+		"object data":    `{"type":"validatorVote","data":{}}`,
+		"empty statuses": `{"type":"validatorVote","data":{"statuses":[]}}`,
+	} {
+		for _, status := range []string{"ok", "err", "future"} {
+			t.Run(name+"/"+status, func(t *testing.T) {
+				raw := json.RawMessage(`{"Full":[["constructed",[{"res":{"status":"` + status + `","response":` + response + `}}]]]}`)
+				got := parseReplicaResponses(raw, 1)
+				label := status
+				if label == "future" {
+					label = "other"
+				}
+				if got.Coverage != "available" || got.Records != 1 || got.MalformedRecords != 0 || got.MalformedContainers != 0 || !reflect.DeepEqual(got.ActionStatuses, map[string]int{label: 1}) || len(got.Outcomes) != 0 {
+					t.Fatalf("validatorVote must preserve the existing generic object path: %+v", got)
+				}
+			})
+		}
+	}
+}
+
 func TestParseReplicaResponsesIsOrderIndependentAndCountOnly(t *testing.T) {
 	recordA := `{"user":"0xsecret-account","res":{"status":"ok","response":{"type":"order","data":{"statuses":["success",{"resting":{"oid":"secret"}},{"error":"free text"},{"waitingForTrigger":{}},{"future":{"payload":"x"}}]}}}}`
 	recordB := `{"user":null,"res":{"status":"future-status","response":"unbounded text ignored"}}`

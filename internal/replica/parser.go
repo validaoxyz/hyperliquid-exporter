@@ -380,6 +380,15 @@ func parseReplicaResponseRecord(raw json.RawMessage, out *ResponseMetrics) bool 
 			out.ActionStatuses[statusLabel]++
 			return true
 		}
+		// validatorVote data has a boolean shape. Count only the envelope status.
+		var validatorVoteResponse struct {
+			Type string `json:"type"`
+			Data *bool  `json:"data"`
+		}
+		if status == "ok" && json.Unmarshal(result.Response, &validatorVoteResponse) == nil && validatorVoteResponse.Type == "validatorVote" && validatorVoteResponse.Data != nil {
+			out.ActionStatuses[statusLabel]++
+			return true
+		}
 		// String responses are valid error/default responses with no nested
 		// execution-status array.
 		var responseText string
