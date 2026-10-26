@@ -7,6 +7,18 @@ import (
 	"testing"
 )
 
+func TestParseMempoolTxsClassifiesCDeposit2(t *testing.T) {
+	line := []byte(`["2026-10-26T06:28:13.000000000",{"tx_hash":"constructed","signed_actions":[{"action":{"type":"cDeposit2","wei":1}},{"action":{"type":"cDeposit3","wei":1}}]}]`)
+	got, reason, ok := parseMempoolTxsLineDetailed(line)
+	if !ok || reason != "" {
+		t.Fatalf("parse = %v/%s", ok, reason)
+	}
+	want := map[string]int{"cDeposit2": 1, "other": 1}
+	if !reflect.DeepEqual(got.actionCounts, want) || !reflect.DeepEqual(got.operationCounts, want) || got.signedActions != 2 || got.operations != 2 || !reflect.DeepEqual(got.parserEvents, map[string]int{"unknown_action": 1}) {
+		t.Fatalf("cDeposit2 classification or unknown-action reporting is incorrect: %+v", got)
+	}
+}
+
 func TestParseMempoolTxsClassifiesVoteAbciDigest(t *testing.T) {
 	line := []byte(`["2026-10-02T08:15:10.000000000",{"tx_hash":"constructed","signed_actions":[{"action":{"type":"voteAbciDigest","height":100,"abciDigest":"constructed","signature":"constructed"}},{"action":{"type":"unrecognizedFutureAction"}}]}]`)
 	got, reason, ok := parseMempoolTxsLineDetailed(line)

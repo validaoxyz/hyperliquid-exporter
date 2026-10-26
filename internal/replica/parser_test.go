@@ -157,6 +157,19 @@ func TestExtractMetricsRejectsZeroActionBundleAndMissingDiscriminant(t *testing.
 	}
 }
 
+func TestExtractMetricsClassifiesCDeposit2(t *testing.T) {
+	p, block := parseReplicaFixture(t, `{"height":100,"abci_block":{"time":"2026-10-26T06:28:13Z","round":200,"proposer":"constructed","signed_action_bundles":[["bundle",{"signed_actions":[{"action":{"type":"cDeposit2","wei":1}},{"action":{"type":"cDeposit3","wei":1}}]}]]}}`)
+	defer p.ReturnBlock(block)
+	got, err := p.ExtractMetrics(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int{"cDeposit2": 1, "other": 1}
+	if !reflect.DeepEqual(got.ActionCounts, want) || !reflect.DeepEqual(got.OperationCounts, want) || got.TotalActions != 2 || got.TotalOperations != 2 || !reflect.DeepEqual(got.ParserEvents, map[string]int{"unknown_action": 1}) {
+		t.Fatalf("cDeposit2 classification or unknown-action reporting is incorrect: %+v", got)
+	}
+}
+
 func TestExtractMetricsClassifiesVoteAbciDigest(t *testing.T) {
 	p, block := parseReplicaFixture(t, `{"height":100,"abci_block":{"time":"2026-10-02T08:15:10Z","round":200,"proposer":"0x1111..1111","signed_action_bundles":[["bundle",{"signed_actions":[{"action":{"type":"voteAbciDigest","height":100,"abciDigest":"constructed","signature":"constructed"}},{"action":{"type":"unrecognizedFutureAction"}}]}]]}}`)
 	defer p.ReturnBlock(block)

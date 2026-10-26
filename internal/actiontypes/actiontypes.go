@@ -28,7 +28,7 @@ var known = map[string]struct{}{
 	"validatorL1UpdateReferenceOracle": {}, "validatorL1Vote": {}, "voteL1Hash": {},
 
 	// Previously fixture-backed compatibility vocabulary.
-	"cDeposit": {}, "convertToMultiSigUser": {}, "createSubAccount": {},
+	"cDeposit": {}, "cDeposit2": {}, "convertToMultiSigUser": {}, "createSubAccount": {},
 	"createVault": {}, "cWithdraw": {}, "evmUserSpotTransfer": {},
 	"finalizeEvmContract": {}, "linkStakingUser": {}, "registerReferrer": {},
 	"reserveRequestWeight": {}, "setDisplayName": {}, "spotUser": {},
@@ -52,7 +52,7 @@ func Category(action string) string {
 		return "trading"
 	case "usdClassTransfer", "usdSend", "spotSend", "sendAsset", "agentSendAsset", "sendToEvmWithData",
 		"vaultTransfer", "vaultDistribute", "subAccountTransfer", "subAccountSpotTransfer",
-		"cDeposit", "cWithdraw", "withdraw3", "spotUser":
+		"cDeposit", "cDeposit2", "cWithdraw", "withdraw3", "spotUser":
 		return "transfer"
 	case "approveAgent", "approveBuilderFee", "setReferrer", "updateLeverage",
 		"updateIsolatedMargin", "createSubAccount", "subAccountModify", "registerReferrer",
