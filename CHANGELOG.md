@@ -5,6 +5,12 @@ results in CI or internal records. See docs/releasing.md. -->
 
 ## [Unreleased]
 
+## [v4.1.16] - 2026-10-26
+
+### Changed
+
+- Reduce temporary allocations during mempool and replica response parsing.
+
 ## [v4.1.15] - 2026-10-26
 
 ### Fixed
