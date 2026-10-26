@@ -1,0 +1,26 @@
+{
+  "height": 1,
+  "abci_block": {
+    "time": "2026-10-01T00:00:00.000000001Z",
+    "round": 2,
+    "proposer": "constructed",
+    "signed_action_bundles": [
+      ["constructed", {"signed_actions": [
+        {"action": {"type": "spotDeploy"}},
+        {"action": {"type": "spotDeploy"}},
+        {"action": {"type": "govPropose"}},
+        {"action": {"type": "govVote"}}
+      ]}]
+    ]
+  },
+  "resps": {
+    "Full": [
+      ["constructed", [
+        {"res": {"status": "ok", "response": {"type": "token", "data": 7}}},
+        {"res": {"status": "ok", "response": {"type": "spot", "data": 11}}},
+        {"res": {"status": "ok", "response": {"type": "governanceProposal", "data": "0x1111111111111111111111111111111111111111111111111111111111111111"}}},
+        {"res": {"status": "ok", "response": {"type": "default"}}}
+      ]]
+    ]
+  }
+}

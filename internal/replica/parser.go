@@ -389,15 +389,30 @@ func parseReplicaResponseRecord(raw json.RawMessage, out *ResponseMetrics) bool 
 			out.ActionStatuses[statusLabel]++
 			return true
 		}
-		// createSubAccount returns an address string, not execution outcomes.
-		var createSubAccountResponse struct {
+		// Identifier responses count only their envelope status.
+		var numericIdentifierResponse struct {
+			Type string  `json:"type"`
+			Data *uint64 `json:"data"`
+		}
+		if status == "ok" && json.Unmarshal(result.Response, &numericIdentifierResponse) == nil && numericIdentifierResponse.Data != nil && (numericIdentifierResponse.Type == "token" || numericIdentifierResponse.Type == "spot") {
+			out.ActionStatuses[statusLabel]++
+			return true
+		}
+		var hexIdentifierResponse struct {
 			Type string  `json:"type"`
 			Data *string `json:"data"`
 		}
-		if status == "ok" && json.Unmarshal(result.Response, &createSubAccountResponse) == nil && createSubAccountResponse.Type == "createSubAccount" && createSubAccountResponse.Data != nil {
-			address := *createSubAccountResponse.Data
-			if len(address) == 42 && address[:2] == "0x" {
-				if _, err := hex.DecodeString(address[2:]); err == nil {
+		if status == "ok" && json.Unmarshal(result.Response, &hexIdentifierResponse) == nil && hexIdentifierResponse.Data != nil {
+			value := *hexIdentifierResponse.Data
+			width := 0
+			switch hexIdentifierResponse.Type {
+			case "createSubAccount":
+				width = 42
+			case "governanceProposal":
+				width = 66
+			}
+			if width != 0 && len(value) == width && value[:2] == "0x" {
+				if _, err := hex.DecodeString(value[2:]); err == nil {
 					out.ActionStatuses[statusLabel]++
 					return true
 				}

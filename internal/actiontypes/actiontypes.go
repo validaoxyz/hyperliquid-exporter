@@ -22,6 +22,7 @@ var known = map[string]struct{}{
 	// Current/retained replica_cmds vocabulary.
 	"activateOutcomeDeployer": {}, "authorizeAqav2Role": {}, "CSignerAction": {},
 	"CValidatorAction": {}, "deployerSendToEvmForFrozenUser": {}, "gossipPriorityBid": {},
+	"govPropose": {}, "govVote": {},
 	"hip3LiquidatorTransfer": {}, "l1ValidatorVoteBridgeDeposit": {}, "liquidate": {},
 	"outcomeDeploy": {}, "reassessFees": {}, "stakingLinkDisableTradingUser": {}, "startFeeTrial": {},
 	"userOutcome": {}, "userPortfolioMargin": {}, "validatorL1Status": {}, "validatorL1Stream": {},
@@ -67,7 +68,7 @@ func Category(action string) string {
 		"CSignerAction", "CValidatorAction", "ValidatorSignWithdrawalAction",
 		"NetChildVaultPositionsAction", "validatorL1UpdateReferenceOracle",
 		"validatorL1Vote", "validatorL1Status", "validatorL1Stream", "voteL1Hash", "voteAbciDigest",
-		"l1ValidatorVoteBridgeDeposit", "gossipPriorityBid":
+		"l1ValidatorVoteBridgeDeposit", "gossipPriorityBid", "govPropose", "govVote":
 		return "governance"
 	case "claimRewards", "reserveRequestWeight":
 		return "rewards"
