@@ -5,6 +5,12 @@ results in CI or internal records. See docs/releasing.md. -->
 
 ## [Unreleased]
 
+## [v4.1.15] - 2026-10-26
+
+### Fixed
+
+- Count successful `createSubAccount` replica responses containing an address without reporting them as malformed or adding execution outcomes.
+
 ## [v4.1.14] - 2026-10-26
 
 ### Fixed
