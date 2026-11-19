@@ -5,6 +5,13 @@ results in CI or internal records. See docs/releasing.md. -->
 
 ## [Unreleased]
 
+## [v4.1.18] - 2026-11-19
+
+### Fixed
+
+- Replica and mempool metrics now recognize an additional testnet action previously counted as `other`.
+- Build with Go 1.26.11 to fix an HTTP server crash in the standard library. [GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859)
+
 ## [v4.1.17] - 2026-10-27
 
 ### Fixed

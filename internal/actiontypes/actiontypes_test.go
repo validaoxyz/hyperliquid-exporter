@@ -22,6 +22,8 @@ func TestNormalizeAndCategoryAreBounded(t *testing.T) {
 		{raw: "cDeposit", label: "cDeposit", known: true, category: "transfer"},
 		{raw: "cDeposit2", label: "cDeposit2", known: true, category: "transfer"},
 		{raw: "cDeposit3", label: Other, known: false, category: Other},
+		{raw: "cUserModify", label: "cUserModify", known: true, category: "settings"},
+		{raw: "cUserModify2", label: Other, known: false, category: Other},
 		{raw: "noop", label: "noop", known: true, category: "system"},
 		{raw: "random-address-or-payload", label: Other, known: false, category: Other},
 		{raw: "", label: Other, known: false, category: Other},

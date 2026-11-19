@@ -21,7 +21,7 @@ var known = map[string]struct{}{
 
 	// Current/retained replica_cmds vocabulary.
 	"activateOutcomeDeployer": {}, "authorizeAqav2Role": {}, "CSignerAction": {},
-	"CValidatorAction": {}, "deployerSendToEvmForFrozenUser": {}, "gossipPriorityBid": {},
+	"CValidatorAction": {}, "cUserModify": {}, "deployerSendToEvmForFrozenUser": {}, "gossipPriorityBid": {},
 	"govPropose": {}, "govVote": {},
 	"hip3LiquidatorTransfer": {}, "l1ValidatorVoteBridgeDeposit": {}, "liquidate": {},
 	"outcomeDeploy": {}, "reassessFees": {}, "stakingLinkDisableTradingUser": {}, "startFeeTrial": {},
@@ -61,7 +61,7 @@ func Category(action string) string {
 		"topUpIsolatedOnlyMargin", "convertToMultiSigUser", "multiSig",
 		"agentEnableDexAbstraction", "agentSetAbstraction", "userSetAbstraction",
 		"userDexAbstraction", "authorizeAqav2Role", "stakingLinkDisableTradingUser",
-		"userPortfolioMargin":
+		"userPortfolioMargin", "cUserModify":
 		return "settings"
 	case "tokenDelegate", "voteAppHash", "VoteEthDepositAction",
 		"VoteEthFinalizedWithdrawalAction", "VoteGlobalAction", "SetGlobalAction",
